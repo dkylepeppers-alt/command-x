@@ -1,0 +1,12 @@
+{
+    "display_name": "Command-X Phone",
+    "loading_order": 20,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "Kyle & Bucky",
+    "version": "0.7.0",
+    "homePage": "local",
+    "description": "Emulates a smartphone with the Command-X neural messaging app and a standard Messages app. Features NPC contact detection and command mode drawer."
+}
