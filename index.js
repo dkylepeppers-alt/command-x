@@ -487,6 +487,12 @@ function getContactsFromContext() {
         .filter(c => (c.name || '').toLowerCase() !== userName)
         .map((c, i) => {
             const npcData = storedNpcs.find(n => n.name.toLowerCase() === (c.name || '').toLowerCase());
+            // Use ST thumbnail if character has an avatar file
+            let thumbUrl = null;
+            if (c.avatar && typeof c.avatar === 'string' && !c.avatar.startsWith('none')) {
+                try { thumbUrl = `/thumbnail?type=avatar&file=${encodeURIComponent(c.avatar)}`; }
+                catch { /* ignore */ }
+            }
             return {
                 id: c.avatar || `char_${i}`,
                 name: c.name || `Character ${i + 1}`,
@@ -498,7 +504,7 @@ function getContactsFromContext() {
                 location: npcData?.location || null,
                 relationship: npcData?.relationship || null,
                 thoughts: npcData?.thoughts || null,
-                avatarUrl: npcData?.avatarUrl || null,
+                avatarUrl: npcData?.avatarUrl || thumbUrl || null,
             };
         });
     // Merge stored NPCs (skip duplicates by name + skip user persona)
@@ -559,6 +565,13 @@ function sendImmediate(contactName, chatText, isNeural, cmdType) {
    HTML BUILDERS
    ====================================================================== */
 
+function avatarHTML(c, sizeClass = '') {
+    if (c.avatarUrl) {
+        return `<div class="cx-avatar ${sizeClass}" style="background:${c.gradient}"><img class="cx-avatar-img" src="${c.avatarUrl}" alt="" onerror="this.style.display='none';this.nextSibling.style.display=''"><span style="display:none">${c.emoji}</span></div>`;
+    }
+    return `<div class="cx-avatar ${sizeClass}" style="background:${c.gradient}">${c.emoji}</div>`;
+}
+
 function contactRowHTML(c, i, app) {
     const msgs = loadMessages(c.name);
     const last = msgs.length ? msgs[msgs.length - 1] : null;
@@ -568,7 +581,7 @@ function contactRowHTML(c, i, app) {
 
     return `
     <div class="cx-contact-row" data-idx="${i}" data-app="${app}" data-cid="${c.id}" data-cname="${c.name}">
-        <div class="cx-avatar" style="background:${c.gradient}">${c.emoji}</div>
+        ${avatarHTML(c)}
         <div class="cx-contact-info">
             <div class="cx-contact-name">${c.name} ${npcBadge}</div>
             <div class="cx-contact-preview">${escHtml(previewTrunc)}</div>
@@ -670,7 +683,7 @@ function buildPhone() {
                 ${hasContacts ? contacts.map(c => `
                 <div class="cx-profile-card" data-pname="${c.name}">
                     <div class="cx-profile-top">
-                        <div class="cx-avatar cx-avatar-lg" style="background:${c.gradient}">${c.emoji}</div>
+                        ${avatarHTML(c, 'cx-avatar-lg')}
                         <div class="cx-profile-name-col">
                             <div class="cx-profile-name">${c.name} ${c.isNpc ? '<span class="cx-npc-badge">NPC</span>' : ''}</div>
                             <div class="cx-profile-status">${c.mood || (c.online ? '🟢 Online' : '⚫ Offline')}</div>

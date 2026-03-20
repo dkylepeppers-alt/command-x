@@ -215,7 +215,11 @@
 .cx-avatar {
     width: 42px; height: 42px; border-radius: 50%; display: flex; align-items: center;
     justify-content: center; font-size: 17px; margin-right: 12px; flex-shrink: 0;
-    border: 2px solid var(--cx-green);
+    border: 2px solid var(--cx-green); overflow: hidden; position: relative;
+}
+.cx-avatar-img {
+    width: 100%; height: 100%; object-fit: cover; border-radius: 50%;
+    position: absolute; top: 0; left: 0;
 }
 .cx-contact-info { flex: 1; min-width: 0; }
 .cx-contact-name { color: #fff; font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
