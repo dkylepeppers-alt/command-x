@@ -117,12 +117,27 @@ function flushQueue() {
    We instruct the LLM to wrap phone replies in [sms]…[/sms].
    ====================================================================== */
 
-const SMS_TAG_RE = /\[sms(?:\s+from="([^"]*)")?\]([\s\S]*?)\[\/sms\]/gi;
+const SMS_TAG_RE = /\[sms([^\]]*)\]([\s\S]*?)\[\/sms\]/gi;
+const SMS_ATTR_RE = /(\w+)="([^"]*)"/g;
+
+/**
+ * Parse attributes from an [sms ...] tag's attribute string.
+ */
+function parseSmsAttrs(attrStr) {
+    const attrs = {};
+    if (!attrStr) return attrs;
+    let m;
+    SMS_ATTR_RE.lastIndex = 0;
+    while ((m = SMS_ATTR_RE.exec(attrStr)) !== null) {
+        attrs[m[1].toLowerCase()] = m[2].trim();
+    }
+    return attrs;
+}
 
 /**
  * Extract all [sms]…[/sms] blocks from a message string.
- * Supports optional from attribute: [sms from="Name"]...[/sms]
- * Returns array of {from, text} objects, or null if no tags found.
+ * Supports optional from/to attributes: [sms from="Name" to="user"]...[/sms]
+ * Returns array of {from, to, text} objects, or null if no tags found.
  */
 function extractSmsBlocks(raw) {
     if (!raw) return null;
@@ -130,9 +145,9 @@ function extractSmsBlocks(raw) {
     let m;
     SMS_TAG_RE.lastIndex = 0;
     while ((m = SMS_TAG_RE.exec(raw)) !== null) {
-        const from = m[1] ? m[1].trim() : null;
+        const attrs = parseSmsAttrs(m[1]);
         const text = m[2].trim();
-        if (text) blocks.push({ from, text });
+        if (text) blocks.push({ from: attrs.from || null, to: attrs.to || null, text });
     }
     return blocks.length ? blocks : null;
 }
@@ -154,9 +169,10 @@ function hideSmsTagsInDom(mesId) {
     SMS_TAG_RE.lastIndex = 0;
     if (SMS_TAG_RE.test(el.innerHTML)) {
         SMS_TAG_RE.lastIndex = 0;
-        el.innerHTML = el.innerHTML.replace(SMS_TAG_RE, (_match, from, inner) => {
+        el.innerHTML = el.innerHTML.replace(SMS_TAG_RE, (_match, attrStr, inner) => {
+            const attrs = parseSmsAttrs(attrStr);
             const preview = inner.trim();
-            const label = from ? `📱 ${from}: ` : '📱 ';
+            const label = attrs.from ? `📱 ${attrs.from}: ` : '📱 ';
             return `<span class="cx-sms-inline" title="${preview.replace(/"/g, '&quot;')}">${label}<em>${preview.slice(0, 50)}${preview.length > 50 ? '…' : ''}</em></span>`;
         });
     }
@@ -166,7 +182,7 @@ function hideSmsTagsInDom(mesId) {
    NPC CONTACT STORE — localStorage-backed, keyed per chat
    ====================================================================== */
 
-const CONTACTS_TAG_RE = /\[contacts\]([\s\S]*?)\[\/contacts\]/gi;
+const CONTACTS_TAG_RE = /\[(?:contacts|status)\]([\s\S]*?)\[\/(?:contacts|status)\]/gi;
 
 function npcStoreKey() {
     const ctx = getContext();
@@ -185,8 +201,8 @@ function saveNpcs(npcs) {
 }
 
 /**
- * Parse [contacts] JSON from a message. Expected format:
- * [contacts][{"name":"Sarah","emoji":"👩","status":"online"}, ...][/contacts]
+ * Parse [status] (or legacy [contacts]) JSON from a message.
+ * [status][{"name":"Sarah","emoji":"👩","status":"online","mood":"😊 happy","location":"home","relationship":"friendly","thoughts":"..."}][/status]
  */
 function extractContacts(raw) {
     if (!raw) return null;
@@ -200,9 +216,13 @@ function extractContacts(raw) {
             name: c.name.trim(),
             emoji: c.emoji || '🧑',
             status: c.status || 'nearby',
+            mood: c.mood || null,
+            location: c.location || null,
+            relationship: c.relationship || null,
+            thoughts: c.thoughts || null,
         }));
     } catch (e) {
-        console.warn('[command-x] failed to parse [contacts] JSON:', e);
+        console.warn('[command-x] failed to parse [status] JSON:', e);
         return null;
     }
 }
@@ -244,7 +264,7 @@ function injectContactsPrompt() {
     const excludeNote = [userName, charName].filter(Boolean).map(n => `"${n}"`).join(' or ');
     setExtensionPrompt(
         INJECT_KEY_CONTACTS,
-        `[System: At the end of each response, include a [contacts] block listing NPCs currently present or available in the scene. Format: [contacts][{"name":"Name","emoji":"👩","status":"online"}][/contacts] — status can be "online", "offline", or "nearby". Only include side characters/NPCs who could plausibly be contacted. Do NOT include ${excludeNote || 'the user or the main character'}. If no NPCs are relevant, omit the [contacts] block entirely.]`,
+        `[System: At the end of each response, include a [status] block with a JSON array of NPCs/side characters. Format: [status][{"name":"Name","emoji":"👩","status":"online","mood":"😊 happy","location":"her apartment","relationship":"friendly","thoughts":"wondering about dinner"}][/status] — "status" can be "online"/"offline"/"nearby". "mood" is an emoji + short descriptor. "location" is where they currently are. "relationship" is how they feel about the user (friendly/neutral/hostile/romantic/etc). "thoughts" is a brief inner thought. Only include side characters/NPCs who exist in the scene. Do NOT include ${excludeNote || 'the user or the main character'}. If no NPCs are relevant, omit the [status] block entirely.]`,
         extension_prompt_types.IN_CHAT,
         2,       // depth = 2 (slightly further back than [sms])
         false,
@@ -273,11 +293,11 @@ function buildSmsInstruction(contactName, isNeural, cmdType) {
             BELIEVE: `The neural command takes effect subliminally — ${contactName} is completely unaware their perception is being rewritten. They now genuinely believe the stated thing as absolute truth, as if they always believed it. They do NOT see, read, or acknowledge any command.`,
             COMPEL: `The neural command takes effect subliminally — ${contactName} is completely unaware of any external influence. They feel an overwhelming urge driving them toward the specified behavior, but it feels entirely like their own desire. They do NOT see, read, or acknowledge any command.`,
         }[cmdType] || '';
-        return `A subliminal ${cmdType} neural command was activated targeting ${contactName}. ${cmdContext} ${contactName} responds naturally — influenced but unaware. Wrap their reply in [sms from="${contactName}"]...[/sms].`;
+        return `A subliminal ${cmdType} neural command was activated targeting ${contactName}. ${cmdContext} ${contactName} responds naturally — influenced but unaware. Wrap their reply to the user in [sms from="${contactName}" to="user"]...[/sms].`;
     } else if (isNeural) {
-        return `A subliminal neural command was activated targeting ${contactName}. They respond naturally, subtly influenced but unaware. Wrap their reply in [sms from="${contactName}"]...[/sms].`;
+        return `A subliminal neural command was activated targeting ${contactName}. They respond naturally, subtly influenced but unaware. Wrap their reply to the user in [sms from="${contactName}" to="user"]...[/sms].`;
     } else {
-        return `The user texted ${contactName}. ${contactName} texts back naturally and in-character. Wrap their reply in [sms from="${contactName}"]...[/sms].`;
+        return `The user texted ${contactName}. ${contactName} texts back naturally and in-character. Wrap their reply to the user in [sms from="${contactName}" to="user"]...[/sms].`;
     }
 }
 
@@ -298,11 +318,11 @@ function injectSmsPrompt(targets) {
     if (multi) {
         instruction += ` Include a separate [sms from="Name"] block for EACH person who was texted/commanded. Each person replies independently.`;
     }
-    instruction += ` Example: *She glanced at her phone.* [sms from="${names[0]}"]hey yeah on my way[/sms] *She set it down.*`;
+    instruction += ` Example: *She glanced at her phone.* [sms from="${names[0]}" to="user"]hey yeah on my way[/sms] *She set it down.*`;
     if (multi) {
-        instruction += ` [sms from="${names[1] || names[0]}"]sounds good[/sms]`;
+        instruction += ` [sms from="${names[1] || names[0]}" to="user"]sounds good[/sms]`;
     }
-    instruction += ` — The [sms] block is phone text content only. Always include the from attribute.]`;
+    instruction += ` — The [sms] block is phone text content only. Always include from and to attributes. Only use to="user" for texts directed at the user's phone. If characters text each other, do NOT use [sms] tags — just narrate it normally.]`;
 
     setExtensionPrompt(
         INJECT_KEY,
@@ -461,20 +481,29 @@ function getContactsFromContext() {
         'linear-gradient(135deg,#55aa77,#338855)',
         'linear-gradient(135deg,#aa5577,#883355)',
     ];
-    // ST characters — filter out user persona
+    const storedNpcs = loadNpcs();
+    // ST characters — filter out user persona, merge any stored NPC state
     const contacts = chars
         .filter(c => (c.name || '').toLowerCase() !== userName)
-        .map((c, i) => ({
-            id: c.avatar || `char_${i}`,
-            name: c.name || `Character ${i + 1}`,
-            emoji: emojis[i % emojis.length],
-            gradient: gradients[i % gradients.length],
-            online: true,
-            isNpc: false,
-        }));
+        .map((c, i) => {
+            const npcData = storedNpcs.find(n => n.name.toLowerCase() === (c.name || '').toLowerCase());
+            return {
+                id: c.avatar || `char_${i}`,
+                name: c.name || `Character ${i + 1}`,
+                emoji: npcData?.emoji || emojis[i % emojis.length],
+                gradient: gradients[i % gradients.length],
+                online: true,
+                isNpc: false,
+                mood: npcData?.mood || null,
+                location: npcData?.location || null,
+                relationship: npcData?.relationship || null,
+                thoughts: npcData?.thoughts || null,
+                avatarUrl: npcData?.avatarUrl || null,
+            };
+        });
     // Merge stored NPCs (skip duplicates by name + skip user persona)
     const existingNames = new Set(contacts.map(c => c.name.toLowerCase()));
-    const npcs = loadNpcs().filter(n => (n.name || '').toLowerCase() !== userName);
+    const npcs = storedNpcs.filter(n => (n.name || '').toLowerCase() !== userName);
     for (let i = 0; i < npcs.length; i++) {
         if (existingNames.has(npcs[i].name.toLowerCase())) continue;
         contacts.push({
@@ -485,6 +514,11 @@ function getContactsFromContext() {
             online: npcs[i].status === 'online' || npcs[i].status === 'nearby',
             isNpc: true,
             npcStatus: npcs[i].status || 'nearby',
+            mood: npcs[i].mood || null,
+            location: npcs[i].location || null,
+            relationship: npcs[i].relationship || null,
+            thoughts: npcs[i].thoughts || null,
+            avatarUrl: npcs[i].avatarUrl || null,
         });
     }
     return contacts;
@@ -591,9 +625,9 @@ function buildPhone() {
                     <div class="cx-icon-img cx-icon-photos">🖼️</div>
                     <div class="cx-icon-label">Photos</div>
                 </div>
-                <div class="cx-app-icon" data-app="notes">
-                    <div class="cx-icon-img cx-icon-notes">📝</div>
-                    <div class="cx-icon-label">Notes</div>
+                <div class="cx-app-icon" data-app="profiles">
+                    <div class="cx-icon-img cx-icon-profiles">🔍</div>
+                    <div class="cx-icon-label">Profiles</div>
                 </div>
                 <div class="cx-app-icon" data-app="browser">
                     <div class="cx-icon-img cx-icon-browser">🌐</div>
@@ -622,6 +656,36 @@ function buildPhone() {
             </div>
             <div class="cx-navbar">
                 <div class="cx-nav active"><div class="cx-nav-ico">💬</div><div class="cx-nav-lbl">Chats</div></div>
+                <div class="cx-nav" data-goto="home"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
+            </div>
+        </div>
+
+        <!-- Profiles View -->
+        <div class="cx-view" data-view="profiles">
+            <div class="cx-profiles-header">
+                <div class="cx-profiles-title">Profiles</div>
+                <div class="cx-profiles-sub">Contact Intelligence</div>
+            </div>
+            <div class="cx-profiles-list">
+                ${hasContacts ? contacts.map(c => `
+                <div class="cx-profile-card" data-pname="${c.name}">
+                    <div class="cx-profile-top">
+                        <div class="cx-avatar cx-avatar-lg" style="background:${c.gradient}">${c.emoji}</div>
+                        <div class="cx-profile-name-col">
+                            <div class="cx-profile-name">${c.name} ${c.isNpc ? '<span class="cx-npc-badge">NPC</span>' : ''}</div>
+                            <div class="cx-profile-status">${c.mood || (c.online ? '🟢 Online' : '⚫ Offline')}</div>
+                        </div>
+                    </div>
+                    <div class="cx-profile-fields">
+                        ${c.location ? `<div class="cx-profile-field"><span class="cx-pf-label">📍 Location</span><span class="cx-pf-value">${escHtml(c.location)}</span></div>` : ''}
+                        ${c.relationship ? `<div class="cx-profile-field"><span class="cx-pf-label">💬 Relationship</span><span class="cx-pf-value">${escHtml(c.relationship)}</span></div>` : ''}
+                        ${c.thoughts ? `<div class="cx-profile-field"><span class="cx-pf-label">💭 Thoughts</span><span class="cx-pf-value cx-pf-italic">${escHtml(c.thoughts)}</span></div>` : ''}
+                        ${!c.location && !c.relationship && !c.thoughts ? '<div class="cx-profile-field"><span class="cx-pf-value" style="color:#666">No intel yet</span></div>' : ''}
+                    </div>
+                </div>`).join('') : '<div style="padding:20px;color:#666;text-align:center">No contacts in current chat</div>'}
+            </div>
+            <div class="cx-navbar">
+                <div class="cx-nav active"><div class="cx-nav-ico">🔍</div><div class="cx-nav-lbl">Profiles</div></div>
                 <div class="cx-nav" data-goto="home"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
             </div>
         </div>
@@ -826,7 +890,14 @@ function wirePhone() {
     phoneContainer.querySelectorAll('.cx-app-icon[data-app]').forEach(icon =>
         icon.addEventListener('click', () => {
             const app = icon.dataset.app;
-            if (app === 'cmdx') switchView(app);
+            if (app === 'cmdx' || app === 'profiles') switchView(app);
+        })
+    );
+    // Profile card → open chat with that contact
+    phoneContainer.querySelectorAll('.cx-profile-card[data-pname]').forEach(card =>
+        card.addEventListener('click', () => {
+            const name = card.dataset.pname;
+            if (name) openChat(name, 'cmdx');
         })
     );
     phoneContainer.querySelectorAll('.cx-nav[data-goto]').forEach(nav =>
@@ -1081,16 +1152,33 @@ jQuery(async () => {
 
             // ── [sms] FIRST — must run before [contacts] which can trigger rebuildPhone ──
             const smsBlocks = extractSmsBlocks(msg.mes);
+            const userName = (freshCtx.name1 || '').toLowerCase();
             if (smsBlocks) {
                 for (const block of smsBlocks) {
+                    // Filter: only capture texts directed at the user's phone.
+                    // If to="user" or to=userName → capture. If to=someone else → skip.
+                    // If no to attribute: capture only if we're awaitingReply (we asked for it).
+                    if (block.to) {
+                        const toName = block.to.toLowerCase();
+                        if (toName !== 'user' && toName !== userName && toName !== 'me') {
+                            // This text is between NPCs, not to us — skip
+                            console.log(`[${EXT}] Skipping [sms] to="${block.to}" (not for user)`);
+                            continue;
+                        }
+                    } else if (!awaitingReply) {
+                        // No to attribute and we didn't ask for a text — likely NPC-to-NPC
+                        // Skip unless it's from a known contact (unsolicited incoming text)
+                        const allContacts = getContactsFromContext();
+                        const fromKnown = block.from && allContacts.some(c => c.name.toLowerCase() === block.from.toLowerCase());
+                        if (!fromKnown) {
+                            console.log(`[${EXT}] Skipping [sms] with no to attr and unknown sender "${block.from}"`);
+                            continue;
+                        }
+                    }
+
                     // Determine which contact this SMS belongs to.
-                    // 1. If the tag has a from="Name" attribute, use it
-                    // 2. If we're awaiting a reply, attribute to the contact we texted
-                    // 3. Try matching msg.name against known contacts
-                    // 4. Fall back to currently open chat or first contact
                     let targetContact = null;
                     if (block.from) {
-                        // Explicit from attribute — match against contacts (fuzzy)
                         const allContacts = getContactsFromContext();
                         const byFrom = allContacts.find(c => c.name.toLowerCase() === block.from.toLowerCase());
                         targetContact = byFrom ? byFrom.name : block.from;

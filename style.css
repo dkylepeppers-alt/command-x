@@ -303,6 +303,40 @@
     box-shadow: 0 0 6px rgba(0,122,255,.3);
 }
 
+/* ---- Profiles view ---- */
+.cx-profiles-header {
+    padding: 14px 16px 8px; flex-shrink: 0;
+    background: rgba(20,20,25,.95);
+    border-bottom: 1px solid rgba(255,255,255,.08);
+}
+.cx-profiles-title { font-size: 20px; font-weight: 700; color: #fff; }
+.cx-profiles-sub { font-size: 11px; color: #888; margin-top: 2px; }
+.cx-profiles-list {
+    flex: 1; overflow-y: auto; padding: 8px 10px; display: flex;
+    flex-direction: column; gap: 8px; min-height: 0;
+    -webkit-overflow-scrolling: touch;
+}
+.cx-profile-card {
+    background: rgba(30,30,35,.9); border-radius: 12px; padding: 12px;
+    border: 1px solid rgba(255,255,255,.06); cursor: pointer;
+    transition: background .15s;
+}
+.cx-profile-card:active { background: rgba(50,50,55,.9); }
+.cx-profile-top { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.cx-avatar-lg { width: 44px; height: 44px; font-size: 22px; }
+.cx-profile-name-col { flex: 1; }
+.cx-profile-name { font-size: 15px; font-weight: 600; color: #fff; }
+.cx-profile-status { font-size: 12px; color: #aaa; margin-top: 2px; }
+.cx-profile-fields { display: flex; flex-direction: column; gap: 4px; }
+.cx-profile-field {
+    display: flex; gap: 8px; font-size: 12px; padding: 3px 0;
+    border-top: 1px solid rgba(255,255,255,.04);
+}
+.cx-pf-label { color: #888; flex-shrink: 0; min-width: 90px; }
+.cx-pf-value { color: #ccc; flex: 1; }
+.cx-pf-italic { font-style: italic; color: #999; }
+.cx-icon-profiles { background: linear-gradient(135deg, #5856D6, #AF52DE) !important; }
+
 /* ---- Unread badges ---- */
 .cx-unread-badge {
     background: #FF3B30; color: #fff; font-size: 10px; font-weight: 700;
