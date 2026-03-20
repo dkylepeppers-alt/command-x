@@ -492,7 +492,7 @@ function renderAllBubbles(area, contactName, isNeural) {
     area.scrollTop = area.scrollHeight;
 }
 
-function openChat(contactName, app, preserveState) {
+function openChat(contactName, app, preserveState = false) {
     currentContactName = contactName;
     currentApp = app;
     if (!preserveState) {
@@ -816,45 +816,68 @@ jQuery(async () => {
             const msg = chat[chat.length - 1];
             if (!msg || msg.is_user || msg.is_system) return;
 
-            // ── Capture [sms] FIRST (before contacts rebuild can reset state) ──
-            const wasAwaiting = awaitingReply;
-            const targetContact = currentContactName;
-            let smsHandled = false;
-
-            if (wasAwaiting && targetContact) {
-                // In group chats, check it's from the right character
-                const fromContact = msg.name === targetContact || (!msg.name);
-                if (fromContact) {
-                    const smsText = extractSmsContent(msg.mes);
-                    if (smsText) {
-                        // Store + render
-                        pushMessage(targetContact, 'received', smsText);
-                        awaitingReply = false;
-                        smsHandled = true;
-
-                        const wrapper = document.getElementById('cx-panel-wrapper');
-                        const area = phoneContainer?.querySelector('#cx-msg-area');
-                        if (wrapper && !wrapper.classList.contains('cx-hidden') && area) {
-                            clearTypingIndicator();
-                            area.appendChild(renderBubble({ type: 'received', text: smsText, time: now() }));
-                            area.scrollTop = area.scrollHeight;
-                        }
-
-                        // Clear the injection — don't want it bleeding into non-phone messages
-                        clearSmsPrompt();
+            // ── [sms] FIRST — must run before [contacts] which can trigger rebuildPhone ──
+            const smsText = extractSmsContent(msg.mes);
+            if (smsText) {
+                // Determine which contact this SMS belongs to.
+                // Priority: if we're awaiting a reply for a specific contact, attribute to them.
+                // Otherwise try to match msg.name against known contacts, or fall back to
+                // the currently open chat contact.
+                let targetContact = null;
+                if (awaitingReply && currentContactName) {
+                    // We sent a message and are waiting — this reply is for that contact
+                    // (even though msg.name may be the main character, not the NPC)
+                    targetContact = currentContactName;
+                } else {
+                    // Unsolicited SMS (NPC texted first, or reply came after timeout)
+                    // Try matching msg.name against our contacts list
+                    const allContacts = getContactsFromContext();
+                    const byName = allContacts.find(c => c.name.toLowerCase() === (msg.name || '').toLowerCase());
+                    if (byName) {
+                        targetContact = byName.name;
+                    } else if (currentContactName) {
+                        // Fallback: attribute to currently open chat
+                        targetContact = currentContactName;
                     } else {
-                        console.warn(`[${EXT}] No [sms] tags found in response — LLM didn't follow the instruction.`);
-                        clearTypingIndicator();
-                        awaitingReply = false;
+                        // Last resort: attribute to first contact
+                        targetContact = allContacts.length ? allContacts[0].name : null;
                     }
                 }
+
+                if (targetContact) {
+                    pushMessage(targetContact, 'received', smsText);
+
+                    const wrapper = document.getElementById('cx-panel-wrapper');
+                    const area = phoneContainer?.querySelector('#cx-msg-area');
+                    // Update the phone UI if we're viewing this contact's chat
+                    if (wrapper && !wrapper.classList.contains('cx-hidden') && area && currentContactName === targetContact) {
+                        area.querySelector('#cx-typing-indicator')?.remove();
+                        area.appendChild(renderBubble({ type: 'received', text: smsText, time: now() }));
+                        area.scrollTop = area.scrollHeight;
+                    }
+                    // If the phone is open but on a different contact's chat, rebuild to update previews
+                    else if (wrapper && !wrapper.classList.contains('cx-hidden') && currentContactName !== targetContact) {
+                        // Don't rebuild full phone (would lose current view), just note it arrived
+                        console.log(`[${EXT}] SMS received for ${targetContact} (currently viewing ${currentContactName})`);
+                    }
+                }
+
+                if (awaitingReply) {
+                    awaitingReply = false;
+                    clearSmsPrompt();
+                    clearTypingIndicator();
+                }
+            } else if (awaitingReply) {
+                // No [sms] tags found but we were waiting — clear the waiting state
+                console.warn(`[${EXT}] No [sms] tags found in response.`);
+                phoneContainer?.querySelector('#cx-typing-indicator')?.remove();
+                awaitingReply = false;
             }
 
-            // ── Then parse [contacts] (may trigger rebuildPhone which resets state) ──
+            // ── [contacts] SECOND — may call rebuildPhone which resets state ──
             const parsedContacts = extractContacts(msg.mes);
             if (parsedContacts) {
                 mergeNpcs(parsedContacts);
-                // Rebuild phone contact lists if visible
                 if (phoneContainer && !document.getElementById('cx-panel-wrapper')?.classList.contains('cx-hidden')) {
                     rebuildPhone();
                     // If we just handled an sms, the rebuild re-renders from localStorage
