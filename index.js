@@ -31,22 +31,31 @@ let neuralMode = false; // toggled via ⚡ button in chat header
    We instruct the LLM to wrap phone replies in [sms]…[/sms].
    ====================================================================== */
 
-const SMS_TAG_RE = /\[sms\]([\s\S]*?)\[\/sms\]/gi;
+const SMS_TAG_RE = /\[sms(?:\s+from="([^"]*)")?\]([\s\S]*?)\[\/sms\]/gi;
 
 /**
  * Extract all [sms]…[/sms] blocks from a message string.
- * Returns the concatenated inner text, or null if no tags found.
+ * Supports optional from attribute: [sms from="Name"]...[/sms]
+ * Returns array of {from, text} objects, or null if no tags found.
  */
-function extractSmsContent(raw) {
+function extractSmsBlocks(raw) {
     if (!raw) return null;
-    const parts = [];
+    const blocks = [];
     let m;
     SMS_TAG_RE.lastIndex = 0;
     while ((m = SMS_TAG_RE.exec(raw)) !== null) {
-        const t = m[1].trim();
-        if (t) parts.push(t);
+        const from = m[1] ? m[1].trim() : null;
+        const text = m[2].trim();
+        if (text) blocks.push({ from, text });
     }
-    return parts.length ? parts.join('\n') : null;
+    return blocks.length ? blocks : null;
+}
+
+/** Legacy compat wrapper — returns concatenated text or null */
+function extractSmsContent(raw) {
+    const blocks = extractSmsBlocks(raw);
+    if (!blocks) return null;
+    return blocks.map(b => b.text).join('\n');
 }
 
 /**
@@ -59,9 +68,11 @@ function hideSmsTagsInDom(mesId) {
     SMS_TAG_RE.lastIndex = 0;
     if (SMS_TAG_RE.test(el.innerHTML)) {
         SMS_TAG_RE.lastIndex = 0;
-        el.innerHTML = el.innerHTML.replace(SMS_TAG_RE, (_, inner) =>
-            `<span class="cx-sms-inline" title="${inner.trim().replace(/"/g, '&quot;')}">📱 <em>${inner.trim().slice(0, 50)}${inner.trim().length > 50 ? '…' : ''}</em></span>`
-        );
+        el.innerHTML = el.innerHTML.replace(SMS_TAG_RE, (_match, from, inner) => {
+            const preview = inner.trim();
+            const label = from ? `📱 ${from}: ` : '📱 ';
+            return `<span class="cx-sms-inline" title="${preview.replace(/"/g, '&quot;')}">${label}<em>${preview.slice(0, 50)}${preview.length > 50 ? '…' : ''}</em></span>`;
+        });
     }
 }
 
@@ -174,11 +185,11 @@ function injectSmsPrompt(contactName, isNeural, cmdType) {
             BELIEVE: `The neural command takes effect subliminally — ${contactName} is completely unaware their perception is being rewritten. They now genuinely believe the stated thing as absolute truth, as if they always believed it. They do NOT see, read, or acknowledge any command.`,
             COMPEL: `The neural command takes effect subliminally — ${contactName} is completely unaware of any external influence. They feel an overwhelming urge driving them toward the specified behavior, but it feels entirely like their own desire. They do NOT see, read, or acknowledge any command.`,
         }[cmdType] || '';
-        instruction = `[System: A subliminal ${cmdType} neural command was just activated targeting ${contactName}. ${cmdContext} In their next text message reply, ${contactName} should respond naturally — their behavior/thoughts are influenced but they have NO awareness of Command-X or any neural command. They just text back normally, reflecting the command's effect through their actions and words. Wrap ${contactName}'s text reply in [sms]...[/sms] tags. Example: *She suddenly felt the urge to head over.* [sms]hey omw to your place rn[/sms] *She grabbed her keys without questioning why.* — The [sms] block is the phone text content only. Always include [sms] tags.]`;
+        instruction = `[System: A subliminal ${cmdType} neural command was just activated targeting ${contactName}. ${cmdContext} In their next text message reply, ${contactName} should respond naturally — their behavior/thoughts are influenced but they have NO awareness of Command-X or any neural command. They just text back normally, reflecting the command's effect through their actions and words. Wrap ${contactName}'s text reply in [sms from="${contactName}"]...[/sms] tags. Example: *She suddenly felt the urge to head over.* [sms from="${contactName}"]hey omw to your place rn[/sms] *She grabbed her keys without questioning why.* — The [sms] block is the phone text content only. Always include [sms] tags with the from attribute.]`;
     } else if (isNeural) {
-        instruction = `[System: A subliminal neural command was just activated targeting ${contactName}. The command takes effect without ${contactName}'s awareness — they do NOT see or acknowledge any command. They respond naturally via text, with their behavior subtly influenced. Wrap ${contactName}'s text reply in [sms]...[/sms] tags. Example: *She felt a sudden impulse.* [sms]hey, coming over[/sms] *She didn't question the urge.* — Always include [sms] tags.]`;
+        instruction = `[System: A subliminal neural command was just activated targeting ${contactName}. The command takes effect without ${contactName}'s awareness — they do NOT see or acknowledge any command. They respond naturally via text, with their behavior subtly influenced. Wrap ${contactName}'s text reply in [sms from="${contactName}"]...[/sms] tags. Example: *She felt a sudden impulse.* [sms from="${contactName}"]hey, coming over[/sms] *She didn't question the urge.* — Always include [sms] tags with the from attribute.]`;
     } else {
-        instruction = `[System: The user just texted ${contactName} via phone. ${contactName} should text back naturally. Wrap ${contactName}'s text reply in [sms]...[/sms] tags. Example: *She glanced at her phone and typed back.* [sms]lol yeah I'll be there in 10[/sms] *She set the phone down.* — The [sms] block is the phone text content only. Keep the text reply natural and in-character. Always include [sms] tags when responding to phone texts.]`;
+        instruction = `[System: The user just texted ${contactName} via phone. ${contactName} should text back naturally. Wrap ${contactName}'s text reply in [sms from="${contactName}"]...[/sms] tags. Example: *She glanced at her phone and typed back.* [sms from="${contactName}"]lol yeah I'll be there in 10[/sms] *She set the phone down.* — The [sms] block is the phone text content only. Keep the text reply natural and in-character. Always include [sms] tags with the from attribute.]`;
     }
 
     setExtensionPrompt(
@@ -215,10 +226,26 @@ function saveMessages(contactName, msgs) {
     catch (e) { console.warn('[command-x] store save', e); }
 }
 
-function pushMessage(contactName, type, text) {
+function pushMessage(contactName, type, text, mesId) {
     const msgs = loadMessages(contactName);
-    msgs.push({ type, text, time: now() });
+    msgs.push({ type, text, time: now(), mesId: mesId ?? null });
     saveMessages(contactName, msgs);
+}
+
+/**
+ * Remove all phone messages associated with a given ST message ID
+ * (for handling swipes/regenerations). Scans ALL contacts for this chat.
+ */
+function removeMessagesForMesId(mesId) {
+    if (mesId == null) return;
+    const allContacts = getContactsFromContext();
+    for (const c of allContacts) {
+        const msgs = loadMessages(c.name);
+        const filtered = msgs.filter(m => m.mesId !== mesId);
+        if (filtered.length !== msgs.length) {
+            saveMessages(c.name, filtered);
+        }
+    }
 }
 
 /* ======================================================================
@@ -825,50 +852,49 @@ jQuery(async () => {
             if (!chat.length) return;
             const msg = chat[chat.length - 1];
             if (!msg || msg.is_user || msg.is_system) return;
+            const mesId = chat.length - 1;
 
             // ── [sms] FIRST — must run before [contacts] which can trigger rebuildPhone ──
-            const smsText = extractSmsContent(msg.mes);
-            if (smsText) {
-                // Determine which contact this SMS belongs to.
-                // Priority: if we're awaiting a reply for a specific contact, attribute to them.
-                // Otherwise try to match msg.name against known contacts, or fall back to
-                // the currently open chat contact.
-                let targetContact = null;
-                if (awaitingReply && currentContactName) {
-                    // We sent a message and are waiting — this reply is for that contact
-                    // (even though msg.name may be the main character, not the NPC)
-                    targetContact = currentContactName;
-                } else {
-                    // Unsolicited SMS (NPC texted first, or reply came after timeout)
-                    // Try matching msg.name against our contacts list
-                    const allContacts = getContactsFromContext();
-                    const byName = allContacts.find(c => c.name.toLowerCase() === (msg.name || '').toLowerCase());
-                    if (byName) {
-                        targetContact = byName.name;
-                    } else if (currentContactName) {
-                        // Fallback: attribute to currently open chat
+            const smsBlocks = extractSmsBlocks(msg.mes);
+            if (smsBlocks) {
+                for (const block of smsBlocks) {
+                    // Determine which contact this SMS belongs to.
+                    // 1. If the tag has a from="Name" attribute, use it
+                    // 2. If we're awaiting a reply, attribute to the contact we texted
+                    // 3. Try matching msg.name against known contacts
+                    // 4. Fall back to currently open chat or first contact
+                    let targetContact = null;
+                    if (block.from) {
+                        // Explicit from attribute — match against contacts (fuzzy)
+                        const allContacts = getContactsFromContext();
+                        const byFrom = allContacts.find(c => c.name.toLowerCase() === block.from.toLowerCase());
+                        targetContact = byFrom ? byFrom.name : block.from;
+                    } else if (awaitingReply && currentContactName) {
                         targetContact = currentContactName;
                     } else {
-                        // Last resort: attribute to first contact
-                        targetContact = allContacts.length ? allContacts[0].name : null;
+                        const allContacts = getContactsFromContext();
+                        const byName = allContacts.find(c => c.name.toLowerCase() === (msg.name || '').toLowerCase());
+                        if (byName) {
+                            targetContact = byName.name;
+                        } else if (currentContactName) {
+                            targetContact = currentContactName;
+                        } else {
+                            targetContact = allContacts.length ? allContacts[0].name : null;
+                        }
                     }
-                }
 
-                if (targetContact) {
-                    pushMessage(targetContact, 'received', smsText);
+                    if (targetContact) {
+                        pushMessage(targetContact, 'received', block.text, mesId);
 
-                    const wrapper = document.getElementById('cx-panel-wrapper');
-                    const area = phoneContainer?.querySelector('#cx-msg-area');
-                    // Update the phone UI if we're viewing this contact's chat
-                    if (wrapper && !wrapper.classList.contains('cx-hidden') && area && currentContactName === targetContact) {
-                        area.querySelector('#cx-typing-indicator')?.remove();
-                        area.appendChild(renderBubble({ type: 'received', text: smsText, time: now() }));
-                        area.scrollTop = area.scrollHeight;
-                    }
-                    // If the phone is open but on a different contact's chat, rebuild to update previews
-                    else if (wrapper && !wrapper.classList.contains('cx-hidden') && currentContactName !== targetContact) {
-                        // Don't rebuild full phone (would lose current view), just note it arrived
-                        console.log(`[${EXT}] SMS received for ${targetContact} (currently viewing ${currentContactName})`);
+                        const wrapper = document.getElementById('cx-panel-wrapper');
+                        const area = phoneContainer?.querySelector('#cx-msg-area');
+                        if (wrapper && !wrapper.classList.contains('cx-hidden') && area && currentContactName === targetContact) {
+                            area.querySelector('#cx-typing-indicator')?.remove();
+                            area.appendChild(renderBubble({ type: 'received', text: block.text, time: now() }));
+                            area.scrollTop = area.scrollHeight;
+                        } else if (wrapper && !wrapper.classList.contains('cx-hidden') && currentContactName !== targetContact) {
+                            console.log(`[${EXT}] SMS received for ${targetContact} (currently viewing ${currentContactName})`);
+                        }
                     }
                 }
 
@@ -878,7 +904,6 @@ jQuery(async () => {
                     clearTypingIndicator();
                 }
             } else if (awaitingReply) {
-                // No [sms] tags found but we were waiting — clear the waiting state
                 console.warn(`[${EXT}] No [sms] tags found in response.`);
                 phoneContainer?.querySelector('#cx-typing-indicator')?.remove();
                 awaitingReply = false;
@@ -890,9 +915,28 @@ jQuery(async () => {
                 mergeNpcs(parsedContacts);
                 if (phoneContainer && !document.getElementById('cx-panel-wrapper')?.classList.contains('cx-hidden')) {
                     rebuildPhone();
-                    // If we just handled an sms, the rebuild re-renders from localStorage
-                    // which already has the new message, so bubbles are correct.
                 }
+            }
+        });
+
+        // ── Swipe/regeneration handling: remove stale phone messages ──
+        eventSource.on(event_types.MESSAGE_SWIPED, (mesId) => {
+            removeMessagesForMesId(mesId);
+            // Re-render current chat if open
+            const area = phoneContainer?.querySelector('#cx-msg-area');
+            if (area && currentContactName) {
+                renderAllBubbles(area, currentContactName, false);
+            }
+        });
+        eventSource.on(event_types.MESSAGE_DELETED, () => {
+            // On delete, the mesId is chat.length (post-delete), so the deleted
+            // message was at chat.length. Clean up and re-render.
+            const freshCtx = getContext();
+            const deletedId = (freshCtx.chat || []).length; // this was the deleted index
+            removeMessagesForMesId(deletedId);
+            const area = phoneContainer?.querySelector('#cx-msg-area');
+            if (area && currentContactName) {
+                renderAllBubbles(area, currentContactName, false);
             }
         });
 
