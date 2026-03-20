@@ -6,7 +6,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "Kyle & Bucky",
-    "version": "0.7.0",
-    "homePage": "local",
-    "description": "Emulates a smartphone with the Command-X neural messaging app and a standard Messages app. Features NPC contact detection and command mode drawer."
+    "version": "0.9.0",
+    "homePage": "https://github.com/dkylepeppers-alt/command-x",
+    "description": "Smartphone UI with Command-X neural messaging, iMessage-style texting, NPC profiles, and in-phone settings. Uses prompt injection for structured [sms] and [status] tag extraction."
 }

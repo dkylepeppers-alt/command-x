@@ -1,77 +1,132 @@
 # Command-X Phone
 
-A SillyTavern third-party extension that adds a persistent smartphone UI with two apps:
+A SillyTavern third-party extension that puts a fully functional smartphone in your RP. Text characters, send neural commands, track NPC intel — all from an iMessage-style phone UI that lives alongside your chat.
 
-- **Command-X** — A neural command messaging app (mind control / neural link theme)
-- **Messages** — A standard iMessage-style texting app
-
-The phone lets you text characters directly from a phone interface. Messages flow through the RP — the extension injects system prompts so the LLM includes phone replies in `[sms]...[/sms]` tags, which the extension extracts and renders as chat bubbles on the phone screen.
+Messages flow through the RP naturally. The extension uses prompt injection so the LLM includes phone replies in `[sms]...[/sms]` tags, which get extracted and rendered as chat bubbles on the phone. No regex hacks on unstructured output — the LLM is told what structure to use *before* it generates.
 
 ## Features
 
-- **Floating phone panel** — Fullscreen overlay with a realistic phone shell (notch, bezel, home indicator)
+### 📱 Phone UI
+- **Realistic phone shell** — Notch, bezel, status bar, home indicator
 - **Lock screen → Home screen → Apps** — Navigate like a real phone
-- **iMessage-style chat bubbles** — Sent (blue), received (gray), neural commands (pink/purple gradient)
-- **Command Mode Drawer** — Four neural command types (Command, Believe, Forget, Compel) with one-tap activation. No syntax to remember — just tap a mode and type naturally.
-- **NPC Contacts** — The LLM automatically reports NPCs in the scene via `[contacts]` tags. They appear alongside ST characters in your contact list and are fully textable.
-- **Prompt injection architecture** — Uses `setExtensionPrompt()` for clean upstream injection rather than trying to parse unstructured RP output
-- **Per-chat message history** — Stored in localStorage, persists across page refreshes
-- **`{{COMMAND}}` syntax styling** — Command tags in the main ST chat get colored inline styling
-- **Typing indicator** — Bouncing dots while waiting for a reply, with 30-second safety timeout
+- **Three apps:** Command-X (neural messaging), Profiles (contact intel), Settings
+
+### 💬 Messaging
+- **iMessage-style chat bubbles** — Sent (blue), received (dark gray), neural commands (pink/purple glow)
+- **Multi-target texting** — Send messages to multiple contacts in a single turn (batch mode)
+- **Compose queue** — Queue up texts to different people, then flush them all at once
+- **Typing indicator** — Bouncing dots while waiting for a reply (30s safety timeout)
+- **`[sms from="Name" to="user"]` routing** — Messages land in the right contact's chat, even NPCs
+- **Swipe/regen handling** — When you regenerate a response in ST, old phone messages for that message ID are removed and replaced with the new content
+
+### ⚡ Neural Commands (Command-X App)
+- **Subliminal by design** — Targets are unaware commands were sent; they respond naturally under influence
+- **Command mode drawer** — Four modes with one-tap activation:
+
+  | Mode | Effect |
+  |------|--------|
+  | **⚡ Command** | Target feels compelled to obey |
+  | **💚 Believe** | Target genuinely believes the stated thing |
+  | **💜 Forget** | Target's memory fades |
+  | **🔶 Compel** | Target feels an overwhelming urge |
+
+- **Neural toggle (⚡)** — Switch between normal texting and neural mode from the chat header
+- No syntax to remember — tap a mode, type naturally, the extension handles the prompt formatting
+
+### 🔍 Profiles App (Contact Intel)
+- **NPC state tracking** — The LLM reports NPC status via `[status]` tags (mood, location, relationship, inner thoughts)
+- **Intel cards** — Each contact gets a profile card with their current state
+- **Auto-detection** — NPCs appear automatically as the story introduces them
+- **Persistent** — NPC data survives page refreshes (localStorage-backed)
+
+### 🔔 Notifications
+- **Unread badges** — Contact rows and the phone toggle button show unread counts
+- **Toast notifications** — Banner slides in when a text arrives while you're not viewing that chat. Tap to jump directly to the conversation.
+
+### ⚙️ Settings App (In-Phone Config)
+- **Batch Send Mode** — Toggle compose queue for multi-target texting
+- **Style Commands in Chat** — Toggle `{{COMMAND}}` syntax coloring in ST chat
+- **Auto-Detect NPCs** — Toggle `[status]` injection (save tokens when not needed)
+- **Clear All NPC Data** — Wipe stored NPCs for current chat
+- **Lock Screen on Open** — Start on lock screen when opening the phone
+
+### Other
+- **Contact list sorted by recency** — Most recent conversations float to the top
+- **ST character avatars** — Characters with thumbnails show their avatar; NPCs get emoji fallback
+- **User persona filtered from contacts** — Your own name doesn't appear in the contact list
+- **Per-chat message history** — Each chat×contact pair has its own message log (localStorage, capped at 200)
+- **`{{COMMAND}}` syntax styling** — Command tags in the main ST chat get colored inline indicators
 
 ## Installation
 
 ### From URL (recommended)
-1. In SillyTavern, go to **Extensions** → **Install Extension**
-2. Enter this repo URL: `https://github.com/dkylepeppers-alt/command-x`
-3. Click Install, then refresh the page
+1. In SillyTavern, go to **Extensions → Install Extension**
+2. Paste: `https://github.com/dkylepeppers-alt/command-x`
+3. Click Install, refresh the page
 
 ### Manual
-1. Clone this repo into your SillyTavern third-party extensions folder:
-   ```bash
-   cd ~/SillyTavern/public/scripts/extensions/third-party/
-   git clone https://github.com/dkylepeppers-alt/command-x.git
-   ```
-2. Refresh SillyTavern
+```bash
+cd ~/SillyTavern/public/scripts/extensions/third-party/
+git clone https://github.com/dkylepeppers-alt/command-x.git
+```
+Refresh SillyTavern.
 
 ## Usage
 
-1. Enable the extension in **Extensions** → **Command-X Phone** → check "Show phone panel"
-2. Click the 📱 button in the extensions menu (or the phone icon) to open the phone
-3. Tap a contact to open a chat
-4. **Messages app**: Type normally for casual texting
-5. **Command-X app**: Use the command drawer buttons to select a neural command mode, then type your command naturally
+1. Enable in **Extensions → Command-X Phone**
+2. Click the 📱 button in the extensions menu to open the phone
+3. Tap a contact to chat
+4. **Messages app** — Normal texting
+5. **Command-X app** — Neural commands (use the drawer buttons or the ⚡ toggle)
+6. **Profiles app** — View NPC intel cards
+7. **Settings app** — Configure everything in-phone
 
-### Command Types
+### How It Works
 
-| Mode | Effect | Color |
-|------|--------|-------|
-| **Command** | Target feels compelled to obey | Red |
-| **Believe** | Target genuinely believes the stated thing | Green |
-| **Forget** | Target's memory of the specified thing fades | Purple |
-| **Compel** | Target feels an overwhelming urge toward the behavior | Amber |
+```
+You type in phone UI
+        ↓
+Extension sends RP text to ST chat
+(e.g., *texts Sarah:* "hey")
+        ↓
+Injects system prompt via setExtensionPrompt()
+telling LLM to use [sms from="Sarah" to="user"]...[/sms]
+        ↓
+LLM responds with narration + [sms] tags + [status] tags
+        ↓
+Extension extracts [sms] → phone bubbles
+Extension extracts [status] → NPC profile data
+ST chat shows narration with subtle 📱 indicators
+```
 
-### How it works
+### Tag Reference
 
-1. You type a message in the phone UI
-2. The extension sends it as RP text to the ST chat (e.g., `*texts Sarah on phone:* "hey"`)
-3. Simultaneously injects a system prompt telling the LLM to wrap the reply in `[sms]` tags
-4. The LLM responds with narration + `[sms]reply text[/sms]`
-5. The extension extracts the tagged content for the phone, and replaces it with a subtle 📱 indicator in the main chat
+| Tag | Purpose | Example |
+|-----|---------|---------|
+| `[sms from="Name" to="user"]...[/sms]` | Phone text content | `[sms from="Sarah" to="user"]omw![/sms]` |
+| `[status][...JSON...][/status]` | NPC state data | `[status][{"name":"Sarah","emoji":"👩","mood":"😊 happy","location":"café"}][/status]` |
 
-## Settings
+Tags are injected by the extension automatically — you don't need to type them.
 
-- **Show phone panel** — Toggle the phone on/off
-- **Style {{COMMAND}} syntax in chat** — Color-code command tags in the main ST chat
-- **Start on lock screen** — Show the lock screen when the phone opens
+## Architecture
+
+- **Prompt injection** (`setExtensionPrompt`) for both `[sms]` replies and `[status]` NPC data — no downstream parsing of unstructured RP output
+- **`MESSAGE_RECEIVED`** event handler extracts `[sms]` blocks first, then processes `[status]` (order matters — `[status]` processing triggers UI rebuild)
+- **`CHARACTER_MESSAGE_RENDERED`** hides tags in the ST chat DOM
+- **`MESSAGE_DELETED` / `MESSAGE_SWIPED`** handles regeneration cleanup
+- **localStorage** for message history, NPC store, unread counts (all keyed per chat ID)
 
 ## Compatibility
 
-Works with any chat completion API via OpenRouter or direct providers. The `[sms]` and `[contacts]` tag instructions are model-agnostic — tested with Claude, GPT, and others.
+Works with any chat completion API via OpenRouter or direct providers. The tag instructions are model-agnostic — tested with Claude, GPT-4, and others.
+
+## Acknowledgements
+
+The prompt injection architecture (`setExtensionPrompt` → structured tags → extract) was inspired by patterns in [RPG Companion](https://github.com/SpicyMarinara/rpg-companion-sillytavern) by **Marinara**. RPG Companion's approach to LLM-generated structured data (tracker JSON, character state, thought reporting) was a key reference during development — particularly the insight that *telling the LLM what structure you need before generation* beats trying to parse unstructured RP output after the fact.
 
 ## Authors
 
-Kyle & Bucky
+**Kyle & Bucky** 🦌
 
 ## License
 
