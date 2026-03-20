@@ -344,6 +344,72 @@ function pushMessage(contactName, type, text, mesId) {
     saveMessages(contactName, msgs);
 }
 
+/* ======================================================================
+   UNREAD COUNTS — localStorage-backed
+   ====================================================================== */
+
+function unreadKey(contactName) {
+    const ctx = getContext();
+    const chatId = ctx.chatId || ctx.groupId || 'default';
+    return `cx-unread-${chatId}-${contactName}`;
+}
+
+function getUnread(contactName) {
+    return parseInt(localStorage.getItem(unreadKey(contactName)) || '0', 10);
+}
+
+function incrementUnread(contactName) {
+    const n = getUnread(contactName) + 1;
+    localStorage.setItem(unreadKey(contactName), String(n));
+    updateUnreadBadges();
+}
+
+function markRead(contactName) {
+    localStorage.removeItem(unreadKey(contactName));
+    updateUnreadBadges();
+}
+
+function getTotalUnread() {
+    const contacts = getContactsFromContext();
+    return contacts.reduce((sum, c) => sum + getUnread(c.name), 0);
+}
+
+function updateUnreadBadges() {
+    // Update contact row badges
+    phoneContainer?.querySelectorAll('.cx-contact-row').forEach(row => {
+        const name = row.dataset.cname;
+        if (!name) return;
+        let badge = row.querySelector('.cx-unread-badge');
+        const count = getUnread(name);
+        if (count > 0) {
+            if (!badge) {
+                badge = document.createElement('div');
+                badge.className = 'cx-unread-badge';
+                row.querySelector('.cx-status-col')?.prepend(badge);
+            }
+            badge.textContent = count > 99 ? '99+' : count;
+        } else {
+            badge?.remove();
+        }
+    });
+    // Update phone toggle button badge
+    const menuBtn = document.querySelector('#cx-menu-button');
+    if (menuBtn) {
+        let dot = menuBtn.querySelector('.cx-menu-badge');
+        const total = getTotalUnread();
+        if (total > 0) {
+            if (!dot) {
+                dot = document.createElement('span');
+                dot.className = 'cx-menu-badge';
+                menuBtn.appendChild(dot);
+            }
+            dot.textContent = total > 99 ? '99+' : total;
+        } else {
+            dot?.remove();
+        }
+    }
+}
+
 /**
  * Remove all phone messages associated with a given ST message ID
  * (for handling swipes/regenerations). Scans ALL contacts for this chat.
@@ -637,6 +703,7 @@ function renderAllBubbles(area, contactName, isNeural) {
 function openChat(contactName, app, preserveState = false) {
     currentContactName = contactName;
     currentApp = app || 'cmdx';
+    markRead(contactName);
     if (!preserveState) {
         awaitingReply = false;
         commandMode = null;
@@ -901,6 +968,7 @@ function createPanel() {
         }
     });
     wirePhone();
+    updateUnreadBadges();
 }
 
 function rebuildPhone() {
@@ -916,6 +984,7 @@ function rebuildPhone() {
     });
     wirePhone();
     if (savedContact && savedApp) openChat(savedContact, savedApp, true);
+    updateUnreadBadges();
 }
 
 function destroyPanel() {
@@ -1041,6 +1110,14 @@ jQuery(async () => {
 
                     if (targetContact) {
                         pushMessage(targetContact, 'received', block.text, mesId);
+
+                        // Increment unread if not currently viewing this contact's chat
+                        const isViewingThis = currentContactName === targetContact
+                            && phoneContainer
+                            && !document.getElementById('cx-panel-wrapper')?.classList.contains('cx-hidden');
+                        if (!isViewingThis) {
+                            incrementUnread(targetContact);
+                        }
 
                         const wrapper = document.getElementById('cx-panel-wrapper');
                         const area = phoneContainer?.querySelector('#cx-msg-area');
