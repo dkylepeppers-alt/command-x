@@ -85,6 +85,11 @@ function saveNpcs(npcs) {
     catch (e) { console.warn('[command-x] npc store save', e); }
 }
 
+function clearNpcs() {
+    try { localStorage.removeItem(npcStoreKey()); } catch { /* ignore */ }
+    if (phoneContainer) rebuildPhone();
+}
+
 /**
  * Parse [contacts] JSON from a message. Expected format:
  * [contacts][{"name":"Sarah","emoji":"👩","status":"online"}, ...][/contacts]
@@ -115,10 +120,11 @@ function extractContacts(raw) {
 function mergeNpcs(incoming) {
     if (!incoming || !incoming.length) return;
     const stored = loadNpcs();
+    const ts = Date.now();
     for (const npc of incoming) {
         const idx = stored.findIndex(s => s.name.toLowerCase() === npc.name.toLowerCase());
-        if (idx >= 0) stored[idx] = { ...stored[idx], ...npc };
-        else stored.push(npc);
+        if (idx >= 0) stored[idx] = { ...stored[idx], ...npc, lastSeen: ts };
+        else stored.push({ ...npc, lastSeen: ts });
     }
     saveNpcs(stored);
 }
@@ -267,9 +273,11 @@ function getContactsFromContext() {
             name: npcs[i].name,
             emoji: npcs[i].emoji || '🧑',
             gradient: gradients[(chars.length + i) % gradients.length],
-            online: npcs[i].status === 'online' || npcs[i].status === 'nearby',
+            online: npcs[i].status === 'online',
+            nearby: npcs[i].status === 'nearby',
             isNpc: true,
             npcStatus: npcs[i].status || 'nearby',
+            lastSeen: npcs[i].lastSeen || null,
         });
     }
     return contacts;
@@ -278,6 +286,14 @@ function getContactsFromContext() {
 const now = () => new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 const today = () => new Date().toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
 function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>'); }
+function timeAgo(ts) {
+    if (!ts) return '';
+    const s = Math.floor((Date.now() - ts) / 1000);
+    if (s < 60) return 'just now';
+    if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+    return `${Math.floor(s / 86400)}d ago`;
+}
 
 /* ======================================================================
    SEND MESSAGE THROUGH THE RP
@@ -318,8 +334,8 @@ function contactRowHTML(c, i, app) {
             <div class="cx-contact-preview">${escHtml(previewTrunc)}</div>
         </div>
         <div class="cx-status-col">
-            ${c.online ? '<div class="cx-dot-online"></div>' : '<div class="cx-dot-offline"></div>'}
-            ${last ? `<div class="cx-status-time">${last.time || ''}</div>` : ''}
+            ${c.online ? '<div class="cx-dot-online"></div>' : c.nearby ? '<div class="cx-dot-nearby"></div>' : '<div class="cx-dot-offline"></div>'}
+            ${c.isNpc ? `<div class="cx-npc-lastseen">${c.npcStatus || 'nearby'}${c.lastSeen ? ' · ' + timeAgo(c.lastSeen) : ''}</div>` : (last ? `<div class="cx-status-time">${last.time || ''}</div>` : '')}
         </div>
     </div>`;
 }
@@ -398,7 +414,7 @@ function buildPhone() {
                 <div class="cx-cmdx-title">COMMAND-X</div>
                 <div class="cx-cmdx-sub">NETHERTECH INDUSTRIES v3.4.2</div>
             </div>
-            <div class="cx-sync-bar">✓ Neural Link Stable · ${hasContacts ? contacts.length + ' Target' + (contacts.length > 1 ? 's' : '') + ' Synchronized' : 'No Targets Found'}</div>
+            <div class="cx-sync-bar">✓ Neural Link Stable · ${hasContacts ? contacts.length + ' Target' + (contacts.length > 1 ? 's' : '') + ' Synchronized' : 'No Targets Found'}<button class="cx-clear-npcs-btn" id="cx-clear-npcs" title="Clear tracked NPC contacts">Clear NPCs</button></div>
             <div class="cx-section-hdr">Linked Targets (${contacts.length})</div>
             <div class="cx-contact-list">
                 ${hasContacts ? contacts.map((c, i) => contactRowHTML(c, i, 'cmdx')).join('') : '<div style="padding:20px;color:#666;text-align:center">No characters in current chat</div>'}
@@ -504,7 +520,20 @@ function openChat(contactName, app) {
     const nameEl = phoneContainer?.querySelector('#cx-chat-name');
     const statusEl = phoneContainer?.querySelector('#cx-chat-status');
     if (nameEl) nameEl.textContent = contactName;
-    if (statusEl) statusEl.textContent = isNeural ? '⚡ Neural Link' : 'online';
+    if (statusEl) {
+        const contacts = getContactsFromContext();
+        const contact = contacts.find(c => c.name === contactName);
+        if (contact?.isNpc && contact.npcStatus) {
+            const label = contact.npcStatus;
+            const prefix = isNeural ? '⚡ Neural · ' : '';
+            const ts = contact.lastSeen ? ` · seen ${timeAgo(contact.lastSeen)}` : '';
+            statusEl.textContent = prefix + label + ts;
+            statusEl.dataset.npcStatus = contact.npcStatus;
+        } else {
+            statusEl.textContent = isNeural ? '⚡ Neural Link' : 'online';
+            statusEl.dataset.npcStatus = '';
+        }
+    }
 
     const input = phoneContainer?.querySelector('#cx-msg-input');
     if (input) input.placeholder = isNeural ? 'Enter neural command...' : 'iMessage';
@@ -656,6 +685,10 @@ function wirePhone() {
             input?.focus();
         })
     );
+    phoneContainer.querySelector('#cx-clear-npcs')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        clearNpcs();
+    });
     phoneContainer.querySelector('#cx-send')?.addEventListener('click', sendPhoneMessage);
     phoneContainer.querySelector('#cx-msg-input')?.addEventListener('keydown', e => {
         if (e.key === 'Enter') sendPhoneMessage();

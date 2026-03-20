@@ -222,8 +222,10 @@
 .cx-contact-preview { color: #888; font-size: 11px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cx-status-col { display: flex; flex-direction: column; align-items: flex-end; flex-shrink: 0; margin-left: 8px; gap: 4px; }
 .cx-dot-online { width: 7px; height: 7px; background: var(--cx-green); border-radius: 50%; box-shadow: 0 0 8px var(--cx-green); }
+.cx-dot-nearby { width: 7px; height: 7px; background: var(--cx-amber); border-radius: 50%; box-shadow: 0 0 6px rgba(255,170,0,.5); }
 .cx-dot-offline { width: 7px; height: 7px; background: #444; border-radius: 50%; }
 .cx-status-time { color: #555; font-size: 10px; }
+.cx-npc-lastseen { color: #666; font-size: 9px; text-align: right; max-width: 60px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---- Quick commands ---- */
 .cx-cmd-panel {
@@ -549,3 +551,29 @@
     border-color: var(--cx-amber);
     box-shadow: 0 0 10px rgba(255,170,0,.2);
 }
+
+/* ---- NPC status color in chat header ---- */
+.cx-chat-header-status[data-npc-status="online"] { color: var(--cx-green); }
+.cx-chat-header-status[data-npc-status="nearby"] { color: var(--cx-amber); }
+.cx-chat-header-status[data-npc-status="offline"] { color: #666; }
+
+/* ---- Clear NPCs button in sync bar ---- */
+.cx-sync-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+.cx-clear-npcs-btn {
+    background: transparent;
+    border: 1px solid rgba(0,255,136,.2);
+    border-radius: 6px;
+    color: #555;
+    font-size: 9px;
+    font-family: inherit;
+    padding: 2px 7px;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    transition: color .15s, border-color .15s;
+    flex-shrink: 0;
+}
+.cx-clear-npcs-btn:hover { color: var(--cx-green); border-color: rgba(0,255,136,.5); }
