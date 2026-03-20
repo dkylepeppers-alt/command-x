@@ -290,6 +290,18 @@
     background: linear-gradient(135deg, rgba(255,0,128,.3), rgba(128,0,255,.3));
     box-shadow: 0 0 8px rgba(255,0,128,.4);
 }
+.cx-batch-toggle {
+    font-size: 16px; cursor: pointer; padding: 4px 6px;
+    border-radius: 6px; transition: all .2s;
+    -webkit-tap-highlight-color: transparent;
+    opacity: 0.4;
+}
+.cx-batch-toggle:hover { opacity: 0.7; }
+.cx-batch-toggle.cx-batch-active {
+    opacity: 1;
+    background: rgba(0,122,255,.25);
+    box-shadow: 0 0 6px rgba(0,122,255,.3);
+}
 
 /* ---- Message area ---- */
 .cx-messages {
@@ -405,6 +417,30 @@
 }
 
 /* ---- Input bar ---- */
+/* ---- Queue bar ---- */
+.cx-queue-bar {
+    display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+    background: rgba(0,122,255,.15); border-top: 1px solid rgba(0,122,255,.3);
+    font-size: 12px; color: var(--cx-imsg-blue); flex-shrink: 0;
+}
+.cx-queue-bar.cx-hidden { display: none; }
+.cx-queue-label { flex: 1; }
+.cx-queue-send {
+    background: var(--cx-imsg-blue); color: #fff; border: none; border-radius: 12px;
+    padding: 4px 12px; font-size: 12px; font-weight: 600; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+.cx-queue-send:active { opacity: .8; }
+.cx-queue-clear {
+    background: none; border: none; color: #888; font-size: 14px; cursor: pointer;
+    padding: 2px 6px; -webkit-tap-highlight-color: transparent;
+}
+/* ---- Pending bubble (batch mode) ---- */
+.cx-sms-pending {
+    opacity: 0.55;
+    border-style: dashed !important;
+}
+
 .cx-input-bar {
     display: flex; align-items: center; gap: 8px; padding: 7px 10px;
     border-top: 1px solid rgba(255,255,255,.08); flex-shrink: 0;

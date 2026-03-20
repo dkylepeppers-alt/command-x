@@ -20,11 +20,97 @@ import {
 const EXT = 'command-x';
 const INJECT_KEY = 'command-x-sms';
 const INJECT_KEY_CONTACTS = 'command-x-contacts';
-const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false };
+const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false };
 let settings = { ...DEFAULTS };
 let phoneContainer = null;
 let commandMode = null; // null | 'COMMAND' | 'FORGET' | 'BELIEVE' | 'COMPEL'
 let neuralMode = false; // toggled via ⚡ button in chat header
+
+/* ======================================================================
+   COMPOSE QUEUE — batch multiple texts before sending to LLM
+   ====================================================================== */
+
+let composeQueue = []; // [{contactName, text, displayText, isNeural, cmdType}]
+
+function addToQueue(contactName, text, displayText, isNeural, cmdType) {
+    composeQueue.push({ contactName, text, displayText, isNeural, cmdType });
+    updateQueueBar();
+}
+
+function clearQueue() {
+    composeQueue = [];
+    updateQueueBar();
+}
+
+function updateQueueBar() {
+    const bar = phoneContainer?.querySelector('#cx-queue-bar');
+    if (!bar) return;
+    if (composeQueue.length === 0 || !settings.batchMode) {
+        bar.classList.add('cx-hidden');
+        return;
+    }
+    const names = [...new Set(composeQueue.map(q => q.contactName))];
+    const label = composeQueue.length === 1
+        ? `1 text to ${names[0]}`
+        : `${composeQueue.length} texts to ${names.join(', ')}`;
+    bar.querySelector('.cx-queue-label').textContent = label;
+    bar.classList.remove('cx-hidden');
+}
+
+function flushQueue() {
+    if (!composeQueue.length) return;
+
+    // Build batched RP message
+    const rpParts = composeQueue.map(q => {
+        if (q.cmdType || q.isNeural) {
+            return `*opens Command-X and sends a neural command to ${q.contactName}:*\n${q.text}`;
+        } else {
+            return `*texts ${q.contactName} on phone:*\n"${q.text}"`;
+        }
+    });
+    const batchedMessage = rpParts.join('\n\n');
+
+    // Build targets for prompt injection
+    const targets = composeQueue.map(q => ({
+        name: q.contactName,
+        isNeural: q.isNeural,
+        cmdType: q.cmdType,
+    }));
+
+    // Inject prompt for all targets
+    injectSmsPrompt(targets);
+    awaitingReply = true;
+
+    // Send to ST
+    const textarea = document.querySelector('#send_textarea');
+    if (textarea) {
+        textarea.value = batchedMessage;
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        const sendBtn = document.querySelector('#send_but');
+        if (sendBtn) sendBtn.click();
+    }
+
+    // Show typing indicator in current chat if one of the targets
+    const currentInQueue = composeQueue.some(q => q.contactName === currentContactName);
+    if (currentInQueue) {
+        clearTypingIndicator();
+        const area = phoneContainer?.querySelector('#cx-msg-area');
+        if (area) {
+            const typing = document.createElement('div');
+            typing.id = 'cx-typing-indicator';
+            typing.className = 'cx-typing-row';
+            typing.innerHTML = `<div class="cx-typing-bubble"><span></span><span></span><span></span></div>`;
+            area.appendChild(typing);
+            area.scrollTop = area.scrollHeight;
+        }
+        typingTimeout = setTimeout(() => {
+            clearTypingIndicator();
+            if (awaitingReply) awaitingReply = false;
+        }, 30000);
+    }
+
+    clearQueue();
+}
 
 /* ======================================================================
    SMS TAG PARSING
@@ -176,8 +262,10 @@ function clearContactsPrompt() {
    so the LLM knows to include [sms] tags in its response.
    ====================================================================== */
 
-function injectSmsPrompt(contactName, isNeural, cmdType) {
-    let instruction;
+/**
+ * Build a single SMS prompt instruction for one target.
+ */
+function buildSmsInstruction(contactName, isNeural, cmdType) {
     if (isNeural && cmdType) {
         const cmdContext = {
             COMMAND: `The neural command takes effect subliminally — ${contactName} is completely unaware any command was sent. They simply feel an irresistible compulsion to comply, as if it were their own idea. They do NOT see, read, or acknowledge the command itself.`,
@@ -185,12 +273,36 @@ function injectSmsPrompt(contactName, isNeural, cmdType) {
             BELIEVE: `The neural command takes effect subliminally — ${contactName} is completely unaware their perception is being rewritten. They now genuinely believe the stated thing as absolute truth, as if they always believed it. They do NOT see, read, or acknowledge any command.`,
             COMPEL: `The neural command takes effect subliminally — ${contactName} is completely unaware of any external influence. They feel an overwhelming urge driving them toward the specified behavior, but it feels entirely like their own desire. They do NOT see, read, or acknowledge any command.`,
         }[cmdType] || '';
-        instruction = `[System: A subliminal ${cmdType} neural command was just activated targeting ${contactName}. ${cmdContext} In their next text message reply, ${contactName} should respond naturally — their behavior/thoughts are influenced but they have NO awareness of Command-X or any neural command. They just text back normally, reflecting the command's effect through their actions and words. Wrap ${contactName}'s text reply in [sms from="${contactName}"]...[/sms] tags. Example: *She suddenly felt the urge to head over.* [sms from="${contactName}"]hey omw to your place rn[/sms] *She grabbed her keys without questioning why.* — The [sms] block is the phone text content only. Always include [sms] tags with the from attribute.]`;
+        return `A subliminal ${cmdType} neural command was activated targeting ${contactName}. ${cmdContext} ${contactName} responds naturally — influenced but unaware. Wrap their reply in [sms from="${contactName}"]...[/sms].`;
     } else if (isNeural) {
-        instruction = `[System: A subliminal neural command was just activated targeting ${contactName}. The command takes effect without ${contactName}'s awareness — they do NOT see or acknowledge any command. They respond naturally via text, with their behavior subtly influenced. Wrap ${contactName}'s text reply in [sms from="${contactName}"]...[/sms] tags. Example: *She felt a sudden impulse.* [sms from="${contactName}"]hey, coming over[/sms] *She didn't question the urge.* — Always include [sms] tags with the from attribute.]`;
+        return `A subliminal neural command was activated targeting ${contactName}. They respond naturally, subtly influenced but unaware. Wrap their reply in [sms from="${contactName}"]...[/sms].`;
     } else {
-        instruction = `[System: The user just texted ${contactName} via phone. ${contactName} should text back naturally. Wrap ${contactName}'s text reply in [sms from="${contactName}"]...[/sms] tags. Example: *She glanced at her phone and typed back.* [sms from="${contactName}"]lol yeah I'll be there in 10[/sms] *She set the phone down.* — The [sms] block is the phone text content only. Keep the text reply natural and in-character. Always include [sms] tags with the from attribute.]`;
+        return `The user texted ${contactName}. ${contactName} texts back naturally and in-character. Wrap their reply in [sms from="${contactName}"]...[/sms].`;
     }
+}
+
+/**
+ * Inject SMS prompt for one or more targets.
+ * @param {Array<{name:string, isNeural:boolean, cmdType:string|null}>} targets
+ */
+function injectSmsPrompt(targets) {
+    if (!Array.isArray(targets)) {
+        // Legacy single-call compat: injectSmsPrompt(name, isNeural, cmdType)
+        targets = [{ name: arguments[0], isNeural: arguments[1], cmdType: arguments[2] }];
+    }
+    const parts = targets.map(t => buildSmsInstruction(t.name, t.isNeural, t.cmdType));
+    const names = targets.map(t => t.name);
+    const multi = targets.length > 1;
+
+    let instruction = `[System: ${parts.join(' ')}`;
+    if (multi) {
+        instruction += ` Include a separate [sms from="Name"] block for EACH person who was texted/commanded. Each person replies independently.`;
+    }
+    instruction += ` Example: *She glanced at her phone.* [sms from="${names[0]}"]hey yeah on my way[/sms] *She set it down.*`;
+    if (multi) {
+        instruction += ` [sms from="${names[1] || names[0]}"]sounds good[/sms]`;
+    }
+    instruction += ` — The [sms] block is phone text content only. Always include the from attribute.]`;
 
     setExtensionPrompt(
         INJECT_KEY,
@@ -336,6 +448,13 @@ async function sendToChat(text, contactName, isCommand) {
     }
 }
 
+/** Send immediately (instant mode) — single target */
+function sendImmediate(contactName, chatText, isNeural, cmdType) {
+    injectSmsPrompt([{ name: contactName, isNeural, cmdType }]);
+    awaitingReply = true;
+    sendToChat(chatText, contactName, !!cmdType || isNeural);
+}
+
 /* ======================================================================
    HTML BUILDERS
    ====================================================================== */
@@ -450,6 +569,7 @@ function buildPhone() {
                     <div class="cx-chat-header-status" id="cx-chat-status"></div>
                 </div>
                 <div class="cx-neural-toggle" id="cx-neural-toggle" title="Toggle neural commands">⚡</div>
+                <div class="cx-batch-toggle ${settings.batchMode ? 'cx-batch-active' : ''}" id="cx-batch-toggle" title="Toggle batch mode (queue texts)">📋</div>
             </div>
             <div class="cx-messages" id="cx-msg-area"></div>
             <div class="cx-cmd-drawer cx-hidden" id="cx-cmd-drawer">
@@ -459,6 +579,11 @@ function buildPhone() {
                     <button class="cx-cmd-btn cx-cmd-btn-forget" data-mode="FORGET">💜 Forget</button>
                     <button class="cx-cmd-btn cx-cmd-btn-compel" data-mode="COMPEL">🔶 Compel</button>
                 </div>
+            </div>
+            <div class="cx-queue-bar cx-hidden" id="cx-queue-bar">
+                <span class="cx-queue-label"></span>
+                <button class="cx-queue-send" id="cx-queue-send">Send ▶</button>
+                <button class="cx-queue-clear" id="cx-queue-clear">✕</button>
             </div>
             <div class="cx-input-bar">
                 <input type="text" id="cx-msg-input" placeholder="Type a message..." />
@@ -566,12 +691,10 @@ function sendPhoneMessage() {
     const legacyMatch = CMD_RE.exec(rawText);
 
     if (legacyMatch) {
-        // Legacy syntax — extract type and display cleanly
         cmdType = legacyMatch[1].toUpperCase();
         displayText = `⚡ ${cmdType}: ${legacyMatch[2]}`;
         chatText = rawText;
     } else if (cmdType) {
-        // Drawer mode — wrap for display + format for RP
         displayText = `⚡ ${cmdType}: ${rawText}`;
         chatText = `{{${cmdType}}} {{${rawText}}}`;
     }
@@ -581,41 +704,48 @@ function sendPhoneMessage() {
     // Remove empty-state hint
     area.querySelector('.cx-chat-hint')?.remove();
 
-    // Store + render sent bubble
+    // Store + render sent bubble (pending style in batch mode)
     const msgType = isNeural ? 'sent-neural' : 'sent';
     pushMessage(currentContactName, msgType, displayText);
-    area.appendChild(renderBubble({ type: msgType, text: displayText, time: now() }));
-    input.value = '';
 
-    // ── KEY: inject the system prompt so the LLM includes [sms] tags ──
-    injectSmsPrompt(currentContactName, isNeural, cmdType);
-    awaitingReply = true;
+    if (settings.batchMode) {
+        // ── BATCH MODE: stage message, don't send yet ──
+        const bubble = renderBubble({ type: msgType, text: displayText, time: now() });
+        bubble.classList.add('cx-sms-pending');
+        area.appendChild(bubble);
+        area.scrollTop = area.scrollHeight;
+        input.value = '';
 
-    // Typing indicator
-    clearTypingIndicator();
-    const typing = document.createElement('div');
-    typing.id = 'cx-typing-indicator';
-    typing.className = 'cx-typing-row';
-    typing.innerHTML = `<div class="cx-typing-bubble"><span></span><span></span><span></span></div>`;
-    area.appendChild(typing);
-    area.scrollTop = area.scrollHeight;
+        addToQueue(currentContactName, chatText, displayText, isNeural, cmdType);
+    } else {
+        // ── INSTANT MODE: send immediately (original behavior) ──
+        area.appendChild(renderBubble({ type: msgType, text: displayText, time: now() }));
+        input.value = '';
 
-    // Safety timeout — remove typing indicator after 30s if no response
-    typingTimeout = setTimeout(() => {
+        sendImmediate(currentContactName, chatText, isNeural, cmdType);
+
+        // Typing indicator
         clearTypingIndicator();
-        if (awaitingReply) {
-            awaitingReply = false;
-            const hint = document.createElement('div');
-            hint.className = 'cx-chat-hint';
-            hint.textContent = 'No phone reply received';
-            hint.style.fontSize = '11px';
-            area.appendChild(hint);
-            area.scrollTop = area.scrollHeight;
-        }
-    }, 30000);
+        const typing = document.createElement('div');
+        typing.id = 'cx-typing-indicator';
+        typing.className = 'cx-typing-row';
+        typing.innerHTML = `<div class="cx-typing-bubble"><span></span><span></span><span></span></div>`;
+        area.appendChild(typing);
+        area.scrollTop = area.scrollHeight;
 
-    // Send the RP message to ST
-    sendToChat(chatText, currentContactName, isCommand);
+        typingTimeout = setTimeout(() => {
+            clearTypingIndicator();
+            if (awaitingReply) {
+                awaitingReply = false;
+                const hint = document.createElement('div');
+                hint.className = 'cx-chat-hint';
+                hint.textContent = 'No phone reply received';
+                hint.style.fontSize = '11px';
+                area.appendChild(hint);
+                area.scrollTop = area.scrollHeight;
+            }
+        }, 30000);
+    }
 }
 
 function wirePhone() {
@@ -650,6 +780,15 @@ function wirePhone() {
         neuralMode = false;
         clearSmsPrompt();
         clearTypingIndicator();
+    });
+    // Batch mode toggle
+    phoneContainer.querySelector('#cx-batch-toggle')?.addEventListener('click', () => {
+        settings.batchMode = !settings.batchMode;
+        const btn = phoneContainer.querySelector('#cx-batch-toggle');
+        if (settings.batchMode) btn?.classList.add('cx-batch-active');
+        else { btn?.classList.remove('cx-batch-active'); }
+        saveSettings();
+        updateQueueBar();
     });
     // Neural toggle button in chat header
     phoneContainer.querySelector('#cx-neural-toggle')?.addEventListener('click', () => {
@@ -698,6 +837,23 @@ function wirePhone() {
     phoneContainer.querySelector('#cx-send')?.addEventListener('click', sendPhoneMessage);
     phoneContainer.querySelector('#cx-msg-input')?.addEventListener('keydown', e => {
         if (e.key === 'Enter') sendPhoneMessage();
+    });
+    // Queue bar buttons
+    phoneContainer.querySelector('#cx-queue-send')?.addEventListener('click', flushQueue);
+    phoneContainer.querySelector('#cx-queue-clear')?.addEventListener('click', () => {
+        // Remove pending messages from store too
+        for (const q of composeQueue) {
+            const msgs = loadMessages(q.contactName);
+            // Remove last message matching this text (the staged one)
+            for (let i = msgs.length - 1; i >= 0; i--) {
+                if (msgs[i].text === q.displayText) { msgs.splice(i, 1); break; }
+            }
+            saveMessages(q.contactName, msgs);
+        }
+        clearQueue();
+        // Re-render current chat
+        const area = phoneContainer?.querySelector('#cx-msg-area');
+        if (area && currentContactName) renderAllBubbles(area, currentContactName, false);
     });
     setInterval(() => {
         const t = now();
