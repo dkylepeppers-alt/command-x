@@ -1,5 +1,5 @@
 /* ============================================================
-   Command-X Phone — v0.7 — NPC contacts + command drawer
+   Command-X Phone — v0.8 — Unified messaging + subliminal commands
    ============================================================ */
 
 /* ---- Panel wrapper — fullscreen overlay ---- */
@@ -278,6 +278,18 @@
 .cx-chat-header-info { flex: 1; }
 .cx-chat-header-name { font-size: 15px; font-weight: 600; color: #fff; }
 .cx-chat-header-status { font-size: 10px; color: var(--cx-green); margin-top: 1px; }
+.cx-neural-toggle {
+    font-size: 18px; cursor: pointer; padding: 4px 8px;
+    border-radius: 6px; transition: all .2s;
+    -webkit-tap-highlight-color: transparent;
+    opacity: 0.5;
+}
+.cx-neural-toggle:hover { opacity: 0.8; }
+.cx-neural-toggle.cx-neural-active {
+    opacity: 1;
+    background: linear-gradient(135deg, rgba(255,0,128,.3), rgba(128,0,255,.3));
+    box-shadow: 0 0 8px rgba(255,0,128,.4);
+}
 
 /* ---- Message area ---- */
 .cx-messages {

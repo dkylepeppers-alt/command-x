@@ -1,13 +1,14 @@
 /**
- * Command-X Phone — SillyTavern Extension v0.7
+ * Command-X Phone — SillyTavern Extension v0.8
  *
  * Approach: inject a system prompt that tells the LLM to wrap the
  * character's text/neural reply in [sms]…[/sms] tags. The extension
  * extracts that block for the phone UI and hides it from ST chat.
  * Message history is stored in localStorage (phone owns its own log).
  *
- * v0.7: NPC contacts (LLM-populated via [contacts] tags),
- *        command mode drawer, bug fixes.
+ * v0.8: Unified messaging (Messages + Command-X merged into one app),
+ *        user persona filtered from contacts, neural commands are
+ *        now subliminal (targets unaware of command influence).
  */
 import { getContext } from '../../../st-context.js';
 import {
@@ -23,6 +24,7 @@ const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, pa
 let settings = { ...DEFAULTS };
 let phoneContainer = null;
 let commandMode = null; // null | 'COMMAND' | 'FORGET' | 'BELIEVE' | 'COMPEL'
+let neuralMode = false; // toggled via ⚡ button in chat header
 
 /* ======================================================================
    SMS TAG PARSING
@@ -139,9 +141,13 @@ function hideContactsTagsInDom(mesId) {
  * is enabled and a chat is open, so the LLM continuously reports NPCs.
  */
 function injectContactsPrompt() {
+    const ctx = getContext();
+    const userName = ctx.name1 || '';
+    const charName = ctx.name2 || '';
+    const excludeNote = [userName, charName].filter(Boolean).map(n => `"${n}"`).join(' or ');
     setExtensionPrompt(
         INJECT_KEY_CONTACTS,
-        `[System: At the end of each response, include a [contacts] block listing NPCs currently present or available in the scene. Format: [contacts][{"name":"Name","emoji":"👩","status":"online"}][/contacts] — status can be "online", "offline", or "nearby". Only include characters who could plausibly be contacted. Do NOT include the main character the user is speaking with. If no NPCs are relevant, omit the [contacts] block entirely.]`,
+        `[System: At the end of each response, include a [contacts] block listing NPCs currently present or available in the scene. Format: [contacts][{"name":"Name","emoji":"👩","status":"online"}][/contacts] — status can be "online", "offline", or "nearby". Only include side characters/NPCs who could plausibly be contacted. Do NOT include ${excludeNote || 'the user or the main character'}. If no NPCs are relevant, omit the [contacts] block entirely.]`,
         extension_prompt_types.IN_CHAT,
         2,       // depth = 2 (slightly further back than [sms])
         false,
@@ -163,16 +169,16 @@ function injectSmsPrompt(contactName, isNeural, cmdType) {
     let instruction;
     if (isNeural && cmdType) {
         const cmdContext = {
-            COMMAND: `The target feels an irresistible neural compulsion to obey. They may resist mentally but their body complies.`,
-            FORGET: `The target's memory is being neurally overwritten. The specified memory or knowledge fades and becomes inaccessible.`,
-            BELIEVE: `The target's perception is being neurally rewritten. They now genuinely believe the stated thing as absolute truth.`,
-            COMPEL: `The target feels an overwhelming neural urge driving them toward the specified behavior. It feels like their own desire.`,
+            COMMAND: `The neural command takes effect subliminally — ${contactName} is completely unaware any command was sent. They simply feel an irresistible compulsion to comply, as if it were their own idea. They do NOT see, read, or acknowledge the command itself.`,
+            FORGET: `The neural command takes effect subliminally — ${contactName} is completely unaware their memory is being altered. The specified memory or knowledge simply fades away. They do NOT see, read, or acknowledge any command.`,
+            BELIEVE: `The neural command takes effect subliminally — ${contactName} is completely unaware their perception is being rewritten. They now genuinely believe the stated thing as absolute truth, as if they always believed it. They do NOT see, read, or acknowledge any command.`,
+            COMPEL: `The neural command takes effect subliminally — ${contactName} is completely unaware of any external influence. They feel an overwhelming urge driving them toward the specified behavior, but it feels entirely like their own desire. They do NOT see, read, or acknowledge any command.`,
         }[cmdType] || '';
-        instruction = `[System: The user just sent a ${cmdType} neural command via Command-X to ${contactName}. ${cmdContext} ${contactName} must include their text/phone reply wrapped in [sms]...[/sms] tags. Example: *She stared at the screen.* [sms]Got it. On my way.[/sms] *She grabbed her keys.* — The [sms] block is the actual text message content that appears on the phone screen. Always include [sms] tags in the response.]`;
+        instruction = `[System: A subliminal ${cmdType} neural command was just activated targeting ${contactName}. ${cmdContext} In their next text message reply, ${contactName} should respond naturally — their behavior/thoughts are influenced but they have NO awareness of Command-X or any neural command. They just text back normally, reflecting the command's effect through their actions and words. Wrap ${contactName}'s text reply in [sms]...[/sms] tags. Example: *She suddenly felt the urge to head over.* [sms]hey omw to your place rn[/sms] *She grabbed her keys without questioning why.* — The [sms] block is the phone text content only. Always include [sms] tags.]`;
     } else if (isNeural) {
-        instruction = `[System: The user just sent a neural command via Command-X to ${contactName}. ${contactName} must include their text/phone reply wrapped in [sms]...[/sms] tags. Example: *She stared at the screen.* [sms]Got it. On my way.[/sms] *She grabbed her keys.* — The [sms] block is the actual text message content that appears on the phone screen. Always include [sms] tags in the response when responding to phone/neural messages.]`;
+        instruction = `[System: A subliminal neural command was just activated targeting ${contactName}. The command takes effect without ${contactName}'s awareness — they do NOT see or acknowledge any command. They respond naturally via text, with their behavior subtly influenced. Wrap ${contactName}'s text reply in [sms]...[/sms] tags. Example: *She felt a sudden impulse.* [sms]hey, coming over[/sms] *She didn't question the urge.* — Always include [sms] tags.]`;
     } else {
-        instruction = `[System: The user just texted ${contactName} via phone. ${contactName} must include their text reply wrapped in [sms]...[/sms] tags. Example: *She glanced at her phone and typed back.* [sms]lol yeah I'll be there in 10[/sms] *She set the phone down.* — The [sms] block is the actual text message content that appears on the phone. Keep the text reply natural and in-character. Always include [sms] tags when responding to phone texts.]`;
+        instruction = `[System: The user just texted ${contactName} via phone. ${contactName} should text back naturally. Wrap ${contactName}'s text reply in [sms]...[/sms] tags. Example: *She glanced at her phone and typed back.* [sms]lol yeah I'll be there in 10[/sms] *She set the phone down.* — The [sms] block is the phone text content only. Keep the text reply natural and in-character. Always include [sms] tags when responding to phone texts.]`;
     }
 
     setExtensionPrompt(
@@ -239,6 +245,8 @@ function getChatCharacters() {
 
 function getContactsFromContext() {
     const chars = getChatCharacters();
+    const ctx = getContext();
+    const userName = (ctx.name1 || '').toLowerCase();
     const emojis = ['👩','👩‍🦰','👱‍♀️','👩‍🏫','🧑','👨','👩‍🎤','🧑‍💼','👧','🧝‍♀️'];
     const gradients = [
         'linear-gradient(135deg,#553355,#442244)',
@@ -248,18 +256,20 @@ function getContactsFromContext() {
         'linear-gradient(135deg,#55aa77,#338855)',
         'linear-gradient(135deg,#aa5577,#883355)',
     ];
-    // ST characters
-    const contacts = chars.map((c, i) => ({
-        id: c.avatar || `char_${i}`,
-        name: c.name || `Character ${i + 1}`,
-        emoji: emojis[i % emojis.length],
-        gradient: gradients[i % gradients.length],
-        online: true,
-        isNpc: false,
-    }));
-    // Merge stored NPCs (skip duplicates by name)
+    // ST characters — filter out user persona
+    const contacts = chars
+        .filter(c => (c.name || '').toLowerCase() !== userName)
+        .map((c, i) => ({
+            id: c.avatar || `char_${i}`,
+            name: c.name || `Character ${i + 1}`,
+            emoji: emojis[i % emojis.length],
+            gradient: gradients[i % gradients.length],
+            online: true,
+            isNpc: false,
+        }));
+    // Merge stored NPCs (skip duplicates by name + skip user persona)
     const existingNames = new Set(contacts.map(c => c.name.toLowerCase()));
-    const npcs = loadNpcs();
+    const npcs = loadNpcs().filter(n => (n.name || '').toLowerCase() !== userName);
     for (let i = 0; i < npcs.length; i++) {
         if (existingNames.has(npcs[i].name.toLowerCase())) continue;
         contacts.push({
@@ -347,7 +357,7 @@ function buildPhone() {
             <div class="cx-notif" data-goto="cmdx">
                 <div class="cx-notif-app">COMMAND-X</div>
                 <div class="cx-notif-title">Neural Link Active</div>
-                <div class="cx-notif-body">${charName} is online. Tap to open.</div>
+                <div class="cx-notif-body">${contacts.length} contact${contacts.length > 1 ? 's' : ''} synced. Tap to open.</div>
             </div>` : ''}
             <div class="cx-lock-hint" data-action="unlock">Tap to unlock</div>
         </div>
@@ -360,10 +370,6 @@ function buildPhone() {
                 <div class="cx-app-icon" data-app="cmdx">
                     <div class="cx-icon-img cx-icon-cmdx">⚡</div>
                     <div class="cx-icon-label">Command-X</div>
-                </div>
-                <div class="cx-app-icon" data-app="messages">
-                    <div class="cx-icon-img cx-icon-msgs">💬</div>
-                    <div class="cx-icon-label">Messages</div>
                 </div>
                 <div class="cx-app-icon" data-app="camera">
                     <div class="cx-icon-img cx-icon-camera">📷</div>
@@ -392,32 +398,15 @@ function buildPhone() {
             </div>
         </div>
 
-        <!-- Command-X App -->
+        <!-- Command-X App (unified messaging + neural commands) -->
         <div class="cx-view" data-view="cmdx">
             <div class="cx-cmdx-header">
                 <div class="cx-cmdx-title">COMMAND-X</div>
                 <div class="cx-cmdx-sub">NETHERTECH INDUSTRIES v3.4.2</div>
             </div>
-            <div class="cx-sync-bar">✓ Neural Link Stable · ${hasContacts ? contacts.length + ' Target' + (contacts.length > 1 ? 's' : '') + ' Synchronized' : 'No Targets Found'}</div>
-            <div class="cx-section-hdr">Linked Targets (${contacts.length})</div>
+            <div class="cx-sync-bar">✓ Neural Link Stable · ${hasContacts ? contacts.length + ' Contact' + (contacts.length > 1 ? 's' : '') + ' Synced' : 'No Contacts Found'}</div>
             <div class="cx-contact-list">
                 ${hasContacts ? contacts.map((c, i) => contactRowHTML(c, i, 'cmdx')).join('') : '<div style="padding:20px;color:#666;text-align:center">No characters in current chat</div>'}
-            </div>
-            <!-- Command panel moved to chat view as drawer -->
-            <div class="cx-navbar">
-                <div class="cx-nav active"><div class="cx-nav-ico">👥</div><div class="cx-nav-lbl">Targets</div></div>
-                <div class="cx-nav" data-goto="home"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
-            </div>
-        </div>
-
-        <!-- Messages App -->
-        <div class="cx-view" data-view="messages">
-            <div class="cx-msgs-header">
-                <div class="cx-msgs-title">Messages</div>
-            </div>
-            <div class="cx-section-hdr">Conversations</div>
-            <div class="cx-contact-list">
-                ${hasContacts ? contacts.map((c, i) => contactRowHTML(c, i, 'messages')).join('') : '<div style="padding:20px;color:#666;text-align:center">No characters in current chat</div>'}
             </div>
             <div class="cx-navbar">
                 <div class="cx-nav active"><div class="cx-nav-ico">💬</div><div class="cx-nav-lbl">Chats</div></div>
@@ -433,6 +422,7 @@ function buildPhone() {
                     <div class="cx-chat-header-name" id="cx-chat-name"></div>
                     <div class="cx-chat-header-status" id="cx-chat-status"></div>
                 </div>
+                <div class="cx-neural-toggle" id="cx-neural-toggle" title="Toggle neural commands">⚡</div>
             </div>
             <div class="cx-messages" id="cx-msg-area"></div>
             <div class="cx-cmd-drawer cx-hidden" id="cx-cmd-drawer">
@@ -494,34 +484,36 @@ function renderAllBubbles(area, contactName, isNeural) {
 
 function openChat(contactName, app, preserveState = false) {
     currentContactName = contactName;
-    currentApp = app;
+    currentApp = app || 'cmdx';
     if (!preserveState) {
         awaitingReply = false;
         commandMode = null;
+        neuralMode = false;
         clearSmsPrompt();
         clearTypingIndicator();
     }
-    const isNeural = app === 'cmdx';
 
     const nameEl = phoneContainer?.querySelector('#cx-chat-name');
     const statusEl = phoneContainer?.querySelector('#cx-chat-status');
     if (nameEl) nameEl.textContent = contactName;
-    if (statusEl) statusEl.textContent = isNeural ? '⚡ Neural Link' : 'online';
+    if (statusEl) statusEl.textContent = 'online';
 
     const input = phoneContainer?.querySelector('#cx-msg-input');
-    if (input) input.placeholder = isNeural ? 'Enter neural command...' : 'iMessage';
+    if (input) input.placeholder = 'Type a message...';
 
-    // Show command drawer only in Command-X app
+    // Drawer starts hidden; user toggles via ⚡ button
     const drawer = phoneContainer?.querySelector('#cx-cmd-drawer');
-    if (drawer) {
-        if (isNeural) drawer.classList.remove('cx-hidden');
-        else drawer.classList.add('cx-hidden');
+    if (drawer && !preserveState) drawer.classList.add('cx-hidden');
+
+    // Reset drawer button states if not preserving
+    if (!preserveState) {
+        phoneContainer?.querySelectorAll('.cx-cmd-btn').forEach(b => b.classList.remove('cx-cmd-active'));
+        const toggle = phoneContainer?.querySelector('#cx-neural-toggle');
+        if (toggle) toggle.classList.remove('cx-neural-active');
     }
-    // Reset drawer button states
-    phoneContainer?.querySelectorAll('.cx-cmd-btn').forEach(b => b.classList.remove('cx-cmd-active'));
 
     const area = phoneContainer?.querySelector('#cx-msg-area');
-    if (area) renderAllBubbles(area, contactName, isNeural);
+    if (area) renderAllBubbles(area, contactName, false);
 
     switchView('chat');
 }
@@ -537,7 +529,7 @@ function sendPhoneMessage() {
     const rawText = input?.value?.trim();
     if (!rawText || !area || !currentContactName) return;
 
-    const isNeural = currentApp === 'cmdx';
+    const isNeural = neuralMode;
 
     // Determine command type: from drawer mode or legacy {{CMD}} syntax
     const CMD_RE = /\{\{(COMMAND|FORGET|BELIEVE|COMPEL)\}\}\s*\{\{(.+?)\}\}/i;
@@ -610,7 +602,7 @@ function wirePhone() {
     phoneContainer.querySelectorAll('.cx-app-icon[data-app]').forEach(icon =>
         icon.addEventListener('click', () => {
             const app = icon.dataset.app;
-            if (app === 'cmdx' || app === 'messages') switchView(app);
+            if (app === 'cmdx') switchView(app);
         })
     );
     phoneContainer.querySelectorAll('.cx-nav[data-goto]').forEach(nav =>
@@ -624,13 +616,31 @@ function wirePhone() {
         })
     );
     phoneContainer.querySelector('#cx-back')?.addEventListener('click', () => {
-        if (currentApp) switchView(currentApp);
-        else switchView('home');
+        switchView('cmdx');
         currentContactName = null;
         awaitingReply = false;
         commandMode = null;
+        neuralMode = false;
         clearSmsPrompt();
         clearTypingIndicator();
+    });
+    // Neural toggle button in chat header
+    phoneContainer.querySelector('#cx-neural-toggle')?.addEventListener('click', () => {
+        neuralMode = !neuralMode;
+        const toggle = phoneContainer.querySelector('#cx-neural-toggle');
+        const drawer = phoneContainer.querySelector('#cx-cmd-drawer');
+        const input = phoneContainer.querySelector('#cx-msg-input');
+        if (neuralMode) {
+            toggle?.classList.add('cx-neural-active');
+            drawer?.classList.remove('cx-hidden');
+            if (input) input.placeholder = 'Enter neural command...';
+        } else {
+            toggle?.classList.remove('cx-neural-active');
+            drawer?.classList.add('cx-hidden');
+            commandMode = null;
+            phoneContainer.querySelectorAll('.cx-cmd-btn').forEach(b => b.classList.remove('cx-cmd-active'));
+            if (input) input.placeholder = 'Type a message...';
+        }
     });
     // Command drawer mode buttons
     phoneContainer.querySelectorAll('.cx-cmd-btn[data-mode]').forEach(btn =>
@@ -641,7 +651,7 @@ function wirePhone() {
                 // Deselect
                 commandMode = null;
                 btn.classList.remove('cx-cmd-active');
-                if (input) input.placeholder = 'Enter neural command...';
+                if (input) input.placeholder = neuralMode ? 'Enter neural command...' : 'Type a message...';
             } else {
                 // Select this mode
                 commandMode = mode;
@@ -903,7 +913,7 @@ jQuery(async () => {
             createPanel();
             injectContactsPrompt();
         }
-        console.log(`[${EXT}] v0.7 Loaded OK`);
+        console.log(`[${EXT}] v0.8 Loaded OK`);
     } catch (err) {
         console.error(`[${EXT}] INIT FAILED:`, err);
     }
