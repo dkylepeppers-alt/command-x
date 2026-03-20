@@ -492,13 +492,15 @@ function renderAllBubbles(area, contactName, isNeural) {
     area.scrollTop = area.scrollHeight;
 }
 
-function openChat(contactName, app) {
+function openChat(contactName, app, preserveState) {
     currentContactName = contactName;
     currentApp = app;
-    awaitingReply = false;
-    commandMode = null;
-    clearSmsPrompt();
-    clearTypingIndicator();
+    if (!preserveState) {
+        awaitingReply = false;
+        commandMode = null;
+        clearSmsPrompt();
+        clearTypingIndicator();
+    }
     const isNeural = app === 'cmdx';
 
     const nameEl = phoneContainer?.querySelector('#cx-chat-name');
@@ -720,7 +722,7 @@ function rebuildPhone() {
         saveSettings();
     });
     wirePhone();
-    if (savedContact && savedApp) openChat(savedContact, savedApp);
+    if (savedContact && savedApp) openChat(savedContact, savedApp, true);
 }
 
 function destroyPanel() {
@@ -814,47 +816,51 @@ jQuery(async () => {
             const msg = chat[chat.length - 1];
             if (!msg || msg.is_user || msg.is_system) return;
 
-            // Always try to parse [contacts] from any character message
+            // ── Capture [sms] FIRST (before contacts rebuild can reset state) ──
+            const wasAwaiting = awaitingReply;
+            const targetContact = currentContactName;
+            let smsHandled = false;
+
+            if (wasAwaiting && targetContact) {
+                // In group chats, check it's from the right character
+                const fromContact = msg.name === targetContact || (!msg.name);
+                if (fromContact) {
+                    const smsText = extractSmsContent(msg.mes);
+                    if (smsText) {
+                        // Store + render
+                        pushMessage(targetContact, 'received', smsText);
+                        awaitingReply = false;
+                        smsHandled = true;
+
+                        const wrapper = document.getElementById('cx-panel-wrapper');
+                        const area = phoneContainer?.querySelector('#cx-msg-area');
+                        if (wrapper && !wrapper.classList.contains('cx-hidden') && area) {
+                            clearTypingIndicator();
+                            area.appendChild(renderBubble({ type: 'received', text: smsText, time: now() }));
+                            area.scrollTop = area.scrollHeight;
+                        }
+
+                        // Clear the injection — don't want it bleeding into non-phone messages
+                        clearSmsPrompt();
+                    } else {
+                        console.warn(`[${EXT}] No [sms] tags found in response — LLM didn't follow the instruction.`);
+                        clearTypingIndicator();
+                        awaitingReply = false;
+                    }
+                }
+            }
+
+            // ── Then parse [contacts] (may trigger rebuildPhone which resets state) ──
             const parsedContacts = extractContacts(msg.mes);
             if (parsedContacts) {
                 mergeNpcs(parsedContacts);
                 // Rebuild phone contact lists if visible
                 if (phoneContainer && !document.getElementById('cx-panel-wrapper')?.classList.contains('cx-hidden')) {
                     rebuildPhone();
+                    // If we just handled an sms, the rebuild re-renders from localStorage
+                    // which already has the new message, so bubbles are correct.
                 }
             }
-
-            // Only capture [sms] if we're awaiting a reply
-            if (!awaitingReply || !currentContactName) return;
-
-            // In group chats, check it's from the right character
-            const fromContact = msg.name === currentContactName || (!msg.name);
-            if (!fromContact) return;
-
-            // Extract [sms] content
-            const smsText = extractSmsContent(msg.mes);
-            if (!smsText) {
-                console.warn(`[${EXT}] No [sms] tags found in response — LLM didn't follow the instruction.`);
-                // Clear typing indicator on failed parse too
-                clearTypingIndicator();
-                awaitingReply = false;
-                return;
-            }
-
-            // Store + render
-            pushMessage(currentContactName, 'received', smsText);
-            awaitingReply = false;
-
-            const wrapper = document.getElementById('cx-panel-wrapper');
-            const area = phoneContainer?.querySelector('#cx-msg-area');
-            if (wrapper && !wrapper.classList.contains('cx-hidden') && area) {
-                clearTypingIndicator();
-                area.appendChild(renderBubble({ type: 'received', text: smsText, time: now() }));
-                area.scrollTop = area.scrollHeight;
-            }
-
-            // Clear the injection — don't want it bleeding into non-phone messages
-            clearSmsPrompt();
         });
 
         // Chat changed — reset state
