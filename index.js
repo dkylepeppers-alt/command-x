@@ -1,14 +1,14 @@
 /**
- * Command-X Phone — SillyTavern Extension v0.8
+ * Command-X Phone — SillyTavern Extension v0.9
  *
  * Approach: inject a system prompt that tells the LLM to wrap the
  * character's text/neural reply in [sms]…[/sms] tags. The extension
  * extracts that block for the phone UI and hides it from ST chat.
  * Message history is stored in localStorage (phone owns its own log).
  *
- * v0.8: Unified messaging (Messages + Command-X merged into one app),
- *        user persona filtered from contacts, neural commands are
- *        now subliminal (targets unaware of command influence).
+ * v0.9: Compose queue (batch mode), notification badges, [status] tag,
+ *        Profiles app, Settings app, toast notifications, recency sort,
+ *        character avatars, [sms to] filter, dead app cleanup.
  */
 import { getContext } from '../../../st-context.js';
 import {
@@ -20,7 +20,7 @@ import {
 const EXT = 'command-x';
 const INJECT_KEY = 'command-x-sms';
 const INJECT_KEY_CONTACTS = 'command-x-contacts';
-const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false };
+const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true };
 let settings = { ...DEFAULTS };
 let phoneContainer = null;
 let commandMode = null; // null | 'COMMAND' | 'FORGET' | 'BELIEVE' | 'COMPEL'
@@ -360,7 +360,7 @@ function saveMessages(contactName, msgs) {
 
 function pushMessage(contactName, type, text, mesId) {
     const msgs = loadMessages(contactName);
-    msgs.push({ type, text, time: now(), mesId: mesId ?? null });
+    msgs.push({ type, text, time: now(), ts: Date.now(), mesId: mesId ?? null });
     saveMessages(contactName, msgs);
 }
 
@@ -382,6 +382,31 @@ function incrementUnread(contactName) {
     const n = getUnread(contactName) + 1;
     localStorage.setItem(unreadKey(contactName), String(n));
     updateUnreadBadges();
+}
+
+function showToast(contactName, text) {
+    // Remove existing toast
+    document.getElementById('cx-toast')?.remove();
+    const preview = text.length > 60 ? text.slice(0, 60) + '…' : text;
+    const toast = document.createElement('div');
+    toast.id = 'cx-toast';
+    toast.className = 'cx-toast cx-toast-show';
+    toast.innerHTML = `<div class="cx-toast-icon">📱</div><div class="cx-toast-body"><div class="cx-toast-name">${contactName}</div><div class="cx-toast-text">${escHtml(preview)}</div></div>`;
+    toast.addEventListener('click', () => {
+        toast.remove();
+        // Open phone to this contact's chat
+        const wrapper = document.getElementById('cx-panel-wrapper');
+        if (wrapper) {
+            wrapper.classList.remove('cx-hidden');
+            settings.panelOpen = true;
+            saveSettings();
+            rebuildPhone();
+            openChat(contactName, 'cmdx');
+        }
+    });
+    document.body.appendChild(toast);
+    // Auto-dismiss after 4s
+    setTimeout(() => { toast.classList.remove('cx-toast-show'); setTimeout(() => toast.remove(), 400); }, 4000);
 }
 
 function markRead(contactName) {
@@ -527,6 +552,16 @@ function getContactsFromContext() {
             avatarUrl: npcs[i].avatarUrl || null,
         });
     }
+    // Sort by most recent message timestamp (contacts with messages first)
+    contacts.sort((a, b) => {
+        const aMsgs = loadMessages(a.name);
+        const bMsgs = loadMessages(b.name);
+        const aTs = aMsgs.length ? (aMsgs[aMsgs.length - 1].ts || 0) : 0;
+        const bTs = bMsgs.length ? (bMsgs[bMsgs.length - 1].ts || 0) : 0;
+        if (aTs && !bTs) return -1;
+        if (!aTs && bTs) return 1;
+        return bTs - aTs; // most recent first
+    });
     return contacts;
 }
 
@@ -630,25 +665,9 @@ function buildPhone() {
                     <div class="cx-icon-img cx-icon-cmdx">⚡</div>
                     <div class="cx-icon-label">Command-X</div>
                 </div>
-                <div class="cx-app-icon" data-app="camera">
-                    <div class="cx-icon-img cx-icon-camera">📷</div>
-                    <div class="cx-icon-label">Camera</div>
-                </div>
-                <div class="cx-app-icon" data-app="photos">
-                    <div class="cx-icon-img cx-icon-photos">🖼️</div>
-                    <div class="cx-icon-label">Photos</div>
-                </div>
                 <div class="cx-app-icon" data-app="profiles">
                     <div class="cx-icon-img cx-icon-profiles">🔍</div>
                     <div class="cx-icon-label">Profiles</div>
-                </div>
-                <div class="cx-app-icon" data-app="browser">
-                    <div class="cx-icon-img cx-icon-browser">🌐</div>
-                    <div class="cx-icon-label">Browser</div>
-                </div>
-                <div class="cx-app-icon" data-app="music">
-                    <div class="cx-icon-img cx-icon-music">🎵</div>
-                    <div class="cx-icon-label">Music</div>
                 </div>
                 <div class="cx-app-icon" data-app="phone-settings">
                     <div class="cx-icon-img cx-icon-settings">⚙️</div>
@@ -699,6 +718,46 @@ function buildPhone() {
             </div>
             <div class="cx-navbar">
                 <div class="cx-nav active"><div class="cx-nav-ico">🔍</div><div class="cx-nav-lbl">Profiles</div></div>
+                <div class="cx-nav" data-goto="home"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
+            </div>
+        </div>
+
+        <!-- Settings View -->
+        <div class="cx-view" data-view="phone-settings">
+            <div class="cx-settings-header">
+                <div class="cx-settings-title">Settings</div>
+            </div>
+            <div class="cx-settings-list">
+                <div class="cx-settings-section">MESSAGING</div>
+                <div class="cx-settings-row">
+                    <span class="cx-settings-label">Batch Send Mode</span>
+                    <label class="cx-toggle"><input type="checkbox" id="cx-set-batch" ${settings.batchMode ? 'checked' : ''}><span class="cx-toggle-slider"></span></label>
+                </div>
+                <div class="cx-settings-row">
+                    <span class="cx-settings-label">Style Commands in Chat</span>
+                    <label class="cx-toggle"><input type="checkbox" id="cx-set-style" ${settings.styleCommands ? 'checked' : ''}><span class="cx-toggle-slider"></span></label>
+                </div>
+                <div class="cx-settings-section">CONTACTS</div>
+                <div class="cx-settings-row">
+                    <span class="cx-settings-label">Auto-Detect NPCs</span>
+                    <label class="cx-toggle"><input type="checkbox" id="cx-set-npcs" ${settings.autoDetectNpcs !== false ? 'checked' : ''}><span class="cx-toggle-slider"></span></label>
+                </div>
+                <div class="cx-settings-row cx-settings-btn-row">
+                    <button class="cx-settings-btn cx-settings-btn-danger" id="cx-set-clear-npcs">Clear All NPC Data</button>
+                </div>
+                <div class="cx-settings-section">DISPLAY</div>
+                <div class="cx-settings-row">
+                    <span class="cx-settings-label">Lock Screen on Open</span>
+                    <label class="cx-toggle"><input type="checkbox" id="cx-set-lock" ${settings.showLockscreen ? 'checked' : ''}><span class="cx-toggle-slider"></span></label>
+                </div>
+                <div class="cx-settings-section">ABOUT</div>
+                <div class="cx-settings-row cx-settings-about">
+                    <div>Command-X v0.9</div>
+                    <div style="color:#666;font-size:11px;margin-top:4px">By Kyle & Bucky 🦌</div>
+                </div>
+            </div>
+            <div class="cx-navbar">
+                <div class="cx-nav active"><div class="cx-nav-ico">⚙️</div><div class="cx-nav-lbl">Settings</div></div>
                 <div class="cx-nav" data-goto="home"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
             </div>
         </div>
@@ -903,9 +962,35 @@ function wirePhone() {
     phoneContainer.querySelectorAll('.cx-app-icon[data-app]').forEach(icon =>
         icon.addEventListener('click', () => {
             const app = icon.dataset.app;
-            if (app === 'cmdx' || app === 'profiles') switchView(app);
+            if (app === 'cmdx' || app === 'profiles' || app === 'phone-settings') switchView(app);
         })
     );
+    // Settings toggles
+    phoneContainer.querySelector('#cx-set-batch')?.addEventListener('change', (e) => {
+        settings.batchMode = e.target.checked;
+        saveSettings();
+        updateQueueBar();
+    });
+    phoneContainer.querySelector('#cx-set-style')?.addEventListener('change', (e) => {
+        settings.styleCommands = e.target.checked;
+        saveSettings();
+    });
+    phoneContainer.querySelector('#cx-set-npcs')?.addEventListener('change', (e) => {
+        settings.autoDetectNpcs = e.target.checked;
+        saveSettings();
+        if (e.target.checked) injectContactsPrompt();
+        else clearContactsPrompt();
+    });
+    phoneContainer.querySelector('#cx-set-lock')?.addEventListener('change', (e) => {
+        settings.showLockscreen = e.target.checked;
+        saveSettings();
+    });
+    phoneContainer.querySelector('#cx-set-clear-npcs')?.addEventListener('click', () => {
+        if (confirm('Clear all NPC contacts for this chat?')) {
+            saveNpcs([]);
+            rebuildPhone();
+        }
+    });
     // Profile card → open chat with that contact
     phoneContainer.querySelectorAll('.cx-profile-card[data-pname]').forEach(card =>
         card.addEventListener('click', () => {
@@ -1218,6 +1303,7 @@ jQuery(async () => {
                             && !document.getElementById('cx-panel-wrapper')?.classList.contains('cx-hidden');
                         if (!isViewingThis) {
                             incrementUnread(targetContact);
+                            showToast(targetContact, block.text);
                         }
 
                         const wrapper = document.getElementById('cx-panel-wrapper');
@@ -1283,15 +1369,15 @@ jQuery(async () => {
             clearSmsPrompt();
             clearTypingIndicator();
             // Re-inject contacts prompt for new chat
-            if (settings.enabled) injectContactsPrompt();
+            if (settings.enabled && settings.autoDetectNpcs !== false) injectContactsPrompt();
             if (phoneContainer) rebuildPhone();
         });
 
         if (settings.enabled) {
             createPanel();
-            injectContactsPrompt();
+            if (settings.autoDetectNpcs !== false) injectContactsPrompt();
         }
-        console.log(`[${EXT}] v0.8 Loaded OK`);
+        console.log(`[${EXT}] v0.9 Loaded OK`);
     } catch (err) {
         console.error(`[${EXT}] INIT FAILED:`, err);
     }
