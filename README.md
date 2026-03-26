@@ -9,7 +9,7 @@ Messages flow through the RP naturally. The extension uses prompt injection so t
 ### 📱 Phone UI
 - **Realistic phone shell** — Notch, bezel, status bar, home indicator
 - **Lock screen → Home screen → Apps** — Navigate like a real phone
-- **Three apps:** Command-X (neural messaging), Profiles (contact intel), Settings
+- **Four apps:** Command-X (neural messaging), Profiles (contact intel), OpenClaw (bridge console), Settings
 
 ### 💬 Messaging
 - **iMessage-style chat bubbles** — Sent (blue), received (dark gray), neural commands (pink/purple glow)
@@ -32,6 +32,13 @@ Messages flow through the RP naturally. The extension uses prompt injection so t
 
 - **Neural toggle (⚡)** — Switch between normal texting and neural mode from the chat header
 - No syntax to remember — tap a mode, type naturally, the extension handles the prompt formatting
+
+### 🦞 OpenClaw App
+- **Native bridge console** — Uses the existing `openclaw-bridge` backend from inside the Command-X phone UI
+- **Per-chat session controls** — Health, session inspect, reset, and send actions stay scoped to the current ST chat
+- **Context-aware prompts** — One tap inserts recent SillyTavern context before sending to OpenClaw
+- **Operate action loop (phase 1)** — OpenClaw can propose `slash.run` actions, which are then approved/rejected locally in Command-X before execution
+- **Local slash fallback** — Run SillyTavern slash commands locally from the same operator surface
 
 ### 🔍 Profiles App (Contact Intel)
 - **NPC state tracking** — The LLM reports NPC status via `[status]` tags (mood, location, relationship, inner thoughts)
@@ -71,6 +78,9 @@ git clone https://github.com/dkylepeppers-alt/command-x.git
 ```
 Refresh SillyTavern.
 
+### OpenClaw app dependency
+The in-phone **OpenClaw** app requires the local `openclaw-bridge` SillyTavern server plugin/backend to be present and enabled. The Command-X repo contains the native phone UI for that bridge, but not the bridge backend itself.
+
 ## Usage
 
 1. Enable in **Extensions → Command-X Phone**
@@ -78,8 +88,12 @@ Refresh SillyTavern.
 3. Tap a contact to chat
 4. **Messages app** — Normal texting
 5. **Command-X app** — Neural commands (use the drawer buttons or the ⚡ toggle)
-6. **Profiles app** — View NPC intel cards
-7. **Settings app** — Configure everything in-phone
+6. **OpenClaw app** — Operator bridge tools for the current chat
+   - **Observe** = read-only context inspection
+   - **Assist** = advice/planning over current chat context
+   - **Operate** = propose local `slash.run` actions for approval, then execute them locally if approved
+7. **Profiles app** — View NPC intel cards
+8. **Settings app** — Configure everything in-phone
 
 ### How It Works
 
