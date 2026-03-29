@@ -1,14 +1,14 @@
 /**
- * Command-X Phone — SillyTavern Extension v0.9
+ * Command-X Phone — SillyTavern Extension v0.10.0
  *
  * Approach: inject a system prompt that tells the LLM to wrap the
  * character's text/neural reply in [sms]…[/sms] tags. The extension
  * extracts that block for the phone UI and hides it from ST chat.
  * Message history is stored in localStorage (phone owns its own log).
  *
- * v0.9: Compose queue (batch mode), notification badges, [status] tag,
- *        Profiles app, Settings app, toast notifications, recency sort,
- *        character avatars, [sms to] filter, dead app cleanup.
+ * v0.10.0: Compose queue (batch mode), notification badges, [status] tag,
+ *          Profiles app, Settings app, toast notifications, recency sort,
+ *          character avatars, [sms to] filtering, and embedded OpenClaw bridge controls.
  */
 import { getContext } from '../../../st-context.js';
 import {
@@ -1155,7 +1155,7 @@ function buildPhone() {
                 </div>
                 <div class="cx-settings-section">ABOUT</div>
                 <div class="cx-settings-row cx-settings-about">
-                    <div>Command-X v0.9</div>
+                    <div>Command-X v0.10.0</div>
                     <div style="color:#666;font-size:11px;margin-top:4px">By Kyle & Bucky 🦌</div>
                 </div>
             </div>
@@ -1684,17 +1684,27 @@ function styleCommandsInMessage(mesId) {
 function loadSettings() {
     const ctx = getContext();
     if (ctx.extensionSettings[EXT]) Object.assign(settings, ctx.extensionSettings[EXT]);
-    const cb = (id, key) => { const el = document.getElementById(id); if (el) el.checked = !!settings[key]; };
-    cb('cx_enabled', 'enabled');
-    cb('cx_style_commands', 'styleCommands');
-    cb('cx_show_lockscreen', 'showLockscreen');
+    const cb = (id, key, fallback = false) => {
+        const el = document.getElementById(id);
+        if (el) el.checked = settings[key] ?? fallback;
+    };
+    cb('cx_enabled', 'enabled', true);
+    cb('cx_style_commands', 'styleCommands', true);
+    cb('cx_show_lockscreen', 'showLockscreen', false);
+    cb('cx_ext_batch_mode', 'batchMode', false);
+    cb('cx_ext_auto_detect_npcs', 'autoDetectNpcs', true);
     if (!["observe", "assist", "operate"].includes(settings.openclawMode)) settings.openclawMode = 'assist';
+    const openclawMode = document.getElementById('cx_ext_openclaw_mode');
+    if (openclawMode) openclawMode.value = settings.openclawMode || 'assist';
 }
 
 function saveSettings() {
     settings.enabled = document.getElementById('cx_enabled')?.checked ?? true;
     settings.styleCommands = document.getElementById('cx_style_commands')?.checked ?? true;
     settings.showLockscreen = document.getElementById('cx_show_lockscreen')?.checked ?? false;
+    settings.batchMode = document.getElementById('cx_ext_batch_mode')?.checked ?? settings.batchMode ?? false;
+    settings.autoDetectNpcs = document.getElementById('cx_ext_auto_detect_npcs')?.checked ?? settings.autoDetectNpcs ?? true;
+    settings.openclawMode = document.getElementById('cx_ext_openclaw_mode')?.value || settings.openclawMode || 'assist';
     const ctx = getContext();
     ctx.extensionSettings[EXT] = { ...settings };
     ctx.saveSettingsDebounced();
@@ -1714,11 +1724,12 @@ jQuery(async () => {
         } catch (e) { console.warn(`[${EXT}] Settings HTML:`, e); }
 
         loadSettings();
-        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen').on('change', () => {
+        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_ext_openclaw_mode').on('change', () => {
             saveSettings();
             if (settings.enabled) {
                 createPanel();
-                injectContactsPrompt();
+                if (settings.autoDetectNpcs !== false) injectContactsPrompt();
+                else clearContactsPrompt();
             } else {
                 destroyPanel();
                 clearContactsPrompt();
@@ -1874,7 +1885,7 @@ jQuery(async () => {
             createPanel();
             if (settings.autoDetectNpcs !== false) injectContactsPrompt();
         }
-        console.log(`[${EXT}] v0.9 Loaded OK`);
+        console.log(`[${EXT}] v0.10.0 Loaded OK`);
     } catch (err) {
         console.error(`[${EXT}] INIT FAILED:`, err);
     }

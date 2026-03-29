@@ -23,8 +23,28 @@
                     <span>Start on lock screen</span>
                 </label>
             </div>
+            <div class="cx-opt">
+                <label class="checkbox_label" for="cx_ext_batch_mode">
+                    <input id="cx_ext_batch_mode" type="checkbox" />
+                    <span>Enable batch send mode by default</span>
+                </label>
+            </div>
+            <div class="cx-opt">
+                <label class="checkbox_label" for="cx_ext_auto_detect_npcs">
+                    <input id="cx_ext_auto_detect_npcs" type="checkbox" />
+                    <span>Auto-detect NPCs from [status] tags</span>
+                </label>
+            </div>
+            <div class="cx-opt">
+                <label for="cx_ext_openclaw_mode"><span>Default OpenClaw mode</span></label>
+                <select id="cx_ext_openclaw_mode" class="text_pole">
+                    <option value="observe">observe</option>
+                    <option value="assist">assist</option>
+                    <option value="operate">operate</option>
+                </select>
+            </div>
             <hr />
-            <small>Persistent phone panel on the right side of the screen. Toggle with the 📱 button. Includes the Command-X neural app and a standard Messages app.</small>
+            <small>Persistent phone panel on the right side of the screen. Includes Command-X messaging, contact profiles, in-phone settings, and the embedded OpenClaw bridge controls.</small>
         </div>
     </div>
 </div>
