@@ -601,7 +601,7 @@ function saveNpcs(npcs) {
 
 /**
  * Parse [status] (or legacy [contacts]) JSON from a message.
- * [status][{"name":"Sarah","emoji":"👩","status":"online","mood":"😊 happy","location":"home","relationship":"friendly","thoughts":"..."}][/status]
+ * [status][{"name":"Sarah","emoji":"👩","status":"online","mood":"😊 happy","location":"home","relationship":"friendly","thoughts":"I need to play this cool or she'll notice immediately."}][/status]
  */
 function extractContacts(raw) {
     if (!raw) return null;
@@ -659,11 +659,10 @@ function hideContactsTagsInDom(mesId) {
 function injectContactsPrompt() {
     const ctx = getContext();
     const userName = ctx.name1 || '';
-    const charName = ctx.name2 || '';
-    const excludeNote = [userName, charName].filter(Boolean).map(n => `"${n}"`).join(' or ');
+    const excludeNote = [userName].filter(Boolean).map(n => `"${n}"`).join(' or ');
     setExtensionPrompt(
         INJECT_KEY_CONTACTS,
-        `[System: At the end of each response, include a [status] block with a JSON array of NPCs/side characters. Format: [status][{"name":"Name","emoji":"👩","status":"online","mood":"😊 happy","location":"her apartment","relationship":"friendly","thoughts":"wondering about dinner"}][/status] — "status" can be "online"/"offline"/"nearby". "mood" is an emoji + short descriptor. "location" is where they currently are. "relationship" is how they feel about the user (friendly/neutral/hostile/romantic/etc). "thoughts" is a brief inner thought. Only include side characters/NPCs who exist in the scene. Do NOT include ${excludeNote || 'the user or the main character'}. If no NPCs are relevant, omit the [status] block entirely.]`,
+        `[System: At the end of each response, include a [status] block with a JSON array of the present characters relevant to the scene, including the current main character and any side characters/NPCs. Format: [status][{"name":"Name","emoji":"👩","status":"online","mood":"😊 happy","location":"her apartment","relationship":"friendly","thoughts":"I need to keep my voice steady or he'll hear how much this matters to me."}][/status] — "status" can be "online"/"offline"/"nearby". "mood" is an emoji + short descriptor. "location" is where they currently are. "relationship" is how they feel about the user (friendly/neutral/hostile/romantic/etc). "thoughts" is a short first-person internal monologue line written in the character's own private voice, as if we are hearing their exact thoughts directly. It should sound like something they are silently thinking to themselves right now, not a narrator summary, not a mood label, and not a generic state description. Include the active main character plus any relevant side characters/NPCs who exist in the scene. Do NOT include ${excludeNote || 'the user'}. If no other characters are relevant, you may still include the current main character alone.]`,
         extension_prompt_types.IN_CHAT,
         2,       // depth = 2 (slightly further back than [sms])
         false,
@@ -1114,7 +1113,7 @@ function buildPhone() {
                     <div class="cx-profile-fields">
                         ${c.location ? `<div class="cx-profile-field"><span class="cx-pf-label">📍 Location</span><span class="cx-pf-value">${escHtml(c.location)}</span></div>` : ''}
                         ${c.relationship ? `<div class="cx-profile-field"><span class="cx-pf-label">💬 Relationship</span><span class="cx-pf-value">${escHtml(c.relationship)}</span></div>` : ''}
-                        ${c.thoughts ? `<div class="cx-profile-field"><span class="cx-pf-label">💭 Thoughts</span><span class="cx-pf-value cx-pf-italic">${escHtml(c.thoughts)}</span></div>` : ''}
+                        ${c.thoughts ? `<div class="cx-profile-field"><span class="cx-pf-label">💭 Inner Monologue</span><span class="cx-pf-value cx-pf-italic">${escHtml(c.thoughts)}</span></div>` : ''}
                         ${!c.location && !c.relationship && !c.thoughts ? '<div class="cx-profile-field"><span class="cx-pf-value" style="color:#666">No intel yet</span></div>' : ''}
                     </div>
                 </div>`).join('') : '<div style="padding:20px;color:#666;text-align:center">No contacts in current chat</div>'}

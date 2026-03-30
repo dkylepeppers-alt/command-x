@@ -41,8 +41,8 @@ Messages flow through the RP naturally. The extension uses prompt injection so t
 - **Local slash fallback** — Run SillyTavern slash commands locally from the same operator surface
 
 ### 🔍 Profiles App (Contact Intel)
-- **NPC state tracking** — The LLM reports NPC status via `[status]` tags (mood, location, relationship, inner thoughts)
-- **Intel cards** — Each contact gets a profile card with their current state
+- **Character state tracking** — The LLM reports present-character status via `[status]` tags (mood, location, relationship, inner monologue)
+- **Intel cards** — The active character and relevant contacts get profile cards with their current state
 - **Auto-detection** — NPCs appear automatically as the story introduces them
 - **Persistent** — NPC data survives page refreshes (localStorage-backed)
 
@@ -118,7 +118,7 @@ ST chat shows narration with subtle 📱 indicators
 | Tag | Purpose | Example |
 |-----|---------|---------|
 | `[sms from="Name" to="user"]...[/sms]` | Phone text content | `[sms from="Sarah" to="user"]omw![/sms]` |
-| `[status][...JSON...][/status]` | NPC state data | `[status][{"name":"Sarah","emoji":"👩","mood":"😊 happy","location":"café"}][/status]` |
+| `[status][...JSON...][/status]` | present-character state data | `[status][{"name":"Sarah","emoji":"👩","mood":"😊 happy","location":"café","thoughts":"I really hope he asks me to stay a little longer."}][/status]` |
 
 Tags are injected by the extension automatically — you don't need to type them.
 
