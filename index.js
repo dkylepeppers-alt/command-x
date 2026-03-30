@@ -21,10 +21,13 @@ const EXT = 'command-x';
 const INJECT_KEY = 'command-x-sms';
 const INJECT_KEY_CONTACTS = 'command-x-contacts';
 const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true, openclawMode: 'assist' };
+const CONTACT_FIELDS = ['emoji', 'status', 'mood', 'location', 'relationship', 'thoughts', 'avatarUrl'];
+const MANUAL_OVERRIDE_FIELDS = [...CONTACT_FIELDS];
 let settings = { ...DEFAULTS };
 let phoneContainer = null;
 let commandMode = null; // null | 'COMMAND' | 'FORGET' | 'BELIEVE' | 'COMPEL'
 let neuralMode = false; // toggled via ⚡ button in chat header
+let profileEditorState = null;
 
 
 const OPENCLAW_API_BASE = '/api/plugins/openclaw-bridge';
@@ -599,6 +602,20 @@ function saveNpcs(npcs) {
     catch (e) { console.warn('[command-x] npc store save', e); }
 }
 
+function sanitizeContactValue(field, value) {
+    if (field === 'emoji') return String(value || '').trim() || '🧑';
+    if (field === 'status') {
+        const normalized = String(value || '').trim().toLowerCase();
+        return ['online', 'offline', 'nearby'].includes(normalized) ? normalized : 'nearby';
+    }
+    const text = String(value || '').trim();
+    return text || null;
+}
+
+function getManualOverrides(contact = {}) {
+    return { ...(contact.manualOverrides || {}) };
+}
+
 /**
  * Parse [status] (or legacy [contacts]) JSON from a message.
  * [status][{"name":"Sarah","emoji":"👩","status":"online","mood":"😊 happy","location":"home","relationship":"friendly","thoughts":"I need to play this cool or she'll notice immediately."}][/status]
@@ -619,6 +636,7 @@ function extractContacts(raw) {
             location: c.location || null,
             relationship: c.relationship || null,
             thoughts: c.thoughts || null,
+            avatarUrl: c.avatarUrl || null,
         }));
     } catch (e) {
         console.warn('[command-x] failed to parse [status] JSON:', e);
@@ -634,9 +652,20 @@ function mergeNpcs(incoming) {
     if (!incoming || !incoming.length) return;
     const stored = loadNpcs();
     for (const npc of incoming) {
-        const idx = stored.findIndex(s => s.name.toLowerCase() === npc.name.toLowerCase());
-        if (idx >= 0) stored[idx] = { ...stored[idx], ...npc };
-        else stored.push(npc);
+        const idx = findStoredNpcIndexByName(npc.name, stored);
+        if (idx >= 0) {
+            const existing = stored[idx];
+            const merged = { ...existing, ...npc };
+            const manualOverrides = getManualOverrides(existing);
+            MANUAL_OVERRIDE_FIELDS.forEach(field => {
+                if (manualOverrides[field]) merged[field] = existing[field] ?? null;
+            });
+            merged.isManual = existing.isManual || Object.values(manualOverrides).some(Boolean);
+            merged.manualOverrides = manualOverrides;
+            stored[idx] = merged;
+        } else {
+            stored.push(npc);
+        }
     }
     saveNpcs(stored);
 }
@@ -782,6 +811,13 @@ function incrementUnread(contactName) {
     updateUnreadBadges();
 }
 
+function setUnread(contactName, value) {
+    const count = Math.max(0, parseInt(value || '0', 10) || 0);
+    if (!count) localStorage.removeItem(unreadKey(contactName));
+    else localStorage.setItem(unreadKey(contactName), String(count));
+    updateUnreadBadges();
+}
+
 function showToast(contactName, text) {
     // Remove existing toast
     document.getElementById('cx-toast')?.remove();
@@ -923,6 +959,7 @@ function getContactsFromContext() {
                 gradient: gradients[i % gradients.length],
                 online: true,
                 isNpc: false,
+                status: npcData?.status || 'online',
                 mood: npcData?.mood || null,
                 location: npcData?.location || null,
                 relationship: npcData?.relationship || null,
@@ -942,12 +979,15 @@ function getContactsFromContext() {
             gradient: gradients[(chars.length + i) % gradients.length],
             online: npcs[i].status === 'online' || npcs[i].status === 'nearby',
             isNpc: true,
+            status: npcs[i].status || 'nearby',
             npcStatus: npcs[i].status || 'nearby',
             mood: npcs[i].mood || null,
             location: npcs[i].location || null,
             relationship: npcs[i].relationship || null,
             thoughts: npcs[i].thoughts || null,
             avatarUrl: npcs[i].avatarUrl || null,
+            isManual: !!npcs[i].isManual,
+            manualOverrides: { ...(npcs[i].manualOverrides || {}) },
         });
     }
     // Sort by most recent message timestamp (contacts with messages first)
@@ -966,6 +1006,249 @@ function getContactsFromContext() {
 const now = () => new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 const today = () => new Date().toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
 function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>'); }
+function escAttr(s) { return String(s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function normalizeContactName(name) {
+    return String(name || '').trim().toLowerCase();
+}
+
+function safeDataUrlFromFile(file, maxWidth = 256, quality = 0.82) {
+    return new Promise((resolve, reject) => {
+        if (!file || !file.type || !file.type.startsWith('image/')) {
+            reject(new Error('Please choose an image file.'));
+            return;
+        }
+        const reader = new FileReader();
+        reader.onerror = () => reject(new Error('Could not read image file.'));
+        reader.onload = () => {
+            const img = new Image();
+            img.onerror = () => reject(new Error('Could not load selected image.'));
+            img.onload = () => {
+                const scale = Math.min(1, maxWidth / Math.max(img.width, img.height));
+                const canvas = document.createElement('canvas');
+                canvas.width = Math.max(1, Math.round(img.width * scale));
+                canvas.height = Math.max(1, Math.round(img.height * scale));
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                try {
+                    resolve(canvas.toDataURL('image/jpeg', quality));
+                } catch {
+                    reject(new Error('Could not compress image for storage.'));
+                }
+            };
+            img.src = String(reader.result || '');
+        };
+        reader.readAsDataURL(file);
+    });
+}
+
+function findStoredNpcIndexByName(name, stored = null) {
+    const list = stored || loadNpcs();
+    const normalized = normalizeContactName(name);
+    return list.findIndex(s => normalizeContactName(s.name) == normalized);
+}
+
+function upsertStoredContact(contact, options = {}) {
+    if (!contact || !String(contact.name || '').trim()) throw new Error('Contact name is required.');
+    const stored = loadNpcs();
+    const oldName = options.oldName ? normalizeContactName(options.oldName) : null;
+    const targetName = normalizeContactName(contact.name);
+    const existingIdx = oldName ? findStoredNpcIndexByName(options.oldName, stored) : -1;
+    const collidingIdx = stored.findIndex((entry, idx) => normalizeContactName(entry.name) === targetName && idx !== existingIdx);
+    if (collidingIdx >= 0) throw new Error('A contact with that name already exists in this chat.');
+
+    const existingEntry = existingIdx >= 0 ? stored[existingIdx] : null;
+    const manualOverrides = { ...(existingEntry?.manualOverrides || {}), ...(contact.manualOverrides || {}) };
+    const clean = {
+        name: String(contact.name || '').trim(),
+        emoji: sanitizeContactValue('emoji', contact.emoji),
+        status: sanitizeContactValue('status', contact.status),
+        mood: sanitizeContactValue('mood', contact.mood),
+        location: sanitizeContactValue('location', contact.location),
+        relationship: sanitizeContactValue('relationship', contact.relationship),
+        thoughts: sanitizeContactValue('thoughts', contact.thoughts),
+        avatarUrl: sanitizeContactValue('avatarUrl', contact.avatarUrl),
+        isManual: contact.isManual !== false,
+        manualOverrides,
+    };
+
+    if (existingIdx >= 0) stored[existingIdx] = { ...stored[existingIdx], ...clean, isManual: true };
+    else stored.push(clean);
+    saveNpcs(stored);
+
+    if (options.oldName && normalizeContactName(options.oldName) !== targetName) renameContactThread(options.oldName, clean.name);
+    return clean;
+}
+
+function renameContactThread(oldName, newName) {
+    if (!oldName || !newName || oldName === newName) return;
+    const oldMsgs = loadMessages(oldName);
+    if (oldMsgs.length) {
+        saveMessages(newName, oldMsgs);
+        try { localStorage.removeItem(storeKey(oldName)); } catch { /* ignore */ }
+    }
+    const unread = getUnread(oldName);
+    if (unread) {
+        setUnread(newName, unread);
+        try { localStorage.removeItem(unreadKey(oldName)); } catch { /* ignore */ }
+    }
+    if (currentContactName === oldName) currentContactName = newName;
+    composeQueue = composeQueue.map(item => item.contactName === oldName ? { ...item, contactName: newName } : item);
+}
+
+function deleteStoredContact(name) {
+    const stored = loadNpcs();
+    const idx = findStoredNpcIndexByName(name, stored);
+    if (idx < 0) return false;
+    stored.splice(idx, 1);
+    saveNpcs(stored);
+    try { localStorage.removeItem(storeKey(name)); } catch { /* ignore */ }
+    try { localStorage.removeItem(unreadKey(name)); } catch { /* ignore */ }
+    composeQueue = composeQueue.filter(item => item.contactName !== name);
+    if (currentContactName === name) currentContactName = null;
+    return true;
+}
+
+function getEditableContact(name) {
+    const contacts = getContactsFromContext();
+    const found = contacts.find(c => c.name === name);
+    if (found) return { ...found };
+    const stored = loadNpcs().find(n => normalizeContactName(n.name) === normalizeContactName(name));
+    return stored ? { ...stored, isNpc: true, isManual: true } : null;
+}
+
+function openProfileEditor(contactName = null) {
+    const existing = contactName ? getEditableContact(contactName) : null;
+    profileEditorState = {
+        mode: existing ? 'edit' : 'new',
+        oldName: existing?.name || null,
+        draft: {
+            name: existing?.name || '',
+            emoji: existing?.emoji || '🧑',
+            status: existing?.status || (existing?.online ? 'online' : 'nearby'),
+            mood: existing?.mood || '',
+            location: existing?.location || '',
+            relationship: existing?.relationship || '',
+            thoughts: existing?.thoughts || '',
+            avatarUrl: existing?.avatarUrl || '',
+        },
+    };
+    rebuildPhone();
+    switchView('profiles');
+}
+
+function closeProfileEditor() {
+    if (!profileEditorState) return;
+    profileEditorState = null;
+    rebuildPhone();
+    switchView('profiles');
+}
+
+function syncProfileEditorDraftFromForm() {
+    if (!profileEditorState) return;
+    const form = phoneContainer?.querySelector('#cx-profile-form');
+    if (!form) return;
+    const data = new FormData(form);
+    profileEditorState.draft = {
+        ...profileEditorState.draft,
+        name: String(data.get('name') || '').trim(),
+        emoji: String(data.get('emoji') || '').trim() || '🧑',
+        status: String(data.get('status') || 'nearby').trim().toLowerCase(),
+        mood: String(data.get('mood') || '').trim(),
+        location: String(data.get('location') || '').trim(),
+        relationship: String(data.get('relationship') || '').trim(),
+        thoughts: String(data.get('thoughts') || '').trim(),
+        avatarUrl: String(data.get('avatarUrl') || '').trim(),
+    };
+}
+
+function saveProfileEditor() {
+    if (!profileEditorState) return;
+    const form = phoneContainer?.querySelector('#cx-profile-form');
+    if (!form) return;
+    const data = new FormData(form);
+    const draft = {
+        name: String(data.get('name') || '').trim(),
+        emoji: String(data.get('emoji') || '').trim() || '🧑',
+        status: String(data.get('status') || 'nearby').trim().toLowerCase(),
+        mood: String(data.get('mood') || '').trim(),
+        location: String(data.get('location') || '').trim(),
+        relationship: String(data.get('relationship') || '').trim(),
+        thoughts: String(data.get('thoughts') || '').trim(),
+        avatarUrl: String(data.get('avatarUrl') || '').trim(),
+        manualOverrides: MANUAL_OVERRIDE_FIELDS.reduce((acc, field) => {
+            acc[field] = true;
+            return acc;
+        }, {}),
+    };
+
+    if (!draft.name) {
+        alert('Contact name is required.');
+        return;
+    }
+
+    try {
+        const saved = upsertStoredContact(draft, { oldName: profileEditorState.oldName || null });
+        const wasNew = profileEditorState.mode === 'new';
+        profileEditorState = null;
+        rebuildPhone();
+        switchView('profiles');
+        showToast(saved.name, wasNew ? 'Contact added.' : 'Profile updated.');
+    } catch (error) {
+        alert(String(error?.message || error));
+    }
+}
+
+function triggerAvatarPicker(contactName) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.style.display = 'none';
+    document.body.appendChild(input);
+    input.addEventListener('change', async () => {
+        const file = input.files?.[0];
+        if (!file) {
+            input.remove();
+            return;
+        }
+        try {
+            const dataUrl = await safeDataUrlFromFile(file);
+            if (profileEditorState) {
+                profileEditorState.draft.avatarUrl = dataUrl;
+                rebuildPhone();
+                switchView('profiles');
+                return;
+            }
+            const existing = getEditableContact(contactName);
+            if (!existing) throw new Error('Could not find that contact.');
+            upsertStoredContact({
+                ...existing,
+                avatarUrl: dataUrl,
+                manualOverrides: { ...(existing.manualOverrides || {}), avatarUrl: true },
+            }, { oldName: existing.name });
+            rebuildPhone();
+            switchView('profiles');
+            showToast(existing.name, 'Avatar updated.');
+        } catch (error) {
+            alert(String(error?.message || error));
+        } finally {
+            input.remove();
+        }
+    }, { once: true });
+    input.click();
+}
+
+function promptDeleteContact(contactName) {
+    const contact = getEditableContact(contactName);
+    if (!contact?.isNpc) {
+        alert('Only manual/NPC contacts can be deleted from Command-X.');
+        return;
+    }
+    if (!confirm(`Delete ${contactName} from Command-X contacts for this chat?`)) return;
+    deleteStoredContact(contactName);
+    rebuildPhone();
+    switchView('profiles');
+}
 
 /* ======================================================================
    SEND MESSAGE THROUGH THE RP
@@ -1003,6 +1286,79 @@ function avatarHTML(c, sizeClass = '') {
         return `<div class="cx-avatar ${sizeClass}" style="background:${c.gradient}"><img class="cx-avatar-img" src="${c.avatarUrl}" alt="" onerror="this.style.display='none';this.nextSibling.style.display=''"><span style="display:none">${c.emoji}</span></div>`;
     }
     return `<div class="cx-avatar ${sizeClass}" style="background:${c.gradient}">${c.emoji}</div>`;
+}
+
+function profileEditorModalHTML() {
+    if (!profileEditorState) return '';
+    const draft = profileEditorState.draft || {};
+    const title = profileEditorState.mode === 'new' ? 'Add Contact' : 'Edit Profile';
+    const saveLabel = profileEditorState.mode === 'new' ? 'Add Contact' : 'Save Changes';
+    const avatarPreview = draft.avatarUrl
+        ? `<div class="cx-profile-editor-avatar-preview"><img src="${draft.avatarUrl}" alt="Avatar preview" /></div>`
+        : `<div class="cx-profile-editor-avatar-fallback">${escHtml(draft.emoji || '🧑')}</div>`;
+    return `
+    <div class="cx-profile-editor-backdrop" id="cx-profile-editor-backdrop">
+        <div class="cx-profile-editor-sheet" role="dialog" aria-modal="true" aria-label="${title}">
+            <div class="cx-profile-editor-header">
+                <div>
+                    <div class="cx-profile-editor-title">${title}</div>
+                    <div class="cx-profile-editor-sub">Manual contact info stays pinned over future [status] sync updates.</div>
+                </div>
+                <button type="button" class="cx-profile-editor-close" id="cx-profile-cancel">✕</button>
+            </div>
+            <form class="cx-profile-editor-form" id="cx-profile-form">
+                <div class="cx-profile-editor-avatar-row">
+                    ${avatarPreview}
+                    <div class="cx-profile-editor-avatar-actions">
+                        <button type="button" class="cx-profile-editor-upload" id="cx-profile-upload">Upload Avatar</button>
+                        <button type="button" class="cx-profile-editor-clear" id="cx-profile-clear-avatar">Clear Avatar</button>
+                    </div>
+                </div>
+                <label class="cx-profile-editor-field">
+                    <span>Name</span>
+                    <input type="text" name="name" maxlength="80" value="${escAttr(draft.name || '')}" placeholder="Contact name" />
+                </label>
+                <div class="cx-profile-editor-grid">
+                    <label class="cx-profile-editor-field">
+                        <span>Emoji</span>
+                        <input type="text" name="emoji" maxlength="8" value="${escAttr(draft.emoji || '🧑')}" placeholder="🧑" />
+                    </label>
+                    <label class="cx-profile-editor-field">
+                        <span>Status</span>
+                        <select name="status">
+                            <option value="online" ${String(draft.status || 'nearby') === 'online' ? 'selected' : ''}>Online</option>
+                            <option value="nearby" ${String(draft.status || 'nearby') === 'nearby' ? 'selected' : ''}>Nearby</option>
+                            <option value="offline" ${String(draft.status || 'nearby') === 'offline' ? 'selected' : ''}>Offline</option>
+                        </select>
+                    </label>
+                </div>
+                <label class="cx-profile-editor-field">
+                    <span>Mood</span>
+                    <input type="text" name="mood" maxlength="120" value="${escAttr(draft.mood || '')}" placeholder="😊 calm, keyed up, curious..." />
+                </label>
+                <label class="cx-profile-editor-field">
+                    <span>Location</span>
+                    <input type="text" name="location" maxlength="120" value="${escAttr(draft.location || '')}" placeholder="Where they are right now" />
+                </label>
+                <label class="cx-profile-editor-field">
+                    <span>Relationship</span>
+                    <input type="text" name="relationship" maxlength="120" value="${escAttr(draft.relationship || '')}" placeholder="friendly, tense, romantic..." />
+                </label>
+                <label class="cx-profile-editor-field">
+                    <span>Inner Monologue</span>
+                    <textarea name="thoughts" rows="3" placeholder="What they're privately thinking right now">${escAttr(draft.thoughts || '')}</textarea>
+                </label>
+                <label class="cx-profile-editor-field">
+                    <span>Avatar URL</span>
+                    <input type="url" name="avatarUrl" value="${escAttr(draft.avatarUrl || '')}" placeholder="https://... or keep uploaded avatar" />
+                </label>
+                <div class="cx-profile-editor-footer">
+                    <button type="button" class="cx-profile-editor-secondary" id="cx-profile-cancel-footer">Cancel</button>
+                    <button type="submit" class="cx-profile-editor-primary">${saveLabel}</button>
+                </div>
+            </form>
+        </div>
+    </div>`;
 }
 
 function contactRowHTML(c, i, app) {
@@ -1099,6 +1455,9 @@ function buildPhone() {
             <div class="cx-profiles-header">
                 <div class="cx-profiles-title">Profiles</div>
                 <div class="cx-profiles-sub">Contact Intelligence</div>
+                <div class="cx-profiles-actions">
+                    <button class="cx-settings-btn" id="cx-add-contact">+ Add Contact</button>
+                </div>
             </div>
             <div class="cx-profiles-list">
                 ${hasContacts ? contacts.map(c => `
@@ -1109,6 +1468,11 @@ function buildPhone() {
                             <div class="cx-profile-name">${c.name} ${c.isNpc ? '<span class="cx-npc-badge">NPC</span>' : ''}</div>
                             <div class="cx-profile-status">${c.mood || (c.online ? '🟢 Online' : '⚫ Offline')}</div>
                         </div>
+                    </div>
+                    <div class="cx-profile-actions">
+                        <button class="cx-profile-action-btn" data-cx-edit="${c.name}">Edit</button>
+                        <button class="cx-profile-action-btn" data-cx-avatar="${c.name}">Avatar</button>
+                        ${c.isNpc ? `<button class="cx-profile-action-btn cx-profile-action-danger" data-cx-delete="${c.name}">Delete</button>` : ``}
                     </div>
                     <div class="cx-profile-fields">
                         ${c.location ? `<div class="cx-profile-field"><span class="cx-pf-label">📍 Location</span><span class="cx-pf-value">${escHtml(c.location)}</span></div>` : ''}
@@ -1145,6 +1509,7 @@ function buildPhone() {
                     <label class="cx-toggle"><input type="checkbox" id="cx-set-npcs" ${settings.autoDetectNpcs !== false ? 'checked' : ''}><span class="cx-toggle-slider"></span></label>
                 </div>
                 <div class="cx-settings-row cx-settings-btn-row">
+                    <button class="cx-settings-btn" id="cx-set-add-contact">Add Contact</button>
                     <button class="cx-settings-btn cx-settings-btn-danger" id="cx-set-clear-npcs">Clear All NPC Data</button>
                 </div>
                 <div class="cx-settings-section">DISPLAY</div>
@@ -1254,6 +1619,7 @@ function buildPhone() {
         </div>
 
       </div>
+      ${profileEditorModalHTML()}
     </div>`;
 }
 
@@ -1308,8 +1674,9 @@ function openChat(contactName, app, preserveState = false) {
 
     const nameEl = phoneContainer?.querySelector('#cx-chat-name');
     const statusEl = phoneContainer?.querySelector('#cx-chat-status');
+    const contact = getContactsFromContext().find(c => c.name === contactName);
     if (nameEl) nameEl.textContent = contactName;
-    if (statusEl) statusEl.textContent = 'online';
+    if (statusEl) statusEl.textContent = contact?.mood || contact?.location || (contact?.online ? 'online' : 'offline');
 
     const input = phoneContainer?.querySelector('#cx-msg-input');
     if (input) input.placeholder = 'Type a message...';
@@ -1450,6 +1817,8 @@ function wirePhone() {
         settings.showLockscreen = e.target.checked;
         saveSettings();
     });
+    phoneContainer.querySelector('#cx-add-contact')?.addEventListener('click', () => { openProfileEditor(); });
+    phoneContainer.querySelector('#cx-set-add-contact')?.addEventListener('click', () => { openProfileEditor(); });
     phoneContainer.querySelector('#cx-set-clear-npcs')?.addEventListener('click', () => {
         if (confirm('Clear all NPC contacts for this chat?')) {
             saveNpcs([]);
@@ -1478,6 +1847,44 @@ function wirePhone() {
         if (rejectId) {
             rejectOpenClawAction(rejectId).catch(error => setOpenClawStatus(String(error?.message || error)));
         }
+    });
+    phoneContainer.querySelectorAll('[data-cx-edit]').forEach(btn =>
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openProfileEditor(btn.dataset.cxEdit);
+        })
+    );
+    phoneContainer.querySelectorAll('[data-cx-avatar]').forEach(btn =>
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            triggerAvatarPicker(btn.dataset.cxAvatar);
+        })
+    );
+    phoneContainer.querySelectorAll('[data-cx-delete]').forEach(btn =>
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            promptDeleteContact(btn.dataset.cxDelete);
+        })
+    );
+    phoneContainer.querySelector('#cx-profile-cancel')?.addEventListener('click', closeProfileEditor);
+    phoneContainer.querySelector('#cx-profile-cancel-footer')?.addEventListener('click', closeProfileEditor);
+    phoneContainer.querySelector('#cx-profile-upload')?.addEventListener('click', () => {
+        syncProfileEditorDraftFromForm();
+        triggerAvatarPicker(profileEditorState?.oldName || profileEditorState?.draft?.name || '__draft__');
+    });
+    phoneContainer.querySelector('#cx-profile-clear-avatar')?.addEventListener('click', () => {
+        syncProfileEditorDraftFromForm();
+        if (!profileEditorState) return;
+        profileEditorState.draft.avatarUrl = '';
+        rebuildPhone();
+        switchView('profiles');
+    });
+    phoneContainer.querySelector('#cx-profile-form')?.addEventListener('submit', (event) => {
+        event.preventDefault();
+        saveProfileEditor();
+    });
+    phoneContainer.querySelector('#cx-profile-editor-backdrop')?.addEventListener('click', (event) => {
+        if (event.target?.id === 'cx-profile-editor-backdrop') closeProfileEditor();
     });
     // Profile card → open chat with that contact
     phoneContainer.querySelectorAll('.cx-profile-card[data-pname]').forEach(card =>
