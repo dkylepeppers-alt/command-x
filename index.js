@@ -20,7 +20,8 @@ import {
 const EXT = 'command-x';
 const INJECT_KEY = 'command-x-sms';
 const INJECT_KEY_CONTACTS = 'command-x-contacts';
-const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true, openclawMode: 'assist' };
+const INJECT_KEY_PRIVATE_PHONE = 'command-x-private-phone';
+const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true, manualHybridPrivateTexts: true, openclawMode: 'assist' };
 const CONTACT_FIELDS = ['emoji', 'status', 'mood', 'location', 'relationship', 'thoughts', 'avatarUrl'];
 const MANUAL_OVERRIDE_FIELDS = [...CONTACT_FIELDS];
 let settings = { ...DEFAULTS };
@@ -28,6 +29,7 @@ let phoneContainer = null;
 let commandMode = null; // null | 'COMMAND' | 'FORGET' | 'BELIEVE' | 'COMPEL'
 let neuralMode = false; // toggled via ⚡ button in chat header
 let profileEditorState = null;
+let privatePollInFlight = false;
 
 
 const OPENCLAW_API_BASE = '/api/plugins/openclaw-bridge';
@@ -53,6 +55,26 @@ function saveOpenClawChatState(patch = {}) {
 function currentChatId() {
     const ctx = getContext();
     return String(ctx.chatId || ctx.groupId || ctx.getCurrentChatId?.() || 'no-chat');
+}
+
+function getExtensionChatState() {
+    const ctx = getContext();
+    ctx.chatMetadata[EXT] = ctx.chatMetadata[EXT] || {};
+    ctx.chatMetadata[EXT].privatePhone = ctx.chatMetadata[EXT].privatePhone || {};
+    const state = ctx.chatMetadata[EXT].privatePhone;
+    if (!Array.isArray(state.events)) state.events = [];
+    if (!Number.isFinite(Number(state.lastPollAt))) state.lastPollAt = 0;
+    if (!Array.isArray(state.lastPollSummary)) state.lastPollSummary = [];
+    return state;
+}
+
+function saveExtensionChatState(patch = {}) {
+    const ctx = getContext();
+    const current = getExtensionChatState();
+    ctx.chatMetadata[EXT] = ctx.chatMetadata[EXT] || {};
+    ctx.chatMetadata[EXT].privatePhone = { ...current, ...patch };
+    ctx.saveMetadata();
+    return ctx.chatMetadata[EXT].privatePhone;
 }
 
 function getRecentMessages() {
@@ -483,6 +505,20 @@ function flushQueue() {
     injectSmsPrompt(targets);
     awaitingReply = true;
 
+    for (const queued of composeQueue) {
+        pushPrivatePhoneEvent({
+            type: 'outgoing_sms',
+            from: 'user',
+            to: queued.contactName,
+            text: queued.displayText,
+            visibility: 'private',
+            source: 'inline',
+            canonical: true,
+            sceneAware: false,
+            timestamp: Date.now(),
+        });
+    }
+
     // Send to ST
     const textarea = document.querySelector('#send_textarea');
     if (textarea) {
@@ -791,6 +827,150 @@ function pushMessage(contactName, type, text, mesId) {
     saveMessages(contactName, msgs);
 }
 
+function historyContactNames() {
+    const prefix = `cx-msgs-${currentChatId()}-`;
+    const names = new Set();
+    for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (!key || !key.startsWith(prefix)) continue;
+        const name = key.slice(prefix.length).trim();
+        if (name) names.add(name);
+    }
+    return [...names];
+}
+
+function getKnownContactsForPrivateMessaging() {
+    const contacts = getContactsFromContext();
+    const gradients = [
+        'linear-gradient(135deg,#553355,#442244)',
+        'linear-gradient(135deg,#334455,#223344)',
+        'linear-gradient(135deg,#ffaa88,#ff7755)',
+        'linear-gradient(135deg,#88aacc,#557799)',
+        'linear-gradient(135deg,#55aa77,#338855)',
+        'linear-gradient(135deg,#aa5577,#883355)',
+    ];
+    const byName = new Map(contacts.map(c => [normalizeContactName(c.name), c]));
+    for (const name of historyContactNames()) {
+        const normalized = normalizeContactName(name);
+        if (byName.has(normalized)) continue;
+        byName.set(normalized, {
+            id: `history_${normalized}`,
+            name,
+            emoji: '🧑',
+            gradient: gradients[byName.size % gradients.length],
+            online: false,
+            isNpc: true,
+            status: 'known',
+            mood: null,
+            location: null,
+            relationship: null,
+            thoughts: null,
+            avatarUrl: null,
+            isHistoryOnly: true,
+        });
+    }
+    return [...byName.values()].sort((a, b) => {
+        const aMsgs = loadMessages(a.name);
+        const bMsgs = loadMessages(b.name);
+        const aTs = aMsgs.length ? (aMsgs[aMsgs.length - 1].ts || 0) : 0;
+        const bTs = bMsgs.length ? (bMsgs[bMsgs.length - 1].ts || 0) : 0;
+        if (aTs && !bTs) return -1;
+        if (!aTs && bTs) return 1;
+        return bTs - aTs;
+    });
+}
+
+function sanitizePhoneEvent(event = {}) {
+    const type = String(event.type || 'incoming_sms').trim() || 'incoming_sms';
+    const from = String(event.from || '').trim();
+    const to = String(event.to || 'user').trim() || 'user';
+    const text = String(event.text || '').trim();
+    if (!from || !text) return null;
+    return {
+        id: String(event.id || `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`),
+        type,
+        from,
+        to,
+        text,
+        visibility: event.visibility === 'public' ? 'public' : 'private',
+        source: String(event.source || 'out_of_band').trim() || 'out_of_band',
+        canonical: event.canonical !== false,
+        sceneAware: event.sceneAware === true,
+        timestamp: Number.isFinite(Number(event.timestamp)) ? Number(event.timestamp) : Date.now(),
+        mesId: event.mesId ?? null,
+    };
+}
+
+function removePrivatePhoneEventsForMesId(mesId) {
+    if (mesId == null) return;
+    const events = loadPrivatePhoneEvents();
+    const filtered = events.filter(event => event.mesId !== mesId);
+    if (filtered.length !== events.length) {
+        savePrivatePhoneEvents(filtered);
+        refreshPrivatePhonePrompt();
+    }
+}
+
+function loadPrivatePhoneEvents() {
+    return [...getExtensionChatState().events].sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0));
+}
+
+function savePrivatePhoneEvents(events) {
+    const clean = (Array.isArray(events) ? events : [])
+        .map(sanitizePhoneEvent)
+        .filter(Boolean)
+        .sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0))
+        .slice(-200);
+    saveExtensionChatState({ events: clean });
+    return clean;
+}
+
+function pushPrivatePhoneEvent(event) {
+    const clean = sanitizePhoneEvent(event);
+    if (!clean) return null;
+    const events = loadPrivatePhoneEvents();
+    events.push(clean);
+    savePrivatePhoneEvents(events);
+    refreshPrivatePhonePrompt();
+    return clean;
+}
+
+function privateEventSummaryLine(event) {
+    if (!event) return null;
+    const sourceLabel = event.source === 'out_of_band' ? 'out-of-band' : 'inline';
+    const direction = String(event.type || '').startsWith('outgoing') ? 'You texted' : `${event.from} texted`;
+    return `${direction}: "${event.text}" (${sourceLabel}, private)`;
+}
+
+function buildPrivatePhoneSummary(limit = 8) {
+    const events = loadPrivatePhoneEvents().slice(-limit);
+    if (!events.length) return 'No recent private phone events.';
+    return events
+        .map(privateEventSummaryLine)
+        .filter(Boolean)
+        .map(line => `- ${line}`)
+        .join('\n');
+}
+
+function refreshPrivatePhonePrompt() {
+    if (!settings.enabled || settings.manualHybridPrivateTexts === false) {
+        setExtensionPrompt(INJECT_KEY_PRIVATE_PHONE, '', extension_prompt_types.NONE, 0);
+        return;
+    }
+    const summary = buildPrivatePhoneSummary(8);
+    const prompt = `[Command-X private phone context — phone events are private by default. The user and the sender know the contents of each private text. Other in-scene characters do NOT automatically know these texts unless the user reveals them, another character observes the phone activity, or the narration explicitly establishes disclosure. Private phone events may influence the user's private mood, decisions, and replies, but they remain non-public scene knowledge by default.
+Recent private phone events:
+${summary}]`;
+    setExtensionPrompt(
+        INJECT_KEY_PRIVATE_PHONE,
+        prompt,
+        extension_prompt_types.IN_CHAT,
+        3,
+        false,
+        extension_prompt_roles.SYSTEM,
+    );
+}
+
 /* ======================================================================
    UNREAD COUNTS — localStorage-backed
    ====================================================================== */
@@ -849,7 +1029,7 @@ function markRead(contactName) {
 }
 
 function getTotalUnread() {
-    const contacts = getContactsFromContext();
+    const contacts = getKnownContactsForPrivateMessaging();
     return contacts.reduce((sum, c) => sum + getUnread(c.name), 0);
 }
 
@@ -895,7 +1075,7 @@ function updateUnreadBadges() {
  */
 function removeMessagesForMesId(mesId) {
     if (mesId == null) return;
-    const allContacts = getContactsFromContext();
+    const allContacts = getKnownContactsForPrivateMessaging();
     for (const c of allContacts) {
         const msgs = loadMessages(c.name);
         const filtered = msgs.filter(m => m.mesId !== mesId);
@@ -1008,6 +1188,171 @@ const today = () => new Date().toLocaleDateString([], { weekday: 'long', month: 
 function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>'); }
 function escAttr(s) { return String(s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
+
+function buildOutOfBandPollPrompt() {
+    const contacts = getKnownContactsForPrivateMessaging();
+    const recentMessages = getRecentMessages().slice(-10);
+    const phoneHistory = contacts.flatMap(contact => {
+        const msgs = loadMessages(contact.name).slice(-4);
+        return msgs.map(msg => ({
+            contact: contact.name,
+            direction: msg.type === 'received' ? 'incoming' : 'outgoing',
+            text: msg.text,
+            ts: msg.ts || 0,
+        }));
+    }).sort((a, b) => a.ts - b.ts).slice(-18);
+
+    const contactSummary = contacts.map(contact => ({
+        name: contact.name,
+        status: contact.status || null,
+        mood: contact.mood || null,
+        location: contact.location || null,
+        relationship: contact.relationship || null,
+        thoughts: contact.thoughts || null,
+        historyOnly: !!contact.isHistoryOnly,
+    }));
+
+    return [
+        'You are generating private phone activity for Command-X.',
+        'Return ONLY valid JSON matching the provided schema.',
+        'Generate 0 to 3 plausible inbound SMS events from known contacts.',
+        'These are private phone events: the user and sender know them; unrelated scene characters do NOT automatically know them.',
+        'Do not write public narration. Do not mention tags. Do not include explanations.',
+        'Prefer plausibility over volume. It is valid to return no events.',
+        'Any sender must come from the known contact list below.',
+        '',
+        `Known contacts JSON: ${JSON.stringify(contactSummary)}`,
+        `Recent chat context JSON: ${JSON.stringify(recentMessages)}`,
+        `Recent phone history JSON: ${JSON.stringify(phoneHistory)}`,
+        `Existing private phone summary:
+${buildPrivatePhoneSummary(8)}`,
+    ].join('\n');
+}
+
+function privatePhoneSchema() {
+    return {
+        name: 'CommandXPrivatePhonePoll',
+        description: 'Structured out-of-band private SMS events for Command-X.',
+        strict: true,
+        value: {
+            '$schema': 'http://json-schema.org/draft-04/schema#',
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+                events: {
+                    type: 'array',
+                    items: {
+                        type: 'object',
+                        additionalProperties: false,
+                        properties: {
+                            from: { type: 'string' },
+                            to: { type: 'string' },
+                            text: { type: 'string' },
+                            shouldSend: { type: 'boolean' },
+                            reason: { type: 'string' },
+                        },
+                        required: ['from', 'to', 'text', 'shouldSend', 'reason'],
+                    },
+                },
+            },
+            required: ['events'],
+        },
+    };
+}
+
+function parsePrivatePhoneGeneration(raw) {
+    if (!raw) return [];
+    let parsed = {};
+    try {
+        parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch (error) {
+        console.warn(`[${EXT}] Could not parse private phone generation`, error, raw);
+        return [];
+    }
+    const knownContacts = getKnownContactsForPrivateMessaging();
+    const knownByName = new Map(knownContacts.map(contact => [normalizeContactName(contact.name), contact.name]));
+    return (Array.isArray(parsed?.events) ? parsed.events : [])
+        .filter(event => event && event.shouldSend !== false)
+        .map(event => {
+            const sender = knownByName.get(normalizeContactName(event.from));
+            if (!sender) return null;
+            return sanitizePhoneEvent({
+                type: 'incoming_sms',
+                from: sender,
+                to: 'user',
+                text: event.text,
+                visibility: 'private',
+                source: 'out_of_band',
+                canonical: true,
+                sceneAware: false,
+                timestamp: Date.now(),
+            });
+        })
+        .filter(Boolean)
+        .slice(0, 3);
+}
+
+async function pollPrivateMessages() {
+    if (privatePollInFlight) return;
+    if (settings.manualHybridPrivateTexts === false) {
+        showToast('Command-X', 'Private polling is disabled in settings.');
+        return;
+    }
+    const ctx = getContext();
+    if (typeof ctx.generateQuietPrompt !== 'function') {
+        alert('This SillyTavern build does not expose generateQuietPrompt() for private polling.');
+        return;
+    }
+    const contacts = getKnownContactsForPrivateMessaging();
+    if (!contacts.length) {
+        alert('No known contacts are available to poll yet.');
+        return;
+    }
+
+    privatePollInFlight = true;
+    const button = phoneContainer?.querySelector('#cx-check-private');
+    const status = phoneContainer?.querySelector('#cx-private-status');
+    if (button) button.disabled = true;
+    if (status) status.textContent = 'Checking private messages…';
+
+    try {
+        const raw = await ctx.generateQuietPrompt({
+            quietPrompt: buildOutOfBandPollPrompt(),
+            jsonSchema: privatePhoneSchema(),
+        });
+        const events = parsePrivatePhoneGeneration(raw);
+        const nowTs = Date.now();
+        saveExtensionChatState({
+            lastPollAt: nowTs,
+            lastPollSummary: events.map(event => ({ from: event.from, text: event.text, timestamp: event.timestamp })),
+        });
+
+        for (const event of events) {
+            pushPrivatePhoneEvent(event);
+            pushMessage(event.from, 'received', event.text, null);
+            const isViewingThis = currentContactName === event.from
+                && phoneContainer
+                && !document.getElementById('cx-panel-wrapper')?.classList.contains('cx-hidden');
+            if (!isViewingThis) incrementUnread(event.from);
+            showToast(event.from, event.text);
+        }
+
+        const area = phoneContainer?.querySelector('#cx-msg-area');
+        if (area && currentContactName) renderAllBubbles(area, currentContactName, false);
+        updateUnreadBadges();
+
+        if (status) status.textContent = events.length
+            ? `Found ${events.length} private message${events.length === 1 ? '' : 's'}.`
+            : 'No new private messages.';
+    } catch (error) {
+        console.error(`[${EXT}] Private message poll failed`, error);
+        if (status) status.textContent = `Private check failed: ${error?.message || error}`;
+    } finally {
+        if (button) button.disabled = false;
+        privatePollInFlight = false;
+    }
+}
+
 function normalizeContactName(name) {
     return String(name || '').trim().toLowerCase();
 }
@@ -1110,7 +1455,7 @@ function deleteStoredContact(name) {
 }
 
 function getEditableContact(name) {
-    const contacts = getContactsFromContext();
+    const contacts = getKnownContactsForPrivateMessaging();
     const found = contacts.find(c => c.name === name);
     if (found) return { ...found };
     const stored = loadNpcs().find(n => normalizeContactName(n.name) === normalizeContactName(name));
@@ -1383,7 +1728,7 @@ function contactRowHTML(c, i, app) {
 }
 
 function buildPhone() {
-    const contacts = getContactsFromContext();
+    const contacts = getKnownContactsForPrivateMessaging();
     const hasContacts = contacts.length > 0;
     const lockActive = settings.showLockscreen ? 'active' : '';
     const homeActive = settings.showLockscreen ? '' : 'active';
@@ -1441,6 +1786,10 @@ function buildPhone() {
                 <div class="cx-cmdx-sub">NETHERTECH INDUSTRIES v3.4.2</div>
             </div>
             <div class="cx-sync-bar">✓ Neural Link Stable · ${hasContacts ? contacts.length + ' Contact' + (contacts.length > 1 ? 's' : '') + ' Synced' : 'No Contacts Found'}</div>
+            <div class="cx-private-bar">
+                <button class="cx-settings-btn cx-private-btn" id="cx-check-private" ${settings.manualHybridPrivateTexts === false ? 'disabled' : ''}>Check Messages</button>
+                <div class="cx-private-status" id="cx-private-status">${settings.manualHybridPrivateTexts === false ? 'Private polling disabled in settings.' : 'Manual hybrid private texting ready.'}</div>
+            </div>
             <div class="cx-contact-list">
                 ${hasContacts ? contacts.map((c, i) => contactRowHTML(c, i, 'cmdx')).join('') : '<div style="padding:20px;color:#666;text-align:center">No characters in current chat</div>'}
             </div>
@@ -1507,6 +1856,10 @@ function buildPhone() {
                 <div class="cx-settings-row">
                     <span class="cx-settings-label">Auto-Detect NPCs</span>
                     <label class="cx-toggle"><input type="checkbox" id="cx-set-npcs" ${settings.autoDetectNpcs !== false ? 'checked' : ''}><span class="cx-toggle-slider"></span></label>
+                </div>
+                <div class="cx-settings-row">
+                    <span class="cx-settings-label">Manual Hybrid Private Texts</span>
+                    <label class="cx-toggle"><input type="checkbox" id="cx-set-private-hybrid" ${settings.manualHybridPrivateTexts !== false ? 'checked' : ''}><span class="cx-toggle-slider"></span></label>
                 </div>
                 <div class="cx-settings-row cx-settings-btn-row">
                     <button class="cx-settings-btn" id="cx-set-add-contact">Add Contact</button>
@@ -1674,7 +2027,7 @@ function openChat(contactName, app, preserveState = false) {
 
     const nameEl = phoneContainer?.querySelector('#cx-chat-name');
     const statusEl = phoneContainer?.querySelector('#cx-chat-status');
-    const contact = getContactsFromContext().find(c => c.name === contactName);
+    const contact = getKnownContactsForPrivateMessaging().find(c => c.name === contactName);
     if (nameEl) nameEl.textContent = contactName;
     if (statusEl) statusEl.textContent = contact?.mood || contact?.location || (contact?.online ? 'online' : 'offline');
 
@@ -1750,6 +2103,17 @@ function sendPhoneMessage() {
         area.appendChild(renderBubble({ type: msgType, text: displayText, time: now() }));
         input.value = '';
 
+        pushPrivatePhoneEvent({
+            type: 'outgoing_sms',
+            from: 'user',
+            to: currentContactName,
+            text: displayText,
+            visibility: 'private',
+            source: 'inline',
+            canonical: true,
+            sceneAware: false,
+            timestamp: Date.now(),
+        });
         sendImmediate(currentContactName, chatText, isNeural, cmdType);
 
         // Typing indicator
@@ -1813,12 +2177,19 @@ function wirePhone() {
         if (e.target.checked) injectContactsPrompt();
         else clearContactsPrompt();
     });
+    phoneContainer.querySelector('#cx-set-private-hybrid')?.addEventListener('change', (e) => {
+        settings.manualHybridPrivateTexts = e.target.checked;
+        saveSettings();
+        refreshPrivatePhonePrompt();
+        rebuildPhone();
+    });
     phoneContainer.querySelector('#cx-set-lock')?.addEventListener('change', (e) => {
         settings.showLockscreen = e.target.checked;
         saveSettings();
     });
     phoneContainer.querySelector('#cx-add-contact')?.addEventListener('click', () => { openProfileEditor(); });
     phoneContainer.querySelector('#cx-set-add-contact')?.addEventListener('click', () => { openProfileEditor(); });
+    phoneContainer.querySelector('#cx-check-private')?.addEventListener('click', () => { pollPrivateMessages().catch(error => console.error(`[${EXT}] Private poll click failed`, error)); });
     phoneContainer.querySelector('#cx-set-clear-npcs')?.addEventListener('click', () => {
         if (confirm('Clear all NPC contacts for this chat?')) {
             saveNpcs([]);
@@ -2099,6 +2470,7 @@ function loadSettings() {
     cb('cx_show_lockscreen', 'showLockscreen', false);
     cb('cx_ext_batch_mode', 'batchMode', false);
     cb('cx_ext_auto_detect_npcs', 'autoDetectNpcs', true);
+    cb('cx_set_private_hybrid', 'manualHybridPrivateTexts', true);
     if (!["observe", "assist", "operate"].includes(settings.openclawMode)) settings.openclawMode = 'assist';
     const openclawMode = document.getElementById('cx_ext_openclaw_mode');
     if (openclawMode) openclawMode.value = settings.openclawMode || 'assist';
@@ -2110,6 +2482,7 @@ function saveSettings() {
     settings.showLockscreen = document.getElementById('cx_show_lockscreen')?.checked ?? false;
     settings.batchMode = document.getElementById('cx_ext_batch_mode')?.checked ?? settings.batchMode ?? false;
     settings.autoDetectNpcs = document.getElementById('cx_ext_auto_detect_npcs')?.checked ?? settings.autoDetectNpcs ?? true;
+    settings.manualHybridPrivateTexts = document.getElementById('cx_set_private_hybrid')?.checked ?? document.getElementById('cx-set-private-hybrid')?.checked ?? settings.manualHybridPrivateTexts ?? true;
     settings.openclawMode = document.getElementById('cx_ext_openclaw_mode')?.value || settings.openclawMode || 'assist';
     const ctx = getContext();
     ctx.extensionSettings[EXT] = { ...settings };
@@ -2130,16 +2503,19 @@ jQuery(async () => {
         } catch (e) { console.warn(`[${EXT}] Settings HTML:`, e); }
 
         loadSettings();
-        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_ext_openclaw_mode').on('change', () => {
+        refreshPrivatePhonePrompt();
+        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_openclaw_mode').on('change', () => {
             saveSettings();
             if (settings.enabled) {
                 createPanel();
                 if (settings.autoDetectNpcs !== false) injectContactsPrompt();
                 else clearContactsPrompt();
+                refreshPrivatePhonePrompt();
             } else {
                 destroyPanel();
                 clearContactsPrompt();
                 clearSmsPrompt();
+                refreshPrivatePhonePrompt();
             }
         });
 
@@ -2210,6 +2586,18 @@ jQuery(async () => {
 
                     if (targetContact) {
                         pushMessage(targetContact, 'received', block.text, mesId);
+                        pushPrivatePhoneEvent({
+                            type: 'incoming_sms',
+                            from: targetContact,
+                            to: 'user',
+                            text: block.text,
+                            visibility: 'private',
+                            source: 'inline',
+                            canonical: true,
+                            sceneAware: false,
+                            timestamp: Date.now(),
+                            mesId,
+                        });
 
                         // Increment unread if not currently viewing this contact's chat
                         const isViewingThis = currentContactName === targetContact
@@ -2256,6 +2644,7 @@ jQuery(async () => {
         // ── Swipe/regeneration handling: remove stale phone messages ──
         eventSource.on(event_types.MESSAGE_SWIPED, (mesId) => {
             removeMessagesForMesId(mesId);
+            removePrivatePhoneEventsForMesId(mesId);
             // Re-render current chat if open
             const area = phoneContainer?.querySelector('#cx-msg-area');
             if (area && currentContactName) {
@@ -2268,6 +2657,7 @@ jQuery(async () => {
             const freshCtx = getContext();
             const deletedId = (freshCtx.chat || []).length; // this was the deleted index
             removeMessagesForMesId(deletedId);
+            removePrivatePhoneEventsForMesId(deletedId);
             const area = phoneContainer?.querySelector('#cx-msg-area');
             if (area && currentContactName) {
                 renderAllBubbles(area, currentContactName, false);
@@ -2284,6 +2674,7 @@ jQuery(async () => {
             clearTypingIndicator();
             // Re-inject contacts prompt for new chat
             if (settings.enabled && settings.autoDetectNpcs !== false) injectContactsPrompt();
+            refreshPrivatePhonePrompt();
             if (phoneContainer) rebuildPhone();
         });
 

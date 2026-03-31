@@ -436,6 +436,27 @@
     padding: 20px;
 }
 
+.cx-private-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid rgba(255,255,255,.05);
+    background: rgba(18,22,30,.92);
+}
+
+.cx-private-btn[disabled] {
+    opacity: .55;
+    cursor: not-allowed;
+}
+
+.cx-private-status {
+    flex: 1;
+    font-size: 11px;
+    color: #98a7c2;
+    line-height: 1.35;
+}
+
 /* ============================================================
    iMessage-style SMS Bubbles
    ============================================================ */
