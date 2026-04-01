@@ -948,3 +948,104 @@
 .cx-profile-editor-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .cx-profile-editor-footer { display: flex; gap: 8px; justify-content: flex-end; padding-top: 4px; }
 .cx-profile-editor-footer > * { flex: 1; }
+
+/* ---- Quests view ---- */
+.cx-icon-quests { background: linear-gradient(135deg, #f59e0b, #d97706) !important; }
+.cx-quests-header { align-items: center; }
+.cx-quests-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 0 12px 16px;
+}
+.cx-quest-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.cx-quest-section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 2px 0;
+}
+.cx-quest-section-title { font-size: 12px; font-weight: 700; color: #f3f4f6; text-transform: uppercase; letter-spacing: .08em; }
+.cx-quest-section-count {
+    min-width: 22px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: rgba(255,255,255,.08);
+    color: #9ca3af;
+    font-size: 11px;
+    text-align: center;
+}
+.cx-quest-card {
+    background: rgba(20,20,25,.94);
+    border: 1px solid rgba(255,255,255,.06);
+    border-radius: 16px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+}
+.cx-quest-card-top { display: flex; justify-content: space-between; gap: 10px; }
+.cx-quest-title-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cx-quest-title { font-size: 15px; font-weight: 700; color: #fff; }
+.cx-quest-meta-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.cx-quest-chip, .cx-quest-priority, .cx-quest-status {
+    display: inline-flex;
+    align-items: center;
+    border-radius: 999px;
+    padding: 3px 8px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+}
+.cx-quest-chip { background: rgba(255,255,255,.08); color: #9ca3af; }
+.cx-quest-priority-low { background: rgba(148,163,184,.14); color: #cbd5e1; }
+.cx-quest-priority-normal { background: rgba(59,130,246,.14); color: #93c5fd; }
+.cx-quest-priority-high { background: rgba(245,158,11,.16); color: #fcd34d; }
+.cx-quest-priority-critical { background: rgba(239,68,68,.18); color: #fca5a5; }
+.cx-quest-status-active { background: rgba(16,185,129,.16); color: #6ee7b7; }
+.cx-quest-status-completed { background: rgba(59,130,246,.16); color: #93c5fd; }
+.cx-quest-status-failed { background: rgba(239,68,68,.16); color: #fca5a5; }
+.cx-quest-summary { color: #d1d5db; font-size: 13px; line-height: 1.45; }
+.cx-quest-field {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 8px 10px;
+    background: rgba(255,255,255,.03);
+    border-radius: 12px;
+}
+.cx-quest-field span { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: #6b7280; }
+.cx-quest-field strong { font-size: 12px; color: #e5e7eb; line-height: 1.4; font-weight: 500; }
+.cx-quest-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.cx-quest-empty {
+    padding: 14px 12px;
+    border-radius: 14px;
+    background: rgba(255,255,255,.03);
+    color: #6b7280;
+    font-size: 12px;
+}
+.cx-quest-fail-btn { color: #fca5a5; border-color: rgba(239,68,68,.24); }
+
+.cx-quest-editor-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0,0,0,.68);
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    z-index: 40;
+}
+.cx-quest-editor-sheet {
+    width: 100%;
+    max-height: 88%;
+    overflow-y: auto;
+    background: linear-gradient(180deg, #111827, #09090f);
+    border-top-left-radius: 22px;
+    border-top-right-radius: 22px;
+    box-shadow: 0 -10px 40px rgba(0,0,0,.38);
+}

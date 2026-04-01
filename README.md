@@ -1,6 +1,6 @@
 # Command-X Phone
 
-A SillyTavern third-party extension that puts a fully functional smartphone in your RP. Text characters, send neural commands, track NPC intel — all from an iMessage-style phone UI that lives alongside your chat.
+A SillyTavern third-party extension that puts a fully functional smartphone in your RP. Text characters, send neural commands, track NPC intel, and manage persistent quests — all from an iMessage-style phone UI that lives alongside your chat.
 
 Messages flow through the RP naturally. The extension uses prompt injection so the LLM includes phone replies in `[sms]...[/sms]` tags, which get extracted and rendered as chat bubbles on the phone. No regex hacks on unstructured output — the LLM is told what structure to use *before* it generates.
 
@@ -9,7 +9,7 @@ Messages flow through the RP naturally. The extension uses prompt injection so t
 ### 📱 Phone UI
 - **Realistic phone shell** — Notch, bezel, status bar, home indicator
 - **Lock screen → Home screen → Apps** — Navigate like a real phone
-- **Four apps:** Command-X (neural messaging), Profiles (contact intel), OpenClaw (bridge console), Settings
+- **Five apps:** Command-X (neural messaging), Profiles (contact intel), Quests (persistent story goals), OpenClaw (bridge console), Settings
 
 ### 💬 Messaging
 - **iMessage-style chat bubbles** — Sent (blue), received (dark gray), neural commands (pink/purple glow)
@@ -32,6 +32,14 @@ Messages flow through the RP naturally. The extension uses prompt injection so t
 
 - **Neural toggle (⚡)** — Switch between normal texting and neural mode from the chat header
 - No syntax to remember — tap a mode, type naturally, the extension handles the prompt formatting
+
+
+### 🗺️ Quests App
+- **Persistent per-chat quest tracker** — Stores active, completed, and failed quests separately for each ST chat
+- **Automatic `[quests]` extraction** — The model can create/update quests from structured tags in story replies
+- **Manual add/edit controls** — Create quests yourself or pin field edits so later auto-syncs do not stomp them
+- **Quick complete/fail actions** — Resolve quests directly from the phone UI
+- **Narrative influence injection** — Active quests are summarized back into prompt context so unresolved goals can shape future scenes naturally
 
 ### 🦞 OpenClaw App
 - **Native bridge console** — Uses the existing `openclaw-bridge` backend from inside the Command-X phone UI
@@ -119,6 +127,7 @@ ST chat shows narration with subtle 📱 indicators
 |-----|---------|---------|
 | `[sms from="Name" to="user"]...[/sms]` | Phone text content | `[sms from="Sarah" to="user"]omw![/sms]` |
 | `[status][...JSON...][/status]` | present-character state data | `[status][{"name":"Sarah","emoji":"👩","mood":"😊 happy","location":"café","thoughts":"I really hope he asks me to stay a little longer."}][/status]` |
+| `[quests][...JSON...][/quests]` | quest/task state updates | `[quests][{"title":"Meet Sarah at the diner","objective":"Get there before 8 PM","status":"active","priority":"high"}][/quests]` |
 
 Tags are injected by the extension automatically — you don't need to type them.
 

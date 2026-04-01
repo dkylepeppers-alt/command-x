@@ -21,14 +21,18 @@ const EXT = 'command-x';
 const INJECT_KEY = 'command-x-sms';
 const INJECT_KEY_CONTACTS = 'command-x-contacts';
 const INJECT_KEY_PRIVATE_PHONE = 'command-x-private-phone';
+const INJECT_KEY_QUESTS = 'command-x-quests';
 const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true, manualHybridPrivateTexts: true, openclawMode: 'assist' };
 const CONTACT_FIELDS = ['emoji', 'status', 'mood', 'location', 'relationship', 'thoughts', 'avatarUrl'];
 const MANUAL_OVERRIDE_FIELDS = [...CONTACT_FIELDS];
+const QUEST_FIELDS = ['title', 'summary', 'objective', 'priority', 'source', 'status', 'notes'];
+const QUEST_STATUS_ORDER = { active: 0, completed: 1, failed: 2 };
 let settings = { ...DEFAULTS };
 let phoneContainer = null;
 let commandMode = null; // null | 'COMMAND' | 'FORGET' | 'BELIEVE' | 'COMPEL'
 let neuralMode = false; // toggled via ⚡ button in chat header
 let profileEditorState = null;
+let questEditorState = null;
 let privatePollInFlight = false;
 
 
@@ -737,6 +741,407 @@ function injectContactsPrompt() {
 
 function clearContactsPrompt() {
     setExtensionPrompt(INJECT_KEY_CONTACTS, '', extension_prompt_types.NONE, 0);
+}
+
+/* ======================================================================
+   QUEST STORE — localStorage-backed, keyed per chat
+   ====================================================================== */
+
+const QUESTS_TAG_RE = /\[quests\]([\s\S]*?)\[\/quests\]/gi;
+
+function questStoreKey() {
+    const ctx = getContext();
+    const chatId = ctx.chatId || ctx.groupId || 'default';
+    return `cx-quests-${chatId}`;
+}
+
+function loadQuests() {
+    try { return JSON.parse(localStorage.getItem(questStoreKey()) || '[]'); }
+    catch { return []; }
+}
+
+function sortQuests(quests) {
+    return [...(quests || [])].sort((a, b) => {
+        const statusDiff = (QUEST_STATUS_ORDER[a?.status] ?? 99) - (QUEST_STATUS_ORDER[b?.status] ?? 99);
+        if (statusDiff !== 0) return statusDiff;
+        const aPriority = ['critical', 'high', 'normal', 'low'].indexOf(a?.priority || 'normal');
+        const bPriority = ['critical', 'high', 'normal', 'low'].indexOf(b?.priority || 'normal');
+        if (aPriority !== bPriority) return aPriority - bPriority;
+        return Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0);
+    });
+}
+
+function saveQuests(quests) {
+    try { localStorage.setItem(questStoreKey(), JSON.stringify(sortQuests(quests).slice(-150))); }
+    catch (e) { console.warn('[command-x] quest store save', e); }
+}
+
+function sanitizeQuestValue(field, value) {
+    if (field === 'status') {
+        const normalized = String(value || '').trim().toLowerCase();
+        return ['active', 'completed', 'failed'].includes(normalized) ? normalized : 'active';
+    }
+    if (field === 'priority') {
+        const normalized = String(value || '').trim().toLowerCase();
+        return ['low', 'normal', 'high', 'critical'].includes(normalized) ? normalized : 'normal';
+    }
+    const text = String(value ?? '').trim();
+    if (!text && field === 'title') return 'Untitled Quest';
+    return text || null;
+}
+
+function getQuestManualOverrides(quest = {}) {
+    return { ...(quest.manualOverrides || {}) };
+}
+
+function normalizeQuestKey(value) {
+    return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function slugifyQuestTitle(value) {
+    const slug = String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    return slug || 'quest';
+}
+
+function ensureQuestId(quest = {}) {
+    if (String(quest.id || '').trim()) return String(quest.id).trim();
+    return `quest_${slugifyQuestTitle(quest.title)}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function canonicalQuest(quest = {}, existing = null) {
+    const base = existing || {};
+    const clean = {
+        id: ensureQuestId({ ...base, ...quest }),
+        title: sanitizeQuestValue('title', quest.title ?? base.title),
+        summary: sanitizeQuestValue('summary', quest.summary ?? base.summary),
+        objective: sanitizeQuestValue('objective', quest.objective ?? base.objective),
+        status: sanitizeQuestValue('status', quest.status ?? base.status),
+        priority: sanitizeQuestValue('priority', quest.priority ?? base.priority),
+        source: sanitizeQuestValue('source', quest.source ?? base.source),
+        notes: sanitizeQuestValue('notes', quest.notes ?? base.notes),
+        updatedAt: Number.isFinite(Number(quest.updatedAt)) ? Number(quest.updatedAt) : Date.now(),
+        manualOverrides: { ...(base.manualOverrides || {}), ...(quest.manualOverrides || {}) },
+    };
+    return clean;
+}
+
+function findStoredQuestIndex(query, stored = null) {
+    const list = stored || loadQuests();
+    const id = String(query?.id || '').trim();
+    if (id) {
+        const byId = list.findIndex(quest => String(quest.id || '').trim() === id);
+        if (byId >= 0) return byId;
+    }
+    const titleKey = normalizeQuestKey(query?.title);
+    if (!titleKey) return -1;
+    return list.findIndex(quest => normalizeQuestKey(quest.title) === titleKey);
+}
+
+function extractQuests(raw) {
+    if (!raw) return null;
+    QUESTS_TAG_RE.lastIndex = 0;
+    const match = QUESTS_TAG_RE.exec(raw);
+    if (!match) return null;
+    try {
+        const parsed = JSON.parse(match[1].trim());
+        const list = Array.isArray(parsed)
+            ? parsed
+            : Array.isArray(parsed?.quests)
+                ? parsed.quests
+                : [];
+        if (!Array.isArray(list)) return null;
+        return list
+            .filter(Boolean)
+            .map(quest => canonicalQuest(quest))
+            .filter(quest => quest.title);
+    } catch (error) {
+        console.warn('[command-x] failed to parse [quests] JSON:', error);
+        return null;
+    }
+}
+
+function mergeQuests(incoming, options = {}) {
+    if (!incoming || !incoming.length) return false;
+    const source = options.source || 'auto';
+    const stored = loadQuests();
+    let changed = false;
+
+    for (const incomingQuest of incoming) {
+        const idx = findStoredQuestIndex(incomingQuest, stored);
+        if (idx >= 0) {
+            const existing = stored[idx];
+            const manualOverrides = getQuestManualOverrides(existing);
+            const merged = canonicalQuest({ ...existing, ...incomingQuest }, existing);
+            if (source === 'auto') {
+                QUEST_FIELDS.forEach(field => {
+                    if (manualOverrides[field]) merged[field] = existing[field] ?? null;
+                });
+                merged.manualOverrides = manualOverrides;
+            } else {
+                merged.manualOverrides = { ...manualOverrides, ...(incomingQuest.manualOverrides || {}) };
+            }
+            merged.id = existing.id || merged.id;
+            merged.updatedAt = Date.now();
+            stored[idx] = merged;
+            changed = true;
+        } else {
+            stored.push(canonicalQuest({ ...incomingQuest, updatedAt: Date.now() }));
+            changed = true;
+        }
+    }
+
+    if (changed) {
+        saveQuests(stored);
+        injectQuestPrompt();
+    }
+    return changed;
+}
+
+function upsertQuest(quest, options = {}) {
+    const stored = loadQuests();
+    const existingIdx = options.oldId ? stored.findIndex(entry => entry.id === options.oldId) : findStoredQuestIndex(quest, stored);
+    const existing = existingIdx >= 0 ? stored[existingIdx] : null;
+    const clean = canonicalQuest({ ...quest, updatedAt: Date.now() }, existing);
+    clean.manualOverrides = { ...(existing?.manualOverrides || {}), ...(quest.manualOverrides || {}) };
+    if (existingIdx >= 0) stored[existingIdx] = { ...stored[existingIdx], ...clean };
+    else stored.push(clean);
+    saveQuests(stored);
+    injectQuestPrompt();
+    return clean;
+}
+
+function setQuestStatus(questId, status) {
+    const stored = loadQuests();
+    const idx = stored.findIndex(quest => quest.id === questId);
+    if (idx < 0) return null;
+    stored[idx] = {
+        ...stored[idx],
+        status: sanitizeQuestValue('status', status),
+        updatedAt: Date.now(),
+        manualOverrides: { ...(stored[idx].manualOverrides || {}), status: true },
+    };
+    saveQuests(stored);
+    injectQuestPrompt();
+    return stored[idx];
+}
+
+function activeQuestSummary(limit = 8) {
+    const active = loadQuests().filter(quest => quest.status === 'active').slice(0, limit);
+    if (!active.length) return 'No active quests right now.';
+    return active.map(quest => {
+        const bits = [
+            quest.priority && quest.priority !== 'normal' ? `${quest.priority} priority` : null,
+            quest.objective || quest.summary || null,
+            quest.source ? `source: ${quest.source}` : null,
+            quest.notes ? `notes: ${quest.notes}` : null,
+        ].filter(Boolean);
+        return `- ${quest.title}${bits.length ? ` — ${bits.join(' · ')}` : ''}`;
+    }).join('\n');
+}
+
+function injectQuestPrompt() {
+    if (!settings.enabled) {
+        clearQuestPrompt();
+        return;
+    }
+    const activeSummary = activeQuestSummary(8);
+    setExtensionPrompt(
+        INJECT_KEY_QUESTS,
+        `[Command-X quest context. At the end of each response, include a [quests] JSON block ONLY when a meaningful quest should be created or updated. Format: [quests][{"id":"quest_optional_existing_id","title":"Quest title","summary":"short summary","objective":"current concrete objective","status":"active","priority":"normal","source":"who/what created the quest","notes":"optional note"}][/quests]. Quests represent meaningful goals, obligations, promises, leads, investigations, errands, or unresolved story pressures that may matter later. Avoid trivial one-off actions. Reuse existing quest ids/titles when updating instead of duplicating. Mark quests completed or failed when clearly resolved. These active quests are current unresolved background context and should influence future narrative when relevant, especially higher-priority items, but do NOT force mention of every quest every turn.\nCurrent active quests:\n${activeSummary}]`,
+        extension_prompt_types.IN_CHAT,
+        4,
+        false,
+        extension_prompt_roles.SYSTEM,
+    );
+}
+
+function clearQuestPrompt() {
+    setExtensionPrompt(INJECT_KEY_QUESTS, '', extension_prompt_types.NONE, 0);
+}
+
+function hideQuestTagsInDom(mesId) {
+    const el = document.querySelector(`.mes[mesid="${mesId}"] .mes_text`);
+    if (!el) return;
+    QUESTS_TAG_RE.lastIndex = 0;
+    if (QUESTS_TAG_RE.test(el.innerHTML)) {
+        QUESTS_TAG_RE.lastIndex = 0;
+        el.innerHTML = el.innerHTML.replace(QUESTS_TAG_RE, '');
+    }
+}
+
+function questPriorityBadge(priority) {
+    const value = sanitizeQuestValue('priority', priority) || 'normal';
+    return `<span class="cx-quest-priority cx-quest-priority-${escAttr(value)}">${escHtml(value)}</span>`;
+}
+
+function questStatusBadge(status) {
+    const value = sanitizeQuestValue('status', status) || 'active';
+    return `<span class="cx-quest-status cx-quest-status-${escAttr(value)}">${escHtml(value)}</span>`;
+}
+
+function renderQuestSection(status, title) {
+    const quests = loadQuests().filter(quest => quest.status === status);
+    return `
+        <div class="cx-quest-section">
+            <div class="cx-quest-section-head">
+                <div class="cx-quest-section-title">${title}</div>
+                <div class="cx-quest-section-count">${quests.length}</div>
+            </div>
+            ${quests.length ? quests.map(quest => `
+                <div class="cx-quest-card" data-quest-id="${escAttr(quest.id)}">
+                    <div class="cx-quest-card-top">
+                        <div>
+                            <div class="cx-quest-title-row">
+                                <div class="cx-quest-title">${escHtml(quest.title || 'Untitled Quest')}</div>
+                                ${questStatusBadge(quest.status)}
+                            </div>
+                            <div class="cx-quest-meta-row">
+                                ${questPriorityBadge(quest.priority || 'normal')}
+                                ${quest.source ? `<span class="cx-quest-chip">${escHtml(quest.source)}</span>` : ''}
+                                <span class="cx-quest-chip">${new Date(Number(quest.updatedAt || Date.now())).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>
+                            </div>
+                        </div>
+                    </div>
+                    ${quest.summary ? `<div class="cx-quest-summary">${escHtml(quest.summary)}</div>` : ''}
+                    ${quest.objective ? `<div class="cx-quest-field"><span>Objective</span><strong>${escHtml(quest.objective)}</strong></div>` : ''}
+                    ${quest.notes ? `<div class="cx-quest-field"><span>Notes</span><strong>${escHtml(quest.notes)}</strong></div>` : ''}
+                    <div class="cx-quest-actions">
+                        <button class="cx-profile-action-btn" data-cx-quest-edit="${escAttr(quest.id)}">Edit</button>
+                        ${status !== 'completed' ? `<button class="cx-profile-action-btn" data-cx-quest-complete="${escAttr(quest.id)}">Complete</button>` : ''}
+                        ${status !== 'failed' ? `<button class="cx-profile-action-btn cx-quest-fail-btn" data-cx-quest-fail="${escAttr(quest.id)}">Fail</button>` : ''}
+                    </div>
+                </div>
+            `).join('') : '<div class="cx-quest-empty">No quests in this section.</div>'}
+        </div>`;
+}
+
+function getEditableQuest(questId = null) {
+    if (!questId) return null;
+    return loadQuests().find(quest => quest.id === questId) || null;
+}
+
+function openQuestEditor(questId = null) {
+    const existing = questId ? getEditableQuest(questId) : null;
+    questEditorState = {
+        mode: existing ? 'edit' : 'new',
+        oldId: existing?.id || null,
+        draft: {
+            id: existing?.id || '',
+            title: existing?.title || '',
+            summary: existing?.summary || '',
+            objective: existing?.objective || '',
+            priority: existing?.priority || 'normal',
+            source: existing?.source || '',
+            status: existing?.status || 'active',
+            notes: existing?.notes || '',
+        },
+    };
+    rebuildPhone();
+    switchView('quests');
+}
+
+function closeQuestEditor() {
+    if (!questEditorState) return;
+    questEditorState = null;
+    rebuildPhone();
+    switchView('quests');
+}
+
+function saveQuestEditor() {
+    if (!questEditorState) return;
+    const form = phoneContainer?.querySelector('#cx-quest-form');
+    if (!form) return;
+    const data = new FormData(form);
+    const draft = {
+        id: String(data.get('id') || '').trim() || undefined,
+        title: String(data.get('title') || '').trim(),
+        summary: String(data.get('summary') || '').trim(),
+        objective: String(data.get('objective') || '').trim(),
+        priority: String(data.get('priority') || 'normal').trim().toLowerCase(),
+        source: String(data.get('source') || '').trim(),
+        status: String(data.get('status') || 'active').trim().toLowerCase(),
+        notes: String(data.get('notes') || '').trim(),
+        manualOverrides: QUEST_FIELDS.reduce((acc, field) => {
+            acc[field] = true;
+            return acc;
+        }, {}),
+    };
+
+    if (!draft.title) {
+        alert('Quest title is required.');
+        return;
+    }
+
+    try {
+        const saved = upsertQuest(draft, { oldId: questEditorState.oldId || null });
+        const wasNew = questEditorState.mode === 'new';
+        questEditorState = null;
+        rebuildPhone();
+        switchView('quests');
+        showToast(saved.title, wasNew ? 'Quest added.' : 'Quest updated.');
+    } catch (error) {
+        alert(String(error?.message || error));
+    }
+}
+
+function questEditorModalHTML() {
+    if (!questEditorState) return '';
+    const draft = questEditorState.draft || {};
+    const title = questEditorState.mode === 'new' ? 'Add Quest' : 'Edit Quest';
+    const saveLabel = questEditorState.mode === 'new' ? 'Add Quest' : 'Save Changes';
+    return `
+    <div class="cx-quest-editor-backdrop" id="cx-quest-editor-backdrop">
+        <div class="cx-quest-editor-sheet" role="dialog" aria-modal="true" aria-label="${title}">
+            <div class="cx-profile-editor-header">
+                <div>
+                    <div class="cx-profile-editor-title">${title}</div>
+                    <div class="cx-profile-editor-sub">Manual quest edits stay pinned over later automatic [quests] updates.</div>
+                </div>
+                <button type="button" class="cx-profile-editor-close" id="cx-quest-cancel">✕</button>
+            </div>
+            <form class="cx-profile-editor-form" id="cx-quest-form">
+                <input type="hidden" name="id" value="${escAttr(draft.id || '')}" />
+                <label class="cx-profile-editor-field">
+                    <span>Title</span>
+                    <input type="text" name="title" maxlength="120" value="${escAttr(draft.title || '')}" placeholder="Meet Sarah at the diner" />
+                </label>
+                <label class="cx-profile-editor-field">
+                    <span>Summary</span>
+                    <textarea name="summary" placeholder="Why this matters...">${escapeHtml(draft.summary || '')}</textarea>
+                </label>
+                <label class="cx-profile-editor-field">
+                    <span>Objective</span>
+                    <textarea name="objective" placeholder="What needs to happen next...">${escapeHtml(draft.objective || '')}</textarea>
+                </label>
+                <div class="cx-profile-editor-grid">
+                    <label class="cx-profile-editor-field">
+                        <span>Priority</span>
+                        <select name="priority">
+                            ${['low', 'normal', 'high', 'critical'].map(value => `<option value="${value}" ${draft.priority === value ? 'selected' : ''}>${value}</option>`).join('')}
+                        </select>
+                    </label>
+                    <label class="cx-profile-editor-field">
+                        <span>Status</span>
+                        <select name="status">
+                            ${['active', 'completed', 'failed'].map(value => `<option value="${value}" ${draft.status === value ? 'selected' : ''}>${value}</option>`).join('')}
+                        </select>
+                    </label>
+                </div>
+                <label class="cx-profile-editor-field">
+                    <span>Source</span>
+                    <input type="text" name="source" maxlength="120" value="${escAttr(draft.source || '')}" placeholder="Sarah" />
+                </label>
+                <label class="cx-profile-editor-field">
+                    <span>Notes</span>
+                    <textarea name="notes" placeholder="Pinned details, reminders, caveats...">${escapeHtml(draft.notes || '')}</textarea>
+                </label>
+                <div class="cx-profile-editor-footer">
+                    <button type="button" class="cx-profile-editor-secondary" id="cx-quest-cancel-footer">Cancel</button>
+                    <button type="submit" class="cx-profile-editor-primary">${saveLabel}</button>
+                </div>
+            </form>
+        </div>
+    </div>`;
 }
 
 /* ======================================================================
@@ -1730,6 +2135,8 @@ function contactRowHTML(c, i, app) {
 function buildPhone() {
     const contacts = getKnownContactsForPrivateMessaging();
     const hasContacts = contacts.length > 0;
+    const quests = loadQuests();
+    const activeQuestCount = quests.filter(quest => quest.status === 'active').length;
     const lockActive = settings.showLockscreen ? 'active' : '';
     const homeActive = settings.showLockscreen ? '' : 'active';
     const charName = hasContacts ? contacts[0].name : 'No character';
@@ -1767,6 +2174,10 @@ function buildPhone() {
                 <div class="cx-app-icon" data-app="profiles">
                     <div class="cx-icon-img cx-icon-profiles">🔍</div>
                     <div class="cx-icon-label">Profiles</div>
+                </div>
+                <div class="cx-app-icon" data-app="quests">
+                    <div class="cx-icon-img cx-icon-quests">🗺️</div>
+                    <div class="cx-icon-label">Quests${activeQuestCount ? ` (${activeQuestCount})` : ''}</div>
                 </div>
                 <div class="cx-app-icon" data-app="openclaw">
                     <div class="cx-icon-img cx-icon-openclaw">🦞</div>
@@ -1833,6 +2244,28 @@ function buildPhone() {
             </div>
             <div class="cx-navbar">
                 <div class="cx-nav active"><div class="cx-nav-ico">🔍</div><div class="cx-nav-lbl">Profiles</div></div>
+                <div class="cx-nav" data-goto="home"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
+            </div>
+        </div>
+
+        <!-- Quests View -->
+        <div class="cx-view" data-view="quests">
+            <div class="cx-profiles-header cx-quests-header">
+                <div>
+                    <div class="cx-profiles-title">Quests</div>
+                    <div class="cx-profiles-sub">Persistent goals, obligations, and active leads</div>
+                </div>
+                <div class="cx-profiles-actions">
+                    <button class="cx-settings-btn" id="cx-add-quest">+ Add Quest</button>
+                </div>
+            </div>
+            <div class="cx-quests-list">
+                ${renderQuestSection('active', 'Active')}
+                ${renderQuestSection('completed', 'Completed')}
+                ${renderQuestSection('failed', 'Failed')}
+            </div>
+            <div class="cx-navbar">
+                <div class="cx-nav active"><div class="cx-nav-ico">🗺️</div><div class="cx-nav-lbl">Quests</div></div>
                 <div class="cx-nav" data-goto="home"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
             </div>
         </div>
@@ -1973,6 +2406,7 @@ function buildPhone() {
 
       </div>
       ${profileEditorModalHTML()}
+      ${questEditorModalHTML()}
     </div>`;
 }
 
@@ -2151,7 +2585,7 @@ function wirePhone() {
     phoneContainer.querySelectorAll('.cx-app-icon[data-app]').forEach(icon =>
         icon.addEventListener('click', () => {
             const app = icon.dataset.app;
-            if (app === 'cmdx' || app === 'profiles' || app === 'openclaw' || app === 'phone-settings') {
+            if (app === 'cmdx' || app === 'profiles' || app === 'quests' || app === 'openclaw' || app === 'phone-settings') {
                 currentApp = app;
                 switchView(app);
                 if (app === 'openclaw') {
@@ -2189,6 +2623,7 @@ function wirePhone() {
     });
     phoneContainer.querySelector('#cx-add-contact')?.addEventListener('click', () => { openProfileEditor(); });
     phoneContainer.querySelector('#cx-set-add-contact')?.addEventListener('click', () => { openProfileEditor(); });
+    phoneContainer.querySelector('#cx-add-quest')?.addEventListener('click', () => { openQuestEditor(); });
     phoneContainer.querySelector('#cx-check-private')?.addEventListener('click', () => { pollPrivateMessages().catch(error => console.error(`[${EXT}] Private poll click failed`, error)); });
     phoneContainer.querySelector('#cx-set-clear-npcs')?.addEventListener('click', () => {
         if (confirm('Clear all NPC contacts for this chat?')) {
@@ -2257,6 +2692,43 @@ function wirePhone() {
     phoneContainer.querySelector('#cx-profile-editor-backdrop')?.addEventListener('click', (event) => {
         if (event.target?.id === 'cx-profile-editor-backdrop') closeProfileEditor();
     });
+    phoneContainer.querySelector('#cx-quest-cancel')?.addEventListener('click', closeQuestEditor);
+    phoneContainer.querySelector('#cx-quest-cancel-footer')?.addEventListener('click', closeQuestEditor);
+    phoneContainer.querySelector('#cx-quest-form')?.addEventListener('submit', (event) => {
+        event.preventDefault();
+        saveQuestEditor();
+    });
+    phoneContainer.querySelector('#cx-quest-editor-backdrop')?.addEventListener('click', (event) => {
+        if (event.target?.id === 'cx-quest-editor-backdrop') closeQuestEditor();
+    });
+    phoneContainer.querySelectorAll('[data-cx-quest-edit]').forEach(btn =>
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openQuestEditor(btn.dataset.cxQuestEdit);
+        })
+    );
+    phoneContainer.querySelectorAll('[data-cx-quest-complete]').forEach(btn =>
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const updated = setQuestStatus(btn.dataset.cxQuestComplete, 'completed');
+            if (updated) {
+                rebuildPhone();
+                switchView('quests');
+                showToast(updated.title, 'Quest completed.');
+            }
+        })
+    );
+    phoneContainer.querySelectorAll('[data-cx-quest-fail]').forEach(btn =>
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const updated = setQuestStatus(btn.dataset.cxQuestFail, 'failed');
+            if (updated) {
+                rebuildPhone();
+                switchView('quests');
+                showToast(updated.title, 'Quest failed.');
+            }
+        })
+    );
     // Profile card → open chat with that contact
     phoneContainer.querySelectorAll('.cx-profile-card[data-pname]').forEach(card =>
         card.addEventListener('click', () => {
@@ -2425,6 +2897,8 @@ function rebuildPhone() {
     } else if (savedApp === 'openclaw') {
         switchView('openclaw');
         setOpenClawStatus('Ready.');
+    } else if (savedApp) {
+        switchView(savedApp);
     }
     updateUnreadBadges();
 }
@@ -2511,10 +2985,12 @@ jQuery(async () => {
                 if (settings.autoDetectNpcs !== false) injectContactsPrompt();
                 else clearContactsPrompt();
                 refreshPrivatePhonePrompt();
+                injectQuestPrompt();
             } else {
                 destroyPanel();
                 clearContactsPrompt();
                 clearSmsPrompt();
+                clearQuestPrompt();
                 refreshPrivatePhonePrompt();
             }
         });
@@ -2526,6 +3002,7 @@ jQuery(async () => {
             styleCommandsInMessage(mesId);
             hideSmsTagsInDom(mesId);
             hideContactsTagsInDom(mesId);
+            hideQuestTagsInDom(mesId);
         });
         eventSource.on(event_types.USER_MESSAGE_RENDERED, styleCommandsInMessage);
 
@@ -2631,13 +3108,23 @@ jQuery(async () => {
                 awaitingReply = false;
             }
 
+            let shouldRebuild = false;
+
             // ── [contacts] SECOND — may call rebuildPhone which resets state ──
             const parsedContacts = extractContacts(msg.mes);
             if (parsedContacts) {
                 mergeNpcs(parsedContacts);
-                if (phoneContainer && !document.getElementById('cx-panel-wrapper')?.classList.contains('cx-hidden')) {
-                    rebuildPhone();
-                }
+                shouldRebuild = true;
+            }
+
+            // ── [quests] THIRD — persistent quest tracker state ──
+            const parsedQuests = extractQuests(msg.mes);
+            if (parsedQuests?.length) {
+                shouldRebuild = mergeQuests(parsedQuests, { source: 'auto' }) || shouldRebuild;
+            }
+
+            if (shouldRebuild && phoneContainer && !document.getElementById('cx-panel-wrapper')?.classList.contains('cx-hidden')) {
+                rebuildPhone();
             }
         });
 
@@ -2674,6 +3161,9 @@ jQuery(async () => {
             clearTypingIndicator();
             // Re-inject contacts prompt for new chat
             if (settings.enabled && settings.autoDetectNpcs !== false) injectContactsPrompt();
+            else clearContactsPrompt();
+            if (settings.enabled) injectQuestPrompt();
+            else clearQuestPrompt();
             refreshPrivatePhonePrompt();
             if (phoneContainer) rebuildPhone();
         });
@@ -2681,6 +3171,7 @@ jQuery(async () => {
         if (settings.enabled) {
             createPanel();
             if (settings.autoDetectNpcs !== false) injectContactsPrompt();
+            injectQuestPrompt();
         }
         console.log(`[${EXT}] v0.10.0 Loaded OK`);
     } catch (err) {
