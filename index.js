@@ -36,6 +36,7 @@ let neuralMode = false; // toggled via ⚡ button in chat header
 let profileEditorState = null;
 let questEditorState = null;
 let privatePollInFlight = false;
+let questEnrichmentInFlight = false;
 
 
 const OPENCLAW_API_BASE = '/api/plugins/openclaw-bridge';
@@ -1158,6 +1159,115 @@ function closeQuestEditor() {
     switchView('quests');
 }
 
+
+function buildQuestEnrichmentPrompt(partialQuest) {
+    const recentMessages = getRecentMessages().slice(-10);
+    const knownContacts = getKnownContactsForPrivateMessaging().map(contact => ({
+        name: contact.name,
+        relationship: contact.relationship || null,
+        mood: contact.mood || null,
+        location: contact.location || null,
+    }));
+    return [
+        'You are enriching a manually created Command-X quest.',
+        'Return ONLY valid JSON matching the provided schema.',
+        'Fill ONLY missing or blank fields. Do not rewrite fields the user already supplied.',
+        'Keep outputs concise, plausible, and useful for future narrative context.',
+        'Subtasks should be short actionable checklist items when appropriate.',
+        `Partial quest JSON: ${JSON.stringify(partialQuest)}`,
+        `Known contacts JSON: ${JSON.stringify(knownContacts)}`,
+        `Recent chat context JSON: ${JSON.stringify(recentMessages)}`,
+    ].join('\n');
+}
+
+function questEnrichmentSchema() {
+    return {
+        name: 'CommandXQuestEnrichment',
+        description: 'Fill missing quest fields for a manually created Command-X quest.',
+        strict: true,
+        value: {
+            '$schema': 'http://json-schema.org/draft-04/schema#',
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+                summary: { type: 'string' },
+                objective: { type: 'string' },
+                priority: { type: 'string' },
+                urgency: { type: 'string' },
+                source: { type: 'string' },
+                relatedContact: { type: 'string' },
+                status: { type: 'string' },
+                focused: { type: 'boolean' },
+                nextAction: { type: 'string' },
+                subtasks: {
+                    type: 'array',
+                    items: {
+                        type: 'object',
+                        additionalProperties: false,
+                        properties: {
+                            text: { type: 'string' },
+                            done: { type: 'boolean' },
+                        },
+                        required: ['text', 'done'],
+                    },
+                },
+                notes: { type: 'string' },
+            },
+            required: ['summary', 'objective', 'priority', 'urgency', 'source', 'relatedContact', 'status', 'focused', 'nextAction', 'subtasks', 'notes'],
+        },
+    };
+}
+
+async function enrichQuestDraftIfNeeded(draft) {
+    const ctx = getContext();
+    if (typeof ctx.generateQuietPrompt !== 'function') return draft;
+    const missing = [
+        !draft.summary,
+        !draft.objective,
+        !draft.source,
+        !draft.relatedContact,
+        !draft.nextAction,
+        !draft.notes,
+        !Array.isArray(draft.subtasks) || !draft.subtasks.length,
+        !draft.priority || draft.priority === 'normal',
+        !draft.urgency || draft.urgency === 'none',
+    ].some(Boolean);
+    if (!missing) return draft;
+    if (questEnrichmentInFlight) return draft;
+    questEnrichmentInFlight = true;
+    try {
+        const raw = await ctx.generateQuietPrompt({
+            prompt: buildQuestEnrichmentPrompt(draft),
+            schema: questEnrichmentSchema(),
+        });
+        const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        const enriched = { ...draft };
+        const fillIfMissing = (field, fallbackCheck) => {
+            const current = enriched[field];
+            const missingNow = fallbackCheck ? fallbackCheck(current) : (!current || !String(current).trim());
+            if (!missingNow) return;
+            if (parsed?.[field] == null) return;
+            enriched[field] = parsed[field];
+        };
+        fillIfMissing('summary');
+        fillIfMissing('objective');
+        fillIfMissing('source');
+        fillIfMissing('relatedContact');
+        fillIfMissing('nextAction');
+        fillIfMissing('notes');
+        if ((!enriched.priority || enriched.priority === 'normal') && parsed?.priority) enriched.priority = parsed.priority;
+        if ((!enriched.urgency || enriched.urgency === 'none') && parsed?.urgency) enriched.urgency = parsed.urgency;
+        if ((!enriched.status || enriched.status === 'active') && parsed?.status) enriched.status = parsed.status;
+        if ((!Array.isArray(enriched.subtasks) || !enriched.subtasks.length) && Array.isArray(parsed?.subtasks)) enriched.subtasks = parsed.subtasks;
+        if (!enriched.focused && typeof parsed?.focused === 'boolean') enriched.focused = parsed.focused;
+        return enriched;
+    } catch (error) {
+        console.warn('[command-x] quest enrichment failed', error);
+        return draft;
+    } finally {
+        questEnrichmentInFlight = false;
+    }
+}
 function parseQuestSubtasksFromEditor(value) {
     return String(value || '')
         .split(/\r?\n/)
@@ -1171,7 +1281,7 @@ function parseQuestSubtasksFromEditor(value) {
         .filter(item => item.text);
 }
 
-function saveQuestEditor() {
+async function saveQuestEditor() {
     if (!questEditorState) return;
     const form = phoneContainer?.querySelector('#cx-quest-form');
     if (!form) return;
@@ -1202,7 +1312,8 @@ function saveQuestEditor() {
     }
 
     try {
-        const saved = upsertQuest(draft, { oldId: questEditorState.oldId || null });
+        const finalDraft = questEditorState.mode === 'new' ? await enrichQuestDraftIfNeeded(draft) : draft;
+        const saved = upsertQuest(finalDraft, { oldId: questEditorState.oldId || null });
         const wasNew = questEditorState.mode === 'new';
         questEditorState = null;
         rebuildPhone();
@@ -2880,7 +2991,7 @@ function wirePhone() {
     phoneContainer.querySelector('#cx-quest-cancel-footer')?.addEventListener('click', closeQuestEditor);
     phoneContainer.querySelector('#cx-quest-form')?.addEventListener('submit', (event) => {
         event.preventDefault();
-        saveQuestEditor();
+saveQuestEditor().catch(error => alert(String(error?.message || error)));
     });
     phoneContainer.querySelector('#cx-quest-editor-backdrop')?.addEventListener('click', (event) => {
         if (event.target?.id === 'cx-quest-editor-backdrop') closeQuestEditor();
