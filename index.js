@@ -1252,6 +1252,33 @@ function questEnrichmentSchema() {
     };
 }
 
+function extractJsonObjectFromText(raw) {
+    const text = String(raw || '').trim();
+    if (!text) return null;
+    const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (fenced?.[1]) return fenced[1].trim();
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start !== -1 && end !== -1 && end > start) return text.slice(start, end + 1).trim();
+    return null;
+}
+
+function parseQuestEnrichmentResponse(raw) {
+    if (raw && typeof raw === 'object') return raw;
+    if (typeof raw !== 'string') {
+        throw new Error(`Quest enrichment returned unsupported type: ${typeof raw}`);
+    }
+    try {
+        return JSON.parse(raw);
+    } catch (directError) {
+        const extracted = extractJsonObjectFromText(raw);
+        if (!extracted || extracted === raw.trim()) {
+            throw directError;
+        }
+        return JSON.parse(extracted);
+    }
+}
+
 async function enrichQuestDraftIfNeeded(draft) {
     const ctx = getContext();
     if (typeof ctx.generateQuietPrompt !== 'function') return { draft, changed: false, error: new Error('generateQuietPrompt unavailable') };
@@ -1269,12 +1296,13 @@ async function enrichQuestDraftIfNeeded(draft) {
     if (!missing) return { draft, changed: false, error: null };
     if (questEnrichmentInFlight) return { draft, changed: false, error: new Error('Quest enrichment already running') };
     questEnrichmentInFlight = true;
+    let raw = null;
     try {
-        const raw = await ctx.generateQuietPrompt({
+        raw = await ctx.generateQuietPrompt({
             prompt: buildQuestEnrichmentPrompt(draft),
             schema: questEnrichmentSchema(),
         });
-        const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        const parsed = parseQuestEnrichmentResponse(raw);
         const enriched = { ...draft };
         const fillIfMissing = (field, fallbackCheck) => {
             const current = enriched[field];
@@ -1296,7 +1324,7 @@ async function enrichQuestDraftIfNeeded(draft) {
         if (!enriched.focused && typeof parsed?.focused === 'boolean') enriched.focused = parsed.focused;
         return { draft: enriched, changed: JSON.stringify(enriched) !== JSON.stringify(draft), error: null };
     } catch (error) {
-        console.warn('[command-x] quest enrichment failed', error);
+        console.warn('[command-x] quest enrichment failed', error, raw);
         return { draft, changed: false, error };
     } finally {
         questEnrichmentInFlight = false;
