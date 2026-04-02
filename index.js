@@ -25,8 +25,10 @@ const INJECT_KEY_QUESTS = 'command-x-quests';
 const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true, manualHybridPrivateTexts: true, openclawMode: 'assist' };
 const CONTACT_FIELDS = ['emoji', 'status', 'mood', 'location', 'relationship', 'thoughts', 'avatarUrl'];
 const MANUAL_OVERRIDE_FIELDS = [...CONTACT_FIELDS];
-const QUEST_FIELDS = ['title', 'summary', 'objective', 'priority', 'source', 'status', 'notes'];
-const QUEST_STATUS_ORDER = { active: 0, completed: 1, failed: 2 };
+const QUEST_FIELDS = ['title', 'summary', 'objective', 'priority', 'urgency', 'source', 'relatedContact', 'status', 'focused', 'nextAction', 'subtasks', 'notes'];
+const QUEST_STATUS_ORDER = { active: 0, waiting: 1, blocked: 2, completed: 3, failed: 4 };
+const QUEST_PRIORITY_ORDER = { critical: 0, high: 1, normal: 2, low: 3 };
+const QUEST_URGENCY_ORDER = { urgent: 0, soon: 1, none: 2 };
 let settings = { ...DEFAULTS };
 let phoneContainer = null;
 let commandMode = null; // null | 'COMMAND' | 'FORGET' | 'BELIEVE' | 'COMPEL'
@@ -762,11 +764,14 @@ function loadQuests() {
 
 function sortQuests(quests) {
     return [...(quests || [])].sort((a, b) => {
+        const focusDiff = Number(!!b?.focused) - Number(!!a?.focused);
+        if (focusDiff !== 0) return focusDiff;
         const statusDiff = (QUEST_STATUS_ORDER[a?.status] ?? 99) - (QUEST_STATUS_ORDER[b?.status] ?? 99);
         if (statusDiff !== 0) return statusDiff;
-        const aPriority = ['critical', 'high', 'normal', 'low'].indexOf(a?.priority || 'normal');
-        const bPriority = ['critical', 'high', 'normal', 'low'].indexOf(b?.priority || 'normal');
-        if (aPriority !== bPriority) return aPriority - bPriority;
+        const urgencyDiff = (QUEST_URGENCY_ORDER[a?.urgency || 'none'] ?? 99) - (QUEST_URGENCY_ORDER[b?.urgency || 'none'] ?? 99);
+        if (urgencyDiff !== 0) return urgencyDiff;
+        const priorityDiff = (QUEST_PRIORITY_ORDER[a?.priority || 'normal'] ?? 99) - (QUEST_PRIORITY_ORDER[b?.priority || 'normal'] ?? 99);
+        if (priorityDiff !== 0) return priorityDiff;
         return Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0);
     });
 }
@@ -776,15 +781,34 @@ function saveQuests(quests) {
     catch (e) { console.warn('[command-x] quest store save', e); }
 }
 
-function sanitizeQuestValue(field, value) {
+function sanitizeQuestSubtasks(value, existing = []) {
+    const list = Array.isArray(value)
+        ? value
+        : typeof value === 'string'
+            ? value.split(/\r?\n/).map(line => line.trim()).filter(Boolean).map(text => ({ text }))
+            : [];
+    return list.map((item, index) => ({
+        id: String(item?.id || existing?.[index]?.id || `sub_${Math.random().toString(36).slice(2, 8)}`).trim(),
+        text: String(item?.text || item?.title || item || '').trim(),
+        done: !!item?.done,
+    })).filter(item => item.text);
+}
+
+function sanitizeQuestValue(field, value, existing = null) {
     if (field === 'status') {
         const normalized = String(value || '').trim().toLowerCase();
-        return ['active', 'completed', 'failed'].includes(normalized) ? normalized : 'active';
+        return ['active', 'waiting', 'blocked', 'completed', 'failed'].includes(normalized) ? normalized : 'active';
     }
     if (field === 'priority') {
         const normalized = String(value || '').trim().toLowerCase();
         return ['low', 'normal', 'high', 'critical'].includes(normalized) ? normalized : 'normal';
     }
+    if (field === 'urgency') {
+        const normalized = String(value || '').trim().toLowerCase();
+        return ['none', 'soon', 'urgent'].includes(normalized) ? normalized : 'none';
+    }
+    if (field === 'focused') return value === true || String(value || '').trim().toLowerCase() === 'true';
+    if (field === 'subtasks') return sanitizeQuestSubtasks(value, existing);
     const text = String(value ?? '').trim();
     if (!text && field === 'title') return 'Untitled Quest';
     return text || null;
@@ -817,7 +841,12 @@ function canonicalQuest(quest = {}, existing = null) {
         objective: sanitizeQuestValue('objective', quest.objective ?? base.objective),
         status: sanitizeQuestValue('status', quest.status ?? base.status),
         priority: sanitizeQuestValue('priority', quest.priority ?? base.priority),
+        urgency: sanitizeQuestValue('urgency', quest.urgency ?? base.urgency),
         source: sanitizeQuestValue('source', quest.source ?? base.source),
+        relatedContact: sanitizeQuestValue('relatedContact', quest.relatedContact ?? base.relatedContact),
+        focused: sanitizeQuestValue('focused', quest.focused ?? base.focused),
+        nextAction: sanitizeQuestValue('nextAction', quest.nextAction ?? base.nextAction),
+        subtasks: sanitizeQuestValue('subtasks', quest.subtasks ?? base.subtasks, base.subtasks || []),
         notes: sanitizeQuestValue('notes', quest.notes ?? base.notes),
         updatedAt: Number.isFinite(Number(quest.updatedAt)) ? Number(quest.updatedAt) : Date.now(),
         manualOverrides: { ...(base.manualOverrides || {}), ...(quest.manualOverrides || {}) },
@@ -860,11 +889,26 @@ function extractQuests(raw) {
     }
 }
 
+function normalizeFocusedQuests(quests = [], focusedId = null) {
+    let found = false;
+    return quests.map(quest => {
+        const focused = focusedId ? quest.id === focusedId : (!!quest.focused && !found);
+        if (focused) found = true;
+        return { ...quest, focused };
+    });
+}
+
+function saveAndRefreshQuests(quests = []) {
+    saveQuests(normalizeFocusedQuests(quests));
+    injectQuestPrompt();
+}
+
 function mergeQuests(incoming, options = {}) {
     if (!incoming || !incoming.length) return false;
     const source = options.source || 'auto';
     const stored = loadQuests();
     let changed = false;
+    let focusedId = stored.find(quest => quest.focused)?.id || null;
 
     for (const incomingQuest of incoming) {
         const idx = findStoredQuestIndex(incomingQuest, stored);
@@ -874,7 +918,7 @@ function mergeQuests(incoming, options = {}) {
             const merged = canonicalQuest({ ...existing, ...incomingQuest }, existing);
             if (source === 'auto') {
                 QUEST_FIELDS.forEach(field => {
-                    if (manualOverrides[field]) merged[field] = existing[field] ?? null;
+                    if (manualOverrides[field]) merged[field] = existing[field] ?? (field === 'subtasks' ? [] : null);
                 });
                 merged.manualOverrides = manualOverrides;
             } else {
@@ -883,17 +927,17 @@ function mergeQuests(incoming, options = {}) {
             merged.id = existing.id || merged.id;
             merged.updatedAt = Date.now();
             stored[idx] = merged;
+            if (merged.focused) focusedId = merged.id;
             changed = true;
         } else {
-            stored.push(canonicalQuest({ ...incomingQuest, updatedAt: Date.now() }));
+            const clean = canonicalQuest({ ...incomingQuest, updatedAt: Date.now() });
+            stored.push(clean);
+            if (clean.focused) focusedId = clean.id;
             changed = true;
         }
     }
 
-    if (changed) {
-        saveQuests(stored);
-        injectQuestPrompt();
-    }
+    if (changed) saveAndRefreshQuests(normalizeFocusedQuests(stored, focusedId));
     return changed;
 }
 
@@ -905,34 +949,59 @@ function upsertQuest(quest, options = {}) {
     clean.manualOverrides = { ...(existing?.manualOverrides || {}), ...(quest.manualOverrides || {}) };
     if (existingIdx >= 0) stored[existingIdx] = { ...stored[existingIdx], ...clean };
     else stored.push(clean);
-    saveQuests(stored);
-    injectQuestPrompt();
+    saveAndRefreshQuests(normalizeFocusedQuests(stored, clean.focused ? clean.id : (stored.find(item => item.focused)?.id || null)));
     return clean;
 }
 
-function setQuestStatus(questId, status) {
+function updateQuestFields(questId, patch = {}, pinnedFields = []) {
     const stored = loadQuests();
     const idx = stored.findIndex(quest => quest.id === questId);
     if (idx < 0) return null;
-    stored[idx] = {
-        ...stored[idx],
-        status: sanitizeQuestValue('status', status),
-        updatedAt: Date.now(),
-        manualOverrides: { ...(stored[idx].manualOverrides || {}), status: true },
-    };
-    saveQuests(stored);
-    injectQuestPrompt();
-    return stored[idx];
+    const existing = stored[idx];
+    const manualOverrides = { ...(existing.manualOverrides || {}) };
+    pinnedFields.forEach(field => { manualOverrides[field] = true; });
+    const updated = canonicalQuest({ ...existing, ...patch, manualOverrides, updatedAt: Date.now() }, existing);
+    stored[idx] = updated;
+    saveAndRefreshQuests(normalizeFocusedQuests(stored, updated.focused ? updated.id : (stored.find(item => item.focused && item.id !== questId)?.id || null)));
+    return updated;
+}
+
+function setQuestStatus(questId, status) {
+    return updateQuestFields(questId, { status: sanitizeQuestValue('status', status) }, ['status']);
+}
+
+function setQuestFocused(questId, focused) {
+    return updateQuestFields(questId, { focused: !!focused }, ['focused']);
+}
+
+function toggleQuestSubtask(questId, subtaskId) {
+    const quest = getEditableQuest(questId);
+    if (!quest) return null;
+    const subtasks = (quest.subtasks || []).map(item => item.id === subtaskId ? { ...item, done: !item.done } : item);
+    return updateQuestFields(questId, { subtasks }, ['subtasks']);
+}
+
+function findContactForQuest(quest = {}) {
+    const contacts = getKnownContactsForPrivateMessaging();
+    const key = normalizeContactName(quest.relatedContact || quest.source || '');
+    if (!key) return null;
+    return contacts.find(contact => normalizeContactName(contact.name) === key) || null;
 }
 
 function activeQuestSummary(limit = 8) {
-    const active = loadQuests().filter(quest => quest.status === 'active').slice(0, limit);
-    if (!active.length) return 'No active quests right now.';
-    return active.map(quest => {
+    const summary = sortQuests(loadQuests())
+        .filter(quest => !['completed', 'failed'].includes(quest.status))
+        .slice(0, limit);
+    if (!summary.length) return 'No active quests right now.';
+    return summary.map(quest => {
         const bits = [
+            quest.focused ? 'FOCUSED' : null,
+            quest.status !== 'active' ? quest.status : null,
+            quest.urgency && quest.urgency !== 'none' ? `${quest.urgency} urgency` : null,
             quest.priority && quest.priority !== 'normal' ? `${quest.priority} priority` : null,
+            quest.nextAction ? `next: ${quest.nextAction}` : null,
             quest.objective || quest.summary || null,
-            quest.source ? `source: ${quest.source}` : null,
+            quest.relatedContact ? `contact: ${quest.relatedContact}` : null,
             quest.notes ? `notes: ${quest.notes}` : null,
         ].filter(Boolean);
         return `- ${quest.title}${bits.length ? ` — ${bits.join(' · ')}` : ''}`;
@@ -947,7 +1016,7 @@ function injectQuestPrompt() {
     const activeSummary = activeQuestSummary(8);
     setExtensionPrompt(
         INJECT_KEY_QUESTS,
-        `[Command-X quest context. At the end of each response, include a [quests] JSON block ONLY when a meaningful quest should be created or updated. Format: [quests][{"id":"quest_optional_existing_id","title":"Quest title","summary":"short summary","objective":"current concrete objective","status":"active","priority":"normal","source":"who/what created the quest","notes":"optional note"}][/quests]. Quests represent meaningful goals, obligations, promises, leads, investigations, errands, or unresolved story pressures that may matter later. Avoid trivial one-off actions. Reuse existing quest ids/titles when updating instead of duplicating. Mark quests completed or failed when clearly resolved. These active quests are current unresolved background context and should influence future narrative when relevant, especially higher-priority items, but do NOT force mention of every quest every turn.\nCurrent active quests:\n${activeSummary}]`,
+        `[Command-X quest context. At the end of each response, include a [quests] JSON block ONLY when a meaningful quest should be created or updated. Format: [quests][{"id":"quest_optional_existing_id","title":"Quest title","summary":"short summary","objective":"current concrete objective","status":"active|waiting|blocked|completed|failed","priority":"low|normal|high|critical","urgency":"none|soon|urgent","source":"who/what created the quest","relatedContact":"matching contact name when relevant","focused":false,"nextAction":"optional immediate next step","subtasks":[{"id":"sub_optional","text":"step text","done":false}],"notes":"optional note"}][/quests]. Quests represent meaningful goals, obligations, promises, leads, investigations, errands, blockers, or unresolved story pressures that may matter later. Reuse existing quest ids/titles when updating instead of duplicating. Avoid trivial one-off actions and excessive churn. Manual quest edits may be pinned field-by-field and should not be blindly overwritten later. Focused quests matter most. Urgent/high-priority active quests matter next. Waiting/blocked quests are still relevant but lower pressure. Completed/failed quests are historical only and should not be treated as current pressure. Not every quest must be mentioned every turn.\nCurrent quest state:\n${activeSummary}]`,
         extension_prompt_types.IN_CHAT,
         4,
         false,
@@ -974,44 +1043,81 @@ function questPriorityBadge(priority) {
     return `<span class="cx-quest-priority cx-quest-priority-${escAttr(value)}">${escHtml(value)}</span>`;
 }
 
+function questUrgencyBadge(urgency) {
+    const value = sanitizeQuestValue('urgency', urgency) || 'none';
+    if (value === 'none') return '';
+    return `<span class="cx-quest-urgency cx-quest-urgency-${escAttr(value)}">${escHtml(value)}</span>`;
+}
+
 function questStatusBadge(status) {
     const value = sanitizeQuestValue('status', status) || 'active';
     return `<span class="cx-quest-status cx-quest-status-${escAttr(value)}">${escHtml(value)}</span>`;
 }
 
-function renderQuestSection(status, title) {
-    const quests = loadQuests().filter(quest => quest.status === status);
+function renderQuestSubtasks(quest) {
+    const subtasks = Array.isArray(quest.subtasks) ? quest.subtasks : [];
+    if (!subtasks.length) return '';
+    const doneCount = subtasks.filter(item => item.done).length;
+    return `
+        <div class="cx-quest-field">
+            <span>Checklist · ${doneCount}/${subtasks.length}</span>
+            <div class="cx-quest-subtasks">
+                ${subtasks.map(item => `
+                    <button type="button" class="cx-quest-subtask ${item.done ? 'done' : ''}" data-cx-quest-subtask="${escAttr(quest.id)}" data-cx-subtask-id="${escAttr(item.id)}">
+                        <span>${item.done ? '☑' : '☐'}</span>
+                        <strong>${escHtml(item.text)}</strong>
+                    </button>
+                `).join('')}
+            </div>
+        </div>`;
+}
+
+function renderQuestSection(statuses, title) {
+    const statusList = Array.isArray(statuses) ? statuses : [statuses];
+    const quests = loadQuests().filter(quest => statusList.includes(quest.status));
     return `
         <div class="cx-quest-section">
             <div class="cx-quest-section-head">
                 <div class="cx-quest-section-title">${title}</div>
                 <div class="cx-quest-section-count">${quests.length}</div>
             </div>
-            ${quests.length ? quests.map(quest => `
-                <div class="cx-quest-card" data-quest-id="${escAttr(quest.id)}">
+            ${quests.length ? quests.map(quest => {
+                const contact = findContactForQuest(quest);
+                return `
+                <div class="cx-quest-card ${quest.focused ? 'cx-quest-card-focused' : ''}" data-quest-id="${escAttr(quest.id)}">
                     <div class="cx-quest-card-top">
                         <div>
                             <div class="cx-quest-title-row">
                                 <div class="cx-quest-title">${escHtml(quest.title || 'Untitled Quest')}</div>
+                                ${quest.focused ? '<span class="cx-quest-chip cx-quest-focus-chip">Focused</span>' : ''}
                                 ${questStatusBadge(quest.status)}
                             </div>
                             <div class="cx-quest-meta-row">
                                 ${questPriorityBadge(quest.priority || 'normal')}
+                                ${questUrgencyBadge(quest.urgency || 'none')}
                                 ${quest.source ? `<span class="cx-quest-chip">${escHtml(quest.source)}</span>` : ''}
+                                ${contact ? `<span class="cx-quest-chip">📱 ${escHtml(contact.name)}</span>` : (quest.relatedContact ? `<span class="cx-quest-chip">📱 ${escHtml(quest.relatedContact)}</span>` : '')}
                                 <span class="cx-quest-chip">${new Date(Number(quest.updatedAt || Date.now())).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>
                             </div>
                         </div>
                     </div>
                     ${quest.summary ? `<div class="cx-quest-summary">${escHtml(quest.summary)}</div>` : ''}
                     ${quest.objective ? `<div class="cx-quest-field"><span>Objective</span><strong>${escHtml(quest.objective)}</strong></div>` : ''}
+                    ${quest.nextAction ? `<div class="cx-quest-field"><span>Next Action</span><strong>${escHtml(quest.nextAction)}</strong></div>` : ''}
+                    ${renderQuestSubtasks(quest)}
                     ${quest.notes ? `<div class="cx-quest-field"><span>Notes</span><strong>${escHtml(quest.notes)}</strong></div>` : ''}
                     <div class="cx-quest-actions">
                         <button class="cx-profile-action-btn" data-cx-quest-edit="${escAttr(quest.id)}">Edit</button>
-                        ${status !== 'completed' ? `<button class="cx-profile-action-btn" data-cx-quest-complete="${escAttr(quest.id)}">Complete</button>` : ''}
-                        ${status !== 'failed' ? `<button class="cx-profile-action-btn cx-quest-fail-btn" data-cx-quest-fail="${escAttr(quest.id)}">Fail</button>` : ''}
+                        <button class="cx-profile-action-btn" data-cx-quest-focus="${escAttr(quest.id)}">${quest.focused ? 'Unfocus' : 'Focus'}</button>
+                        ${quest.status !== 'waiting' ? `<button class="cx-profile-action-btn" data-cx-quest-status="${escAttr(quest.id)}" data-cx-status-value="waiting">Wait</button>` : ''}
+                        ${quest.status !== 'blocked' ? `<button class="cx-profile-action-btn" data-cx-quest-status="${escAttr(quest.id)}" data-cx-status-value="blocked">Block</button>` : ''}
+                        ${quest.status !== 'active' ? `<button class="cx-profile-action-btn" data-cx-quest-status="${escAttr(quest.id)}" data-cx-status-value="active">Activate</button>` : ''}
+                        ${quest.status !== 'completed' ? `<button class="cx-profile-action-btn" data-cx-quest-complete="${escAttr(quest.id)}">Complete</button>` : ''}
+                        ${quest.status !== 'failed' ? `<button class="cx-profile-action-btn cx-quest-fail-btn" data-cx-quest-fail="${escAttr(quest.id)}">Fail</button>` : ''}
+                        ${contact ? `<button class="cx-profile-action-btn" data-cx-quest-open-thread="${escAttr(contact.name)}">Open Thread</button>` : ''}
                     </div>
-                </div>
-            `).join('') : '<div class="cx-quest-empty">No quests in this section.</div>'}
+                </div>`;
+            }).join('') : '<div class="cx-quest-empty">No quests in this section.</div>'}
         </div>`;
 }
 
@@ -1031,8 +1137,13 @@ function openQuestEditor(questId = null) {
             summary: existing?.summary || '',
             objective: existing?.objective || '',
             priority: existing?.priority || 'normal',
+            urgency: existing?.urgency || 'none',
             source: existing?.source || '',
+            relatedContact: existing?.relatedContact || '',
             status: existing?.status || 'active',
+            focused: !!existing?.focused,
+            nextAction: existing?.nextAction || '',
+            subtasks: (existing?.subtasks || []).map(item => `${item.done ? '[x]' : '[ ]'} ${item.text}`).join('\n'),
             notes: existing?.notes || '',
         },
     };
@@ -1047,6 +1158,19 @@ function closeQuestEditor() {
     switchView('quests');
 }
 
+function parseQuestSubtasksFromEditor(value) {
+    return String(value || '')
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(Boolean)
+        .map((line, index) => {
+            const done = /^\[(x|X)\]\s*/.test(line);
+            const text = line.replace(/^\[(x|X| )\]\s*/, '').trim();
+            return { id: `sub_editor_${index}_${Math.random().toString(36).slice(2, 6)}`, text, done };
+        })
+        .filter(item => item.text);
+}
+
 function saveQuestEditor() {
     if (!questEditorState) return;
     const form = phoneContainer?.querySelector('#cx-quest-form');
@@ -1058,8 +1182,13 @@ function saveQuestEditor() {
         summary: String(data.get('summary') || '').trim(),
         objective: String(data.get('objective') || '').trim(),
         priority: String(data.get('priority') || 'normal').trim().toLowerCase(),
+        urgency: String(data.get('urgency') || 'none').trim().toLowerCase(),
         source: String(data.get('source') || '').trim(),
+        relatedContact: String(data.get('relatedContact') || '').trim(),
         status: String(data.get('status') || 'active').trim().toLowerCase(),
+        focused: data.get('focused') === 'on',
+        nextAction: String(data.get('nextAction') || '').trim(),
+        subtasks: parseQuestSubtasksFromEditor(data.get('subtasks')),
         notes: String(data.get('notes') || '').trim(),
         manualOverrides: QUEST_FIELDS.reduce((acc, field) => {
             acc[field] = true;
@@ -1121,15 +1250,41 @@ function questEditorModalHTML() {
                         </select>
                     </label>
                     <label class="cx-profile-editor-field">
-                        <span>Status</span>
-                        <select name="status">
-                            ${['active', 'completed', 'failed'].map(value => `<option value="${value}" ${draft.status === value ? 'selected' : ''}>${value}</option>`).join('')}
+                        <span>Urgency</span>
+                        <select name="urgency">
+                            ${['none', 'soon', 'urgent'].map(value => `<option value="${value}" ${draft.urgency === value ? 'selected' : ''}>${value}</option>`).join('')}
                         </select>
                     </label>
                 </div>
+                <div class="cx-profile-editor-grid">
+                    <label class="cx-profile-editor-field">
+                        <span>Status</span>
+                        <select name="status">
+                            ${['active', 'waiting', 'blocked', 'completed', 'failed'].map(value => `<option value="${value}" ${draft.status === value ? 'selected' : ''}>${value}</option>`).join('')}
+                        </select>
+                    </label>
+                    <label class="cx-profile-editor-field">
+                        <span>Focused</span>
+                        <label class="cx-quest-checkbox-row"><input type="checkbox" name="focused" ${draft.focused ? 'checked' : ''} /><strong>Pin this as the current focus</strong></label>
+                    </label>
+                </div>
                 <label class="cx-profile-editor-field">
-                    <span>Source</span>
-                    <input type="text" name="source" maxlength="120" value="${escAttr(draft.source || '')}" placeholder="Sarah" />
+                    <span>Next Action</span>
+                    <input type="text" name="nextAction" maxlength="160" value="${escAttr(draft.nextAction || '')}" placeholder="Text Sarah that you're on your way" />
+                </label>
+                <div class="cx-profile-editor-grid">
+                    <label class="cx-profile-editor-field">
+                        <span>Source</span>
+                        <input type="text" name="source" maxlength="120" value="${escAttr(draft.source || '')}" placeholder="Sarah" />
+                    </label>
+                    <label class="cx-profile-editor-field">
+                        <span>Related Contact</span>
+                        <input type="text" name="relatedContact" maxlength="120" value="${escAttr(draft.relatedContact || '')}" placeholder="Sarah" />
+                    </label>
+                </div>
+                <label class="cx-profile-editor-field">
+                    <span>Subtasks</span>
+                    <textarea name="subtasks" placeholder="[ ] Leave apartment&#10;[x] Grab keys">${escapeHtml(draft.subtasks || '')}</textarea>
                 </label>
                 <label class="cx-profile-editor-field">
                     <span>Notes</span>
@@ -1515,7 +1670,7 @@ function getChatCharacters() {
 function getContactsFromContext() {
     const chars = getChatCharacters();
     const ctx = getContext();
-    const userName = (ctx.name1 || '').toLowerCase();
+    const userName = normalizeContactName(ctx.name1 || '');
     const emojis = ['👩','👩‍🦰','👱‍♀️','👩‍🏫','🧑','👨','👩‍🎤','🧑‍💼','👧','🧝‍♀️'];
     const gradients = [
         'linear-gradient(135deg,#553355,#442244)',
@@ -1526,18 +1681,20 @@ function getContactsFromContext() {
         'linear-gradient(135deg,#aa5577,#883355)',
     ];
     const storedNpcs = loadNpcs();
-    // ST characters — filter out user persona, merge any stored NPC state
-    const contacts = chars
-        .filter(c => (c.name || '').toLowerCase() !== userName)
-        .map((c, i) => {
-            const npcData = storedNpcs.find(n => n.name.toLowerCase() === (c.name || '').toLowerCase());
-            // Use ST thumbnail if character has an avatar file
+    const storedByName = new Map(storedNpcs.map(npc => [normalizeContactName(npc.name), npc]));
+    const deduped = new Map();
+
+    chars
+        .filter(c => normalizeContactName(c.name || '') !== userName)
+        .forEach((c, i) => {
+            const key = normalizeContactName(c.name || '');
+            const npcData = storedByName.get(key);
             let thumbUrl = null;
             if (c.avatar && typeof c.avatar === 'string' && !c.avatar.startsWith('none')) {
                 try { thumbUrl = `/thumbnail?type=avatar&file=${encodeURIComponent(c.avatar)}`; }
                 catch { /* ignore */ }
             }
-            return {
+            deduped.set(key, {
                 id: c.avatar || `char_${i}`,
                 name: c.name || `Character ${i + 1}`,
                 emoji: npcData?.emoji || emojis[i % emojis.length],
@@ -1549,33 +1706,50 @@ function getContactsFromContext() {
                 location: npcData?.location || null,
                 relationship: npcData?.relationship || null,
                 thoughts: npcData?.thoughts || null,
-                avatarUrl: npcData?.avatarUrl || thumbUrl || null,
-            };
+                avatarUrl: thumbUrl || npcData?.avatarUrl || null,
+                isManual: !!npcData?.isManual,
+                manualOverrides: { ...(npcData?.manualOverrides || {}) },
+            });
         });
-    // Merge stored NPCs (skip duplicates by name + skip user persona)
-    const existingNames = new Set(contacts.map(c => c.name.toLowerCase()));
-    const npcs = storedNpcs.filter(n => (n.name || '').toLowerCase() !== userName);
-    for (let i = 0; i < npcs.length; i++) {
-        if (existingNames.has(npcs[i].name.toLowerCase())) continue;
-        contacts.push({
-            id: `npc_${i}`,
-            name: npcs[i].name,
-            emoji: npcs[i].emoji || '🧑',
-            gradient: gradients[(chars.length + i) % gradients.length],
-            online: npcs[i].status === 'online' || npcs[i].status === 'nearby',
-            isNpc: true,
-            status: npcs[i].status || 'nearby',
-            npcStatus: npcs[i].status || 'nearby',
-            mood: npcs[i].mood || null,
-            location: npcs[i].location || null,
-            relationship: npcs[i].relationship || null,
-            thoughts: npcs[i].thoughts || null,
-            avatarUrl: npcs[i].avatarUrl || null,
-            isManual: !!npcs[i].isManual,
-            manualOverrides: { ...(npcs[i].manualOverrides || {}) },
+
+    storedNpcs
+        .filter(n => normalizeContactName(n.name || '') !== userName)
+        .forEach((npc, i) => {
+            const key = normalizeContactName(npc.name);
+            if (!key) return;
+            if (deduped.has(key)) {
+                const existing = deduped.get(key);
+                deduped.set(key, {
+                    ...npc,
+                    ...existing,
+                    name: existing.name,
+                    isNpc: false,
+                    online: existing.online,
+                    avatarUrl: existing.avatarUrl || npc.avatarUrl || null,
+                    manualOverrides: { ...(npc.manualOverrides || {}), ...(existing.manualOverrides || {}) },
+                });
+                return;
+            }
+            deduped.set(key, {
+                id: `npc_${i}`,
+                name: npc.name,
+                emoji: npc.emoji || '🧑',
+                gradient: gradients[(chars.length + i) % gradients.length],
+                online: npc.status === 'online' || npc.status === 'nearby',
+                isNpc: true,
+                status: npc.status || 'nearby',
+                npcStatus: npc.status || 'nearby',
+                mood: npc.mood || null,
+                location: npc.location || null,
+                relationship: npc.relationship || null,
+                thoughts: npc.thoughts || null,
+                avatarUrl: npc.avatarUrl || null,
+                isManual: !!npc.isManual,
+                manualOverrides: { ...(npc.manualOverrides || {}) },
+            });
         });
-    }
-    // Sort by most recent message timestamp (contacts with messages first)
+
+    const contacts = [...deduped.values()];
     contacts.sort((a, b) => {
         const aMsgs = loadMessages(a.name);
         const bMsgs = loadMessages(b.name);
@@ -1583,7 +1757,7 @@ function getContactsFromContext() {
         const bTs = bMsgs.length ? (bMsgs[bMsgs.length - 1].ts || 0) : 0;
         if (aTs && !bTs) return -1;
         if (!aTs && bTs) return 1;
-        return bTs - aTs; // most recent first
+        return bTs - aTs;
     });
     return contacts;
 }
@@ -1759,7 +1933,16 @@ async function pollPrivateMessages() {
 }
 
 function normalizeContactName(name) {
-    return String(name || '').trim().toLowerCase();
+    return String(name || '')
+        .trim()
+        .toLowerCase()
+        .replace(/\([^)]*\)/g, ' ')
+        .replace(/\[[^\]]*\]/g, ' ')
+        .replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')
+        .replace(/^(the|a|an)\s+/g, '')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
 }
 
 function safeDataUrlFromFile(file, maxWidth = 256, quality = 0.82) {
@@ -2261,6 +2444,7 @@ function buildPhone() {
             </div>
             <div class="cx-quests-list">
                 ${renderQuestSection('active', 'Active')}
+                ${renderQuestSection(['waiting', 'blocked'], 'Waiting / Blocked')}
                 ${renderQuestSection('completed', 'Completed')}
                 ${renderQuestSection('failed', 'Failed')}
             </div>
@@ -2705,6 +2889,45 @@ function wirePhone() {
         btn.addEventListener('click', (e) => {
             e.stopPropagation();
             openQuestEditor(btn.dataset.cxQuestEdit);
+        })
+    );
+    phoneContainer.querySelectorAll('[data-cx-quest-focus]').forEach(btn =>
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const quest = getEditableQuest(btn.dataset.cxQuestFocus);
+            const updated = setQuestFocused(btn.dataset.cxQuestFocus, !quest?.focused);
+            if (updated) {
+                rebuildPhone();
+                switchView('quests');
+                showToast(updated.title, updated.focused ? 'Quest focused.' : 'Quest unfocused.');
+            }
+        })
+    );
+    phoneContainer.querySelectorAll('[data-cx-quest-status]').forEach(btn =>
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const updated = setQuestStatus(btn.dataset.cxQuestStatus, btn.dataset.cxStatusValue);
+            if (updated) {
+                rebuildPhone();
+                switchView('quests');
+                showToast(updated.title, `Quest marked ${updated.status}.`);
+            }
+        })
+    );
+    phoneContainer.querySelectorAll('[data-cx-quest-subtask]').forEach(btn =>
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const updated = toggleQuestSubtask(btn.dataset.cxQuestSubtask, btn.dataset.cxSubtaskId);
+            if (updated) {
+                rebuildPhone();
+                switchView('quests');
+            }
+        })
+    );
+    phoneContainer.querySelectorAll('[data-cx-quest-open-thread]').forEach(btn =>
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openChat(btn.dataset.cxQuestOpenThread, 'cmdx');
         })
     );
     phoneContainer.querySelectorAll('[data-cx-quest-complete]').forEach(btn =>

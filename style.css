@@ -988,11 +988,16 @@
     flex-direction: column;
     gap: 9px;
 }
+.cx-quest-card-focused {
+    border-color: rgba(245,158,11,.45);
+    box-shadow: 0 0 0 1px rgba(245,158,11,.18), 0 10px 30px rgba(0,0,0,.2);
+    background: linear-gradient(180deg, rgba(38,26,10,.96), rgba(20,20,25,.94));
+}
 .cx-quest-card-top { display: flex; justify-content: space-between; gap: 10px; }
 .cx-quest-title-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .cx-quest-title { font-size: 15px; font-weight: 700; color: #fff; }
 .cx-quest-meta-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
-.cx-quest-chip, .cx-quest-priority, .cx-quest-status {
+.cx-quest-chip, .cx-quest-priority, .cx-quest-status, .cx-quest-urgency {
     display: inline-flex;
     align-items: center;
     border-radius: 999px;
@@ -1003,11 +1008,16 @@
     letter-spacing: .05em;
 }
 .cx-quest-chip { background: rgba(255,255,255,.08); color: #9ca3af; }
+.cx-quest-focus-chip { background: rgba(245,158,11,.18); color: #fcd34d; }
 .cx-quest-priority-low { background: rgba(148,163,184,.14); color: #cbd5e1; }
 .cx-quest-priority-normal { background: rgba(59,130,246,.14); color: #93c5fd; }
 .cx-quest-priority-high { background: rgba(245,158,11,.16); color: #fcd34d; }
 .cx-quest-priority-critical { background: rgba(239,68,68,.18); color: #fca5a5; }
+.cx-quest-urgency-soon { background: rgba(250,204,21,.18); color: #fde68a; }
+.cx-quest-urgency-urgent { background: rgba(239,68,68,.18); color: #fca5a5; }
 .cx-quest-status-active { background: rgba(16,185,129,.16); color: #6ee7b7; }
+.cx-quest-status-waiting { background: rgba(148,163,184,.16); color: #cbd5e1; }
+.cx-quest-status-blocked { background: rgba(248,113,113,.18); color: #fecaca; }
 .cx-quest-status-completed { background: rgba(59,130,246,.16); color: #93c5fd; }
 .cx-quest-status-failed { background: rgba(239,68,68,.16); color: #fca5a5; }
 .cx-quest-summary { color: #d1d5db; font-size: 13px; line-height: 1.45; }
@@ -1021,6 +1031,18 @@
 }
 .cx-quest-field span { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: #6b7280; }
 .cx-quest-field strong { font-size: 12px; color: #e5e7eb; line-height: 1.4; font-weight: 500; }
+.cx-quest-subtasks { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.cx-quest-subtask {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    padding: 8px 0;
+    background: transparent;
+    color: #d1d5db;
+    border: 0;
+    text-align: left;
+}
+.cx-quest-subtask.done strong { color: #9ca3af; text-decoration: line-through; }
 .cx-quest-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .cx-quest-empty {
     padding: 14px 12px;
@@ -1030,6 +1052,7 @@
     font-size: 12px;
 }
 .cx-quest-fail-btn { color: #fca5a5; border-color: rgba(239,68,68,.24); }
+.cx-quest-checkbox-row { display: flex; gap: 8px; align-items: center; }
 
 .cx-quest-editor-backdrop {
     position: absolute;
