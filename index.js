@@ -985,7 +985,7 @@ function toggleQuestSubtask(questId, subtaskId) {
 async function enhanceQuestById(questId) {
     const existing = getEditableQuest(questId);
     if (!existing) return null;
-    const enriched = await enrichQuestDraftIfNeeded({
+    const enrichment = await enrichQuestDraftIfNeeded({
         id: existing.id,
         title: existing.title,
         summary: existing.summary || '',
@@ -1001,10 +1001,17 @@ async function enhanceQuestById(questId) {
         notes: existing.notes || '',
         manualOverrides: { ...(existing.manualOverrides || {}) },
     });
-    const saved = upsertQuest(enriched, { oldId: existing.id });
+    if (enrichment.error) {
+        throw enrichment.error;
+    }
+    if (!enrichment.changed) {
+        showToast(existing.title, 'No missing quest fields to fill.');
+        return existing;
+    }
+    const saved = upsertQuest(enrichment.draft, { oldId: existing.id });
     rebuildPhone();
     switchView('quests');
-    showToast(saved.title, 'Quest enhanced.');
+    showToast(saved.title, 'Filled missing quest fields.');
     return saved;
 }
 
@@ -1247,7 +1254,7 @@ function questEnrichmentSchema() {
 
 async function enrichQuestDraftIfNeeded(draft) {
     const ctx = getContext();
-    if (typeof ctx.generateQuietPrompt !== 'function') return draft;
+    if (typeof ctx.generateQuietPrompt !== 'function') return { draft, changed: false, error: new Error('generateQuietPrompt unavailable') };
     const missing = [
         !draft.summary,
         !draft.objective,
@@ -1259,8 +1266,8 @@ async function enrichQuestDraftIfNeeded(draft) {
         !draft.priority || draft.priority === 'normal',
         !draft.urgency || draft.urgency === 'none',
     ].some(Boolean);
-    if (!missing) return draft;
-    if (questEnrichmentInFlight) return draft;
+    if (!missing) return { draft, changed: false, error: null };
+    if (questEnrichmentInFlight) return { draft, changed: false, error: new Error('Quest enrichment already running') };
     questEnrichmentInFlight = true;
     try {
         const raw = await ctx.generateQuietPrompt({
@@ -1287,10 +1294,10 @@ async function enrichQuestDraftIfNeeded(draft) {
         if ((!enriched.status || enriched.status === 'active') && parsed?.status) enriched.status = parsed.status;
         if ((!Array.isArray(enriched.subtasks) || !enriched.subtasks.length) && Array.isArray(parsed?.subtasks)) enriched.subtasks = parsed.subtasks;
         if (!enriched.focused && typeof parsed?.focused === 'boolean') enriched.focused = parsed.focused;
-        return enriched;
+        return { draft: enriched, changed: JSON.stringify(enriched) !== JSON.stringify(draft), error: null };
     } catch (error) {
         console.warn('[command-x] quest enrichment failed', error);
-        return draft;
+        return { draft, changed: false, error };
     } finally {
         questEnrichmentInFlight = false;
     }
@@ -1339,7 +1346,16 @@ async function saveQuestEditor() {
     }
 
     try {
-        const finalDraft = questEditorState.mode === 'new' ? await enrichQuestDraftIfNeeded(draft) : draft;
+        let finalDraft = draft;
+        if (questEditorState.mode === 'new') {
+            const enrichment = await enrichQuestDraftIfNeeded(draft);
+            finalDraft = enrichment.draft;
+            if (enrichment.error) {
+                showToast(draft.title, `Quest save kept your fields, but AI fill failed: ${enrichment.error.message || enrichment.error}`);
+            } else if (enrichment.changed) {
+                showToast(draft.title, 'Filled missing quest fields.');
+            }
+        }
         const saved = upsertQuest(finalDraft, { oldId: questEditorState.oldId || null });
         const wasNew = questEditorState.mode === 'new';
         questEditorState = null;
