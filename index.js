@@ -982,6 +982,32 @@ function toggleQuestSubtask(questId, subtaskId) {
     return updateQuestFields(questId, { subtasks }, ['subtasks']);
 }
 
+async function enhanceQuestById(questId) {
+    const existing = getEditableQuest(questId);
+    if (!existing) return null;
+    const enriched = await enrichQuestDraftIfNeeded({
+        id: existing.id,
+        title: existing.title,
+        summary: existing.summary || '',
+        objective: existing.objective || '',
+        priority: existing.priority || 'normal',
+        urgency: existing.urgency || 'none',
+        source: existing.source || '',
+        relatedContact: existing.relatedContact || '',
+        status: existing.status || 'active',
+        focused: !!existing.focused,
+        nextAction: existing.nextAction || '',
+        subtasks: Array.isArray(existing.subtasks) ? existing.subtasks : [],
+        notes: existing.notes || '',
+        manualOverrides: { ...(existing.manualOverrides || {}) },
+    });
+    const saved = upsertQuest(enriched, { oldId: existing.id });
+    rebuildPhone();
+    switchView('quests');
+    showToast(saved.title, 'Quest enhanced.');
+    return saved;
+}
+
 function findContactForQuest(quest = {}) {
     const contacts = getKnownContactsForPrivateMessaging();
     const key = normalizeContactName(quest.relatedContact || quest.source || '');
