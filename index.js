@@ -1142,6 +1142,7 @@ function renderQuestSection(statuses, title) {
                         ${quest.status !== 'completed' ? `<button class="cx-profile-action-btn" data-cx-quest-complete="${escAttr(quest.id)}">Complete</button>` : ''}
                         ${quest.status !== 'failed' ? `<button class="cx-profile-action-btn cx-quest-fail-btn" data-cx-quest-fail="${escAttr(quest.id)}">Fail</button>` : ''}
                         ${contact ? `<button class="cx-profile-action-btn" data-cx-quest-open-thread="${escAttr(contact.name)}">Open Thread</button>` : ''}
+                        <button class="cx-profile-action-btn" data-cx-quest-enhance="${escAttr(quest.id)}">Enhance</button>
                     </div>
                 </div>`;
             }).join('') : '<div class="cx-quest-empty">No quests in this section.</div>'}
@@ -3065,6 +3066,16 @@ saveQuestEditor().catch(error => alert(String(error?.message || error)));
         btn.addEventListener('click', (e) => {
             e.stopPropagation();
             openChat(btn.dataset.cxQuestOpenThread, 'cmdx');
+        })
+    );
+    phoneContainer.querySelectorAll('[data-cx-quest-enhance]').forEach(btn =>
+        btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            try {
+                await enhanceQuestById(btn.dataset.cxQuestEnhance);
+            } catch (error) {
+                alert(String(error?.message || error));
+            }
         })
     );
     phoneContainer.querySelectorAll('[data-cx-quest-complete]').forEach(btn =>
