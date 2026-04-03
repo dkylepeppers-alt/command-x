@@ -24,6 +24,8 @@ const INJECT_KEY_PRIVATE_PHONE = 'command-x-private-phone';
 const INJECT_KEY_QUESTS = 'command-x-quests';
 const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true, manualHybridPrivateTexts: true, openclawMode: 'assist' };
 const CONTACT_FIELDS = ['emoji', 'status', 'mood', 'location', 'relationship', 'thoughts', 'avatarUrl'];
+const VOLATILE_CONTACT_FIELDS = ['status', 'mood', 'location', 'thoughts'];
+const STABLE_CONTACT_FIELDS = ['emoji', 'relationship', 'avatarUrl'];
 const MANUAL_OVERRIDE_FIELDS = [...CONTACT_FIELDS];
 const QUEST_FIELDS = ['title', 'summary', 'objective', 'priority', 'urgency', 'source', 'relatedContact', 'status', 'focused', 'nextAction', 'subtasks', 'notes'];
 const QUEST_STATUS_ORDER = { active: 0, waiting: 1, blocked: 2, completed: 3, failed: 4 };
@@ -691,23 +693,47 @@ function extractContacts(raw) {
  * Merge parsed NPCs into the stored list. Existing NPCs with the same
  * name are updated; new ones are appended.
  */
+function mergeStoredContactRecord(existing = {}, incoming = {}, options = {}) {
+    const preferExisting = !!options.preferExisting;
+    const manualOverrides = getManualOverrides(existing);
+    const merged = {
+        ...incoming,
+        ...existing,
+        name: existing.name || incoming.name || '',
+    };
+
+    const mergeField = (field, fallback = null) => {
+        const existingValue = existing[field];
+        const incomingValue = incoming[field];
+        const hasExisting = existingValue != null && String(existingValue).trim() !== '';
+        const hasIncoming = incomingValue != null && String(incomingValue).trim() !== '';
+        if (manualOverrides[field]) {
+            merged[field] = hasExisting ? existingValue : fallback;
+            return;
+        }
+        if (preferExisting) {
+            merged[field] = hasExisting ? existingValue : (hasIncoming ? incomingValue : fallback);
+            return;
+        }
+        merged[field] = hasIncoming ? incomingValue : (hasExisting ? existingValue : fallback);
+    };
+
+    STABLE_CONTACT_FIELDS.forEach(field => mergeField(field));
+    VOLATILE_CONTACT_FIELDS.forEach(field => mergeField(field));
+    merged.isManual = !!existing.isManual || !!incoming.isManual || Object.values(manualOverrides).some(Boolean);
+    merged.manualOverrides = { ...manualOverrides, ...(incoming.manualOverrides || {}) };
+    return merged;
+}
+
 function mergeNpcs(incoming) {
     if (!incoming || !incoming.length) return;
     const stored = loadNpcs();
     for (const npc of incoming) {
         const idx = findStoredNpcIndexByName(npc.name, stored);
         if (idx >= 0) {
-            const existing = stored[idx];
-            const merged = { ...existing, ...npc };
-            const manualOverrides = getManualOverrides(existing);
-            MANUAL_OVERRIDE_FIELDS.forEach(field => {
-                if (manualOverrides[field]) merged[field] = existing[field] ?? null;
-            });
-            merged.isManual = existing.isManual || Object.values(manualOverrides).some(Boolean);
-            merged.manualOverrides = manualOverrides;
-            stored[idx] = merged;
+            stored[idx] = mergeStoredContactRecord(stored[idx], npc);
         } else {
-            stored.push(npc);
+            stored.push({ ...npc, manualOverrides: { ...(npc.manualOverrides || {}) } });
         }
     }
     saveNpcs(stored);
@@ -904,6 +930,23 @@ function saveAndRefreshQuests(quests = []) {
     injectQuestPrompt();
 }
 
+function shouldAutoUpdateQuestField(field, existing, incoming) {
+    if (incoming == null) return false;
+    const current = existing?.[field];
+    if (field === 'status') return sanitizeQuestValue('status', incoming) !== sanitizeQuestValue('status', current);
+    if (field === 'focused') return !!incoming !== !!current;
+    if (field === 'nextAction') return !!String(incoming || '').trim() && String(incoming || '').trim() !== String(current || '').trim();
+    if (field === 'subtasks') return Array.isArray(incoming) && JSON.stringify(incoming) !== JSON.stringify(current || []);
+    if (field === 'relatedContact' || field === 'source') return !!String(incoming || '').trim() && String(incoming || '').trim() !== String(current || '').trim();
+    if (field === 'priority' || field === 'urgency') {
+        const normalizedIncoming = sanitizeQuestValue(field, incoming);
+        const normalizedCurrent = sanitizeQuestValue(field, current);
+        return normalizedIncoming !== normalizedCurrent && normalizedIncoming !== (field === 'priority' ? 'normal' : 'none');
+    }
+    if (field === 'summary' || field === 'objective' || field === 'notes') return false;
+    return String(incoming || '').trim() !== String(current || '').trim();
+}
+
 function mergeQuests(incoming, options = {}) {
     if (!incoming || !incoming.length) return false;
     const source = options.source || 'auto';
@@ -916,20 +959,31 @@ function mergeQuests(incoming, options = {}) {
         if (idx >= 0) {
             const existing = stored[idx];
             const manualOverrides = getQuestManualOverrides(existing);
-            const merged = canonicalQuest({ ...existing, ...incomingQuest }, existing);
+            let merged;
             if (source === 'auto') {
+                merged = { ...existing, id: existing.id || incomingQuest.id };
                 QUEST_FIELDS.forEach(field => {
-                    if (manualOverrides[field]) merged[field] = existing[field] ?? (field === 'subtasks' ? [] : null);
+                    if (manualOverrides[field]) {
+                        merged[field] = existing[field] ?? (field === 'subtasks' ? [] : null);
+                        return;
+                    }
+                    if (shouldAutoUpdateQuestField(field, existing, incomingQuest)) {
+                        merged[field] = incomingQuest[field];
+                    }
                 });
+                merged = canonicalQuest({ ...merged, manualOverrides, updatedAt: Date.now() }, existing);
                 merged.manualOverrides = manualOverrides;
             } else {
+                merged = canonicalQuest({ ...existing, ...incomingQuest, updatedAt: Date.now() }, existing);
                 merged.manualOverrides = { ...manualOverrides, ...(incomingQuest.manualOverrides || {}) };
             }
             merged.id = existing.id || merged.id;
-            merged.updatedAt = Date.now();
-            stored[idx] = merged;
+            if (JSON.stringify(merged) !== JSON.stringify(existing)) {
+                merged.updatedAt = Date.now();
+                stored[idx] = merged;
+                changed = true;
+            }
             if (merged.focused) focusedId = merged.id;
-            changed = true;
         } else {
             const clean = canonicalQuest({ ...incomingQuest, updatedAt: Date.now() });
             stored.push(clean);
@@ -1050,7 +1104,7 @@ function injectQuestPrompt() {
     const activeSummary = activeQuestSummary(8);
     setExtensionPrompt(
         INJECT_KEY_QUESTS,
-        `[Command-X quest context. At the end of each response, include a [quests] JSON block ONLY when a meaningful quest should be created or updated. Format: [quests][{"id":"quest_optional_existing_id","title":"Quest title","summary":"short summary","objective":"current concrete objective","status":"active|waiting|blocked|completed|failed","priority":"low|normal|high|critical","urgency":"none|soon|urgent","source":"who/what created the quest","relatedContact":"matching contact name when relevant","focused":false,"nextAction":"optional immediate next step","subtasks":[{"id":"sub_optional","text":"step text","done":false}],"notes":"optional note"}][/quests]. Quests represent meaningful goals, obligations, promises, leads, investigations, errands, blockers, or unresolved story pressures that may matter later. Reuse existing quest ids/titles when updating instead of duplicating. Avoid trivial one-off actions and excessive churn. Manual quest edits may be pinned field-by-field and should not be blindly overwritten later. Focused quests matter most. Urgent/high-priority active quests matter next. Waiting/blocked quests are still relevant but lower pressure. Completed/failed quests are historical only and should not be treated as current pressure. Not every quest must be mentioned every turn.\nCurrent quest state:\n${activeSummary}]`,
+        `[Command-X quest context. At the end of each response, include a [quests] JSON block ONLY when a meaningful quest should be created or updated. Format: [quests][{"id":"quest_optional_existing_id","title":"Quest title","summary":"short summary","objective":"current concrete objective","status":"active|waiting|blocked|completed|failed","priority":"low|normal|high|critical","urgency":"none|soon|urgent","source":"who/what created the quest","relatedContact":"matching contact name when relevant","focused":false,"nextAction":"optional immediate next step","subtasks":[{"id":"sub_optional","text":"step text","done":false}],"notes":"optional note"}][/quests]. Quests represent meaningful goals, obligations, promises, leads, investigations, errands, blockers, or unresolved story pressures that may matter later. Reuse existing quest ids/titles when updating instead of duplicating. Check existing quests for progress, completion, blockage, waiting state, next-step changes, and subtask completion — but do NOT rewrite summaries/objectives/priority/urgency/notes just because wording could be improved. Only change stable quest fields when the story meaning actually changed. Avoid trivial one-off actions and excessive churn, especially on rerolls. Manual quest edits may be pinned field-by-field and should not be blindly overwritten later. Focused quests matter most. Urgent/high-priority active quests matter next. Waiting/blocked quests are still relevant but lower pressure. Completed/failed quests are historical only and should not be treated as current pressure. Not every quest must be mentioned every turn.\nCurrent quest state:\n${activeSummary}]`,
         extension_prompt_types.IN_CHAT,
         4,
         false,
@@ -1870,28 +1924,29 @@ function getContactsFromContext() {
         .filter(c => normalizeContactName(c.name || '') !== userName)
         .forEach((c, i) => {
             const key = normalizeContactName(c.name || '');
-            const npcData = storedByName.get(key);
+            const npcData = storedByName.get(key) || {};
             let thumbUrl = null;
             if (c.avatar && typeof c.avatar === 'string' && !c.avatar.startsWith('none')) {
                 try { thumbUrl = `/thumbnail?type=avatar&file=${encodeURIComponent(c.avatar)}`; }
                 catch { /* ignore */ }
             }
-            deduped.set(key, {
+            const liveContact = {
                 id: c.avatar || `char_${i}`,
                 name: c.name || `Character ${i + 1}`,
-                emoji: npcData?.emoji || emojis[i % emojis.length],
+                emoji: emojis[i % emojis.length],
                 gradient: gradients[i % gradients.length],
                 online: true,
                 isNpc: false,
-                status: npcData?.status || 'online',
-                mood: npcData?.mood || null,
-                location: npcData?.location || null,
-                relationship: npcData?.relationship || null,
-                thoughts: npcData?.thoughts || null,
-                avatarUrl: thumbUrl || npcData?.avatarUrl || null,
-                isManual: !!npcData?.isManual,
-                manualOverrides: { ...(npcData?.manualOverrides || {}) },
-            });
+                status: 'online',
+                mood: null,
+                location: null,
+                relationship: null,
+                thoughts: null,
+                avatarUrl: thumbUrl || null,
+                isManual: !!npcData.isManual,
+                manualOverrides: { ...(npcData.manualOverrides || {}) },
+            };
+            deduped.set(key, mergeStoredContactRecord(npcData, liveContact, { preferExisting: true }));
         });
 
     storedNpcs
@@ -1899,20 +1954,7 @@ function getContactsFromContext() {
         .forEach((npc, i) => {
             const key = normalizeContactName(npc.name);
             if (!key) return;
-            if (deduped.has(key)) {
-                const existing = deduped.get(key);
-                deduped.set(key, {
-                    ...npc,
-                    ...existing,
-                    name: existing.name,
-                    isNpc: false,
-                    online: existing.online,
-                    avatarUrl: existing.avatarUrl || npc.avatarUrl || null,
-                    manualOverrides: { ...(npc.manualOverrides || {}), ...(existing.manualOverrides || {}) },
-                });
-                return;
-            }
-            deduped.set(key, {
+            const fallback = {
                 id: `npc_${i}`,
                 name: npc.name,
                 emoji: npc.emoji || '🧑',
@@ -1928,7 +1970,18 @@ function getContactsFromContext() {
                 avatarUrl: npc.avatarUrl || null,
                 isManual: !!npc.isManual,
                 manualOverrides: { ...(npc.manualOverrides || {}) },
-            });
+            };
+            if (deduped.has(key)) {
+                const existing = deduped.get(key);
+                const merged = mergeStoredContactRecord(npc, existing, { preferExisting: true });
+                merged.name = existing.name || npc.name;
+                merged.isNpc = false;
+                merged.online = existing.online;
+                merged.avatarUrl = existing.avatarUrl || npc.avatarUrl || null;
+                deduped.set(key, merged);
+                return;
+            }
+            deduped.set(key, fallback);
         });
 
     const contacts = [...deduped.values()];
