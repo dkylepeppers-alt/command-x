@@ -56,6 +56,7 @@ let profileEditorState = null;
 let questEditorState = null;
 let privatePollInFlight = false;
 let scanContactsInFlight = false;
+const SCAN_CONTACTS_LABEL = '🔍 Scan Contacts';
 let questEnrichmentInFlight = false;
 
 
@@ -2332,6 +2333,13 @@ async function pollPrivateMessages() {
  * scene. Merges the result into the stored NPC list and refreshes the phone.
  * Invoked by the "Scan Contacts" button on the Profiles app.
  */
+function applyScanContactsButtonState() {
+    const btn = phoneContainer?.querySelector('#cx-scan-contacts');
+    if (!btn) return;
+    btn.disabled = scanContactsInFlight;
+    btn.textContent = scanContactsInFlight ? 'Scanning…' : SCAN_CONTACTS_LABEL;
+}
+
 async function scanContactsNow() {
     if (scanContactsInFlight) return;
     const ctx = getContext();
@@ -2341,9 +2349,7 @@ async function scanContactsNow() {
     }
 
     scanContactsInFlight = true;
-    const SCAN_BTN_LABEL = '🔍 Scan Contacts';
-    const button = phoneContainer?.querySelector('#cx-scan-contacts');
-    if (button) { button.disabled = true; button.textContent = 'Scanning…'; }
+    applyScanContactsButtonState();
 
     try {
         const userName = ctx.name1 || '';
@@ -2369,8 +2375,7 @@ async function scanContactsNow() {
     } finally {
         scanContactsInFlight = false;
         // Re-query because rebuildPhone() may have replaced the button DOM node.
-        const refreshedBtn = phoneContainer?.querySelector('#cx-scan-contacts');
-        if (refreshedBtn) { refreshedBtn.disabled = false; refreshedBtn.textContent = SCAN_BTN_LABEL; }
+        applyScanContactsButtonState();
     }
 }
 
@@ -2867,7 +2872,7 @@ function buildPhone() {
                 <div class="cx-profiles-title">Profiles</div>
                 <div class="cx-profiles-sub">Contact Intelligence</div>
                 <div class="cx-profiles-actions">
-                    <button class="cx-settings-btn" id="cx-scan-contacts" title="Ask the LLM to report all characters currently in the scene">🔍 Scan Contacts</button>
+                    <button class="cx-settings-btn" id="cx-scan-contacts" title="Ask the LLM to report all characters currently in the scene" ${scanContactsInFlight ? 'disabled' : ''}>${scanContactsInFlight ? 'Scanning…' : SCAN_CONTACTS_LABEL}</button>
                     <button class="cx-settings-btn" id="cx-add-contact">+ Add Contact</button>
                 </div>
             </div>
