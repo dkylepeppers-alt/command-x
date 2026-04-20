@@ -496,7 +496,7 @@ function flushQueue() {
     // Build batched RP message
     const rpParts = composeQueue.map(q => {
         if (q.cmdType || q.isNeural) {
-            return `*opens Command-X and sends a neural command to ${q.contactName}:*\n${q.text}`;
+            return `*Command-X sends a neural command to ${q.contactName}:*\n${q.text}`;
         } else {
             return `*texts ${q.contactName} on phone:*\n"${q.text}"`;
         }
