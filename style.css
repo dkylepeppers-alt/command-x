@@ -1078,6 +1078,34 @@
     text-align: left;
 }
 .cx-quest-subtask.done strong { color: #9ca3af; text-decoration: line-through; }
+.cx-quest-checkbox {
+    display: inline-block;
+    flex-shrink: 0;
+    width: 15px;
+    height: 15px;
+    border: 2px solid #6b7280;
+    border-radius: 4px;
+    background: transparent;
+    margin-top: 1px;
+    position: relative;
+    transition: border-color .15s, background .15s;
+}
+.cx-quest-checkbox.done {
+    background: var(--cx-accent, #a855f7);
+    border-color: var(--cx-accent, #a855f7);
+}
+.cx-quest-checkbox.done::after {
+    content: '';
+    position: absolute;
+    left: 3px;
+    top: 0px;
+    width: 5px;
+    height: 9px;
+    border: 2px solid #fff;
+    border-top: none;
+    border-left: none;
+    transform: rotate(45deg);
+}
 .cx-quest-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .cx-quest-empty {
     padding: 14px 12px;
