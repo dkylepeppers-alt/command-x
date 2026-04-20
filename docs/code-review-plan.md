@@ -30,14 +30,14 @@ can be browsed and referenced from the source tree.
 
 ## Phase 2 — Performance & storage
 
-- [ ] Cache `historyContactNames()` results; invalidate on write.
-- [ ] Cache last-message timestamp per contact; stop JSON-parsing every
+- [x] Cache `historyContactNames()` results; invalidate on write.
+- [x] Cache last-message timestamp per contact; stop JSON-parsing every
       thread on sort.
 - [ ] Move avatar data URLs out of `localStorage` into IndexedDB (or a
       global-scoped key).
-- [ ] Add a size/length cap to `safeDataUrlFromFile` before
+- [x] Add a size/length cap to `safeDataUrlFromFile` before
       `drawImage` / `toDataURL`.
-- [ ] Throttle `[status]` / `[quests]` prompt injection (skip every N
+- [x] Throttle `[status]` / `[quests]` prompt injection (skip every N
       turns, configurable).
 
 ## Phase 3 — Architecture & maintainability

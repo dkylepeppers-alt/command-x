@@ -22,7 +22,8 @@ const INJECT_KEY = 'command-x-sms';
 const INJECT_KEY_CONTACTS = 'command-x-contacts';
 const INJECT_KEY_PRIVATE_PHONE = 'command-x-private-phone';
 const INJECT_KEY_QUESTS = 'command-x-quests';
-const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true, manualHybridPrivateTexts: true, openclawMode: 'assist' };
+const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true, manualHybridPrivateTexts: true, openclawMode: 'assist', contactsInjectEveryN: 1, questsInjectEveryN: 1 };
+const MAX_AVATAR_FILE_BYTES = 8 * 1024 * 1024; // 8 MB hard cap on raw upload size
 const CONTACT_FIELDS = ['emoji', 'status', 'mood', 'location', 'relationship', 'thoughts', 'avatarUrl'];
 const VOLATILE_CONTACT_FIELDS = ['status', 'mood', 'location', 'thoughts'];
 const STABLE_CONTACT_FIELDS = ['emoji', 'relationship', 'avatarUrl'];
@@ -1125,6 +1126,29 @@ function clearQuestPrompt() {
     setExtensionPrompt(INJECT_KEY_QUESTS, '', extension_prompt_types.NONE, 0);
 }
 
+/* ------------------------------------------------------------------
+   Prompt injection throttling (Phase 2). Counted per received message;
+   when `contactsInjectEveryN` / `questsInjectEveryN` is > 1 we clear
+   the relevant injection on off-turns and re-inject on the matching
+   turn. A value of 1 (default) keeps the legacy every-turn behavior.
+   ------------------------------------------------------------------ */
+let _turnCounter = 0;
+
+function applyInjectionThrottle() {
+    _turnCounter += 1;
+    const contactsN = Math.max(1, Number(settings.contactsInjectEveryN) || 1);
+    const questsN = Math.max(1, Number(settings.questsInjectEveryN) || 1);
+
+    if (!settings.enabled) return;
+
+    if (settings.autoDetectNpcs !== false) {
+        if (_turnCounter % contactsN === 0) injectContactsPrompt();
+        else if (contactsN > 1) clearContactsPrompt();
+    }
+    if (_turnCounter % questsN === 0) injectQuestPrompt();
+    else if (questsN > 1) clearQuestPrompt();
+}
+
 function hideQuestTagsInDom(mesId) {
     const el = document.querySelector(`.mes[mesid="${mesId}"] .mes_text`);
     if (!el) return;
@@ -1627,6 +1651,33 @@ function storeKey(contactName) {
     return `cx-msgs-${chatId}-${contactName}`;
 }
 
+/* ------------------------------------------------------------------
+   Phase 2 caches — keyed by current chat id, invalidated on any write.
+   historyContactNames() used to scan every localStorage key, and sort
+   helpers re-parsed every message thread for a single timestamp each
+   time the phone rebuilt. These caches make both O(1) amortized.
+   ------------------------------------------------------------------ */
+let _historyContactNamesCache = { chatId: null, names: null };
+const _lastMsgTsCache = new Map(); // key: `${chatId}::${contactName}` -> ts
+
+function invalidateContactCaches(contactName = null) {
+    _historyContactNamesCache = { chatId: null, names: null };
+    if (contactName == null) _lastMsgTsCache.clear();
+    else {
+        const prefix = `${currentChatId()}::`;
+        _lastMsgTsCache.delete(prefix + contactName);
+    }
+}
+
+function lastMessageTs(contactName) {
+    const key = `${currentChatId()}::${contactName}`;
+    if (_lastMsgTsCache.has(key)) return _lastMsgTsCache.get(key);
+    const msgs = loadMessages(contactName);
+    const ts = msgs.length ? (msgs[msgs.length - 1].ts || 0) : 0;
+    _lastMsgTsCache.set(key, ts);
+    return ts;
+}
+
 function loadMessages(contactName) {
     try { return JSON.parse(localStorage.getItem(storeKey(contactName)) || '[]'); }
     catch { return []; }
@@ -1635,6 +1686,7 @@ function loadMessages(contactName) {
 function saveMessages(contactName, msgs) {
     try { localStorage.setItem(storeKey(contactName), JSON.stringify(msgs.slice(-200))); }
     catch (e) { console.warn('[command-x] store save', e); }
+    invalidateContactCaches(contactName);
 }
 
 function pushMessage(contactName, type, text, mesId) {
@@ -1644,7 +1696,11 @@ function pushMessage(contactName, type, text, mesId) {
 }
 
 function historyContactNames() {
-    const prefix = `cx-msgs-${currentChatId()}-`;
+    const chatId = currentChatId();
+    if (_historyContactNamesCache.chatId === chatId && _historyContactNamesCache.names) {
+        return _historyContactNamesCache.names.slice();
+    }
+    const prefix = `cx-msgs-${chatId}-`;
     const names = new Set();
     for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i);
@@ -1652,7 +1708,9 @@ function historyContactNames() {
         const name = key.slice(prefix.length).trim();
         if (name) names.add(name);
     }
-    return [...names];
+    const result = [...names];
+    _historyContactNamesCache = { chatId, names: result };
+    return result.slice();
 }
 
 function getKnownContactsForPrivateMessaging() {
@@ -1686,10 +1744,8 @@ function getKnownContactsForPrivateMessaging() {
         });
     }
     return [...byName.values()].sort((a, b) => {
-        const aMsgs = loadMessages(a.name);
-        const bMsgs = loadMessages(b.name);
-        const aTs = aMsgs.length ? (aMsgs[aMsgs.length - 1].ts || 0) : 0;
-        const bTs = bMsgs.length ? (bMsgs[bMsgs.length - 1].ts || 0) : 0;
+        const aTs = lastMessageTs(a.name);
+        const bTs = lastMessageTs(b.name);
         if (aTs && !bTs) return -1;
         if (!aTs && bTs) return 1;
         return bTs - aTs;
@@ -2006,10 +2062,8 @@ function getContactsFromContext() {
 
     const contacts = [...deduped.values()];
     contacts.sort((a, b) => {
-        const aMsgs = loadMessages(a.name);
-        const bMsgs = loadMessages(b.name);
-        const aTs = aMsgs.length ? (aMsgs[aMsgs.length - 1].ts || 0) : 0;
-        const bTs = bMsgs.length ? (bMsgs[bMsgs.length - 1].ts || 0) : 0;
+        const aTs = lastMessageTs(a.name);
+        const bTs = lastMessageTs(b.name);
         if (aTs && !bTs) return -1;
         if (!aTs && bTs) return 1;
         return bTs - aTs;
@@ -2206,6 +2260,11 @@ function safeDataUrlFromFile(file, maxWidth = 256, quality = 0.82) {
             reject(new Error('Please choose an image file.'));
             return;
         }
+        if (Number.isFinite(file.size) && file.size > MAX_AVATAR_FILE_BYTES) {
+            const mb = (MAX_AVATAR_FILE_BYTES / (1024 * 1024)).toFixed(0);
+            reject(new Error(`Image is too large (over ${mb} MB). Please choose a smaller file.`));
+            return;
+        }
         const reader = new FileReader();
         reader.onerror = () => reject(new Error('Could not read image file.'));
         reader.onload = () => {
@@ -2274,6 +2333,7 @@ function renameContactThread(oldName, newName) {
     if (oldMsgs.length) {
         saveMessages(newName, oldMsgs);
         try { localStorage.removeItem(storeKey(oldName)); } catch { /* ignore */ }
+        invalidateContactCaches();
     }
     const unread = getUnread(oldName);
     if (unread) {
@@ -2292,6 +2352,7 @@ function deleteStoredContact(name) {
     saveNpcs(stored);
     try { localStorage.removeItem(storeKey(name)); } catch { /* ignore */ }
     try { localStorage.removeItem(unreadKey(name)); } catch { /* ignore */ }
+    invalidateContactCaches();
     composeQueue = composeQueue.filter(item => item.contactName !== name);
     if (currentContactName === name) currentContactName = null;
     return true;
@@ -3463,6 +3524,10 @@ function loadSettings() {
     if (!["observe", "assist", "operate"].includes(settings.openclawMode)) settings.openclawMode = 'assist';
     const openclawMode = document.getElementById('cx_ext_openclaw_mode');
     if (openclawMode) openclawMode.value = settings.openclawMode || 'assist';
+    const contactsN = document.getElementById('cx_ext_contacts_every_n');
+    if (contactsN) contactsN.value = Math.max(1, Number(settings.contactsInjectEveryN) || 1);
+    const questsN = document.getElementById('cx_ext_quests_every_n');
+    if (questsN) questsN.value = Math.max(1, Number(settings.questsInjectEveryN) || 1);
 }
 
 function saveSettings() {
@@ -3473,6 +3538,10 @@ function saveSettings() {
     settings.autoDetectNpcs = document.getElementById('cx_ext_auto_detect_npcs')?.checked ?? settings.autoDetectNpcs ?? true;
     settings.manualHybridPrivateTexts = document.getElementById('cx_set_private_hybrid')?.checked ?? document.getElementById('cx-set-private-hybrid')?.checked ?? settings.manualHybridPrivateTexts ?? true;
     settings.openclawMode = document.getElementById('cx_ext_openclaw_mode')?.value || settings.openclawMode || 'assist';
+    const contactsNRaw = Number(document.getElementById('cx_ext_contacts_every_n')?.value);
+    settings.contactsInjectEveryN = Number.isFinite(contactsNRaw) && contactsNRaw >= 1 ? Math.floor(contactsNRaw) : (settings.contactsInjectEveryN || 1);
+    const questsNRaw = Number(document.getElementById('cx_ext_quests_every_n')?.value);
+    settings.questsInjectEveryN = Number.isFinite(questsNRaw) && questsNRaw >= 1 ? Math.floor(questsNRaw) : (settings.questsInjectEveryN || 1);
     const ctx = getContext();
     ctx.extensionSettings[EXT] = { ...settings };
     ctx.saveSettingsDebounced();
@@ -3493,7 +3562,7 @@ jQuery(async () => {
 
         loadSettings();
         refreshPrivatePhonePrompt();
-        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_openclaw_mode').on('change', () => {
+        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_openclaw_mode, #cx_ext_contacts_every_n, #cx_ext_quests_every_n').on('change', () => {
             saveSettings();
             if (settings.enabled) {
                 createPanel();
@@ -3648,6 +3717,9 @@ jQuery(async () => {
             if (shouldRebuild && phoneContainer && !document.getElementById('cx-panel-wrapper')?.classList.contains('cx-hidden')) {
                 rebuildPhone();
             }
+
+            // Throttle [status] / [quests] re-injection to every N turns (Phase 2).
+            applyInjectionThrottle();
         });
 
         // ── Swipe/regeneration handling: remove stale phone messages ──
@@ -3684,6 +3756,8 @@ jQuery(async () => {
             currentApp = null;
             awaitingReply = false;
             commandMode = null;
+            _turnCounter = 0;
+            invalidateContactCaches();
             clearSmsPrompt();
             clearTypingIndicator();
             // Re-inject contacts prompt for new chat
