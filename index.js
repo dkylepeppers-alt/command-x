@@ -1,5 +1,5 @@
 /**
- * Command-X Phone — SillyTavern Extension v0.10.0
+ * Command-X Phone — SillyTavern Extension v0.11.0
  *
  * Approach: inject a system prompt that tells the LLM to wrap the
  * character's text/neural reply in [sms]…[/sms] tags. The extension
@@ -17,7 +17,7 @@ import {
     extension_prompt_roles,
 } from '../../../../script.js';
 
-const VERSION = '0.10.0';
+const VERSION = '0.11.0';
 const EXT = 'command-x';
 const INJECT_KEY = 'command-x-sms';
 const INJECT_KEY_CONTACTS = 'command-x-contacts';
@@ -55,6 +55,7 @@ let neuralMode = false; // toggled via ⚡ button in chat header
 let profileEditorState = null;
 let questEditorState = null;
 let privatePollInFlight = false;
+let scanContactsInFlight = false;
 let questEnrichmentInFlight = false;
 
 
@@ -2325,6 +2326,54 @@ async function pollPrivateMessages() {
     }
 }
 
+/**
+ * Manual scan — ask the LLM (out-of-band via generateQuietPrompt) to return a
+ * [status] block describing the NPCs/characters currently relevant to the
+ * scene. Merges the result into the stored NPC list and refreshes the phone.
+ * Invoked by the "Scan Contacts" button on the Profiles app.
+ */
+async function scanContactsNow() {
+    if (scanContactsInFlight) return;
+    const ctx = getContext();
+    if (typeof ctx.generateQuietPrompt !== 'function') {
+        await cxAlert('This SillyTavern build does not expose generateQuietPrompt() for manual contact scans.');
+        return;
+    }
+
+    scanContactsInFlight = true;
+    const SCAN_BTN_LABEL = '🔍 Scan Contacts';
+    const button = phoneContainer?.querySelector('#cx-scan-contacts');
+    if (button) { button.disabled = true; button.textContent = 'Scanning…'; }
+
+    try {
+        const userName = ctx.name1 || '';
+        const excludeNote = [userName].filter(Boolean).map(n => `"${n}"`).join(' or ');
+        const quietPrompt =
+            `Scan the current scene and return ONLY a [status] block describing every character relevant right now — the main character plus any side characters or NPCs present or recently involved. ` +
+            `Format exactly: [status][{"name":"Name","emoji":"👩","status":"online","mood":"😊 happy","location":"her apartment","relationship":"friendly","thoughts":"short first-person inner monologue"}][/status] — ` +
+            `"status" is "online"/"offline"/"nearby", "mood" is an emoji + short descriptor, "location" is where they currently are, "relationship" is how they feel about the user, and "thoughts" is a short private first-person thought in the character's own voice. ` +
+            `Do NOT include ${excludeNote || 'the user'}. Do NOT include any prose, explanation, or other tags — output the [status] block only.`;
+
+        const raw = await ctx.generateQuietPrompt({ quietPrompt });
+        const parsed = extractContacts(raw);
+        if (!parsed || !parsed.length) {
+            showToast('Command-X', 'Scan complete — no contacts detected.');
+            return;
+        }
+        mergeNpcs(parsed);
+        rebuildPhone();
+        showToast('Command-X', `Scan complete — ${parsed.length} contact${parsed.length === 1 ? '' : 's'} updated.`);
+    } catch (error) {
+        console.error(`[${EXT}] Manual contact scan failed`, error);
+        await cxAlert(`Contact scan failed: ${error?.message || error}`);
+    } finally {
+        scanContactsInFlight = false;
+        // Re-query because rebuildPhone() may have replaced the button DOM node.
+        const refreshedBtn = phoneContainer?.querySelector('#cx-scan-contacts');
+        if (refreshedBtn) { refreshedBtn.disabled = false; refreshedBtn.textContent = SCAN_BTN_LABEL; }
+    }
+}
+
 function normalizeContactName(name) {
     return String(name || '')
         .trim()
@@ -2818,6 +2867,7 @@ function buildPhone() {
                 <div class="cx-profiles-title">Profiles</div>
                 <div class="cx-profiles-sub">Contact Intelligence</div>
                 <div class="cx-profiles-actions">
+                    <button class="cx-settings-btn" id="cx-scan-contacts" title="Ask the LLM to report all characters currently in the scene">🔍 Scan Contacts</button>
                     <button class="cx-settings-btn" id="cx-add-contact">+ Add Contact</button>
                 </div>
             </div>
@@ -3234,6 +3284,7 @@ function wirePhone() {
         saveSettings();
     });
     phoneContainer.querySelector('#cx-add-contact')?.addEventListener('click', () => { openProfileEditor(); });
+    phoneContainer.querySelector('#cx-scan-contacts')?.addEventListener('click', () => { scanContactsNow().catch(error => console.error(`[${EXT}] Manual contact scan click failed`, error)); });
     phoneContainer.querySelector('#cx-set-add-contact')?.addEventListener('click', () => { openProfileEditor(); });
     phoneContainer.querySelector('#cx-add-quest')?.addEventListener('click', () => { openQuestEditor(); });
     phoneContainer.querySelector('#cx-check-private')?.addEventListener('click', () => { pollPrivateMessages().catch(error => console.error(`[${EXT}] Private poll click failed`, error)); });
