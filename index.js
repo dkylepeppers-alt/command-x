@@ -1882,7 +1882,7 @@ function showToast(contactName, text) {
     toast.className = 'cx-toast cx-toast-show';
     toast.setAttribute('role', 'status');
     toast.setAttribute('aria-live', 'polite');
-    toast.setAttribute('aria-label', `New message from ${contactName}`);
+    toast.setAttribute('aria-label', `New message from ${escAttr(contactName)}`);
     toast.innerHTML = `<div class="cx-toast-icon">📱</div><div class="cx-toast-body"><div class="cx-toast-name">${escHtml(contactName)}</div><div class="cx-toast-text">${escHtml(preview)}</div></div>`;
     toast.addEventListener('click', () => {
         toast.remove();
@@ -1928,6 +1928,7 @@ function showToast(contactName, text) {
 /**
  * Styled in-phone alert (replaces native alert()).
  * Returns a Promise that resolves when the user clicks OK.
+ * Esc also closes the dialog. Enter is handled natively by the focused OK button.
  */
 function cxAlert(message, title = 'Command-X') {
     return new Promise((resolve) => {
@@ -1942,7 +1943,7 @@ function cxAlert(message, title = 'Command-X') {
             </div>
         </div>`;
         const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); resolve(); };
-        const onKey = (e) => { if (e.key === 'Escape' || e.key === 'Enter') close(); };
+        const onKey = (e) => { if (e.key === 'Escape') close(); };
         overlay.querySelector('#cx-modal-ok').addEventListener('click', close);
         document.addEventListener('keydown', onKey);
         document.body.appendChild(overlay);
@@ -1953,6 +1954,7 @@ function cxAlert(message, title = 'Command-X') {
 /**
  * Styled in-phone confirm dialog (replaces native confirm()).
  * Returns a Promise<boolean> — true if user confirms, false if cancelled.
+ * Esc cancels. Enter is handled natively by the focused button (confirm by default).
  */
 function cxConfirm(message, title = 'Are you sure?', { confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = false } = {}) {
     return new Promise((resolve) => {
@@ -1968,7 +1970,7 @@ function cxConfirm(message, title = 'Are you sure?', { confirmLabel = 'Confirm',
             </div>
         </div>`;
         const close = (result) => { overlay.remove(); document.removeEventListener('keydown', onKey); resolve(result); };
-        const onKey = (e) => { if (e.key === 'Escape') close(false); else if (e.key === 'Enter') close(true); };
+        const onKey = (e) => { if (e.key === 'Escape') close(false); };
         overlay.querySelector('#cx-modal-cancel').addEventListener('click', () => close(false));
         overlay.querySelector('#cx-modal-confirm').addEventListener('click', () => close(true));
         document.addEventListener('keydown', onKey);
@@ -3492,13 +3494,13 @@ saveQuestEditor().catch(error => cxAlert(String(error?.message || error), 'Quest
     }, true);
 
     // Keyboard activation for role="button" elements — Enter / Space → click.
+    // Space default (page scroll) is suppressed for role="button" elements.
     phoneContainer.addEventListener('keydown', (e) => {
         if (e.key !== 'Enter' && e.key !== ' ') return;
         const el = e.target;
-        if (el.getAttribute('role') === 'button' && !el.disabled) {
-            e.preventDefault();
-            el.click();
-        }
+        if (el.getAttribute('role') !== 'button') return;
+        e.preventDefault(); // always suppress Space-scroll / Enter-submit for role="button"
+        if (!el.disabled) el.click();
     });
 
     if (clockIntervalId) { clearInterval(clockIntervalId); clockIntervalId = null; }

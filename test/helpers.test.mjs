@@ -170,7 +170,10 @@ describe('slugifyQuestTitle', () => {
 
 describe('normalizeQuestKey', () => {
     it('lowercases and trims', () => assert.equal(normalizeQuestKey('  My Quest  '), 'my quest'));
-    it('collapses whitespace', () => assert.equal(normalizeQuestKey('a  b'), 'a b'));
+    it('collapses inner whitespace', () => assert.equal(normalizeQuestKey('a  b'), 'a b'));
+    it('handles empty string', () => assert.equal(normalizeQuestKey(''), ''));
+    it('handles null', () => assert.equal(normalizeQuestKey(null), ''));
+    it('does not strip punctuation (unlike slugify)', () => assert.equal(normalizeQuestKey('Quest: Part 1!'), 'quest: part 1!'));
 });
 
 describe('sanitizeContactValue', () => {
