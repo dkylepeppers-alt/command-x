@@ -675,25 +675,68 @@ function saveNpcs(npcs) {
 }
 
 /* ── Global avatar store (persists across chats, keyed by normalized name) ── */
-function loadGlobalAvatars() {
-    try { return JSON.parse(localStorage.getItem('cx-global-avatars') || '{}'); }
-    catch { return {}; }
+const GLOBAL_AVATAR_STORE_KEY = 'cx-global-avatars';
+const GLOBAL_AVATAR_MAX_ENTRIES = 50;
+const GLOBAL_AVATAR_MAX_DATA_URL_SIZE = 100 * 1024; // 100 KB
+
+let _globalAvatarCache = null; // in-memory cache; null = not yet loaded
+
+function _isAvatarUrlOversized(url) {
+    return typeof url === 'string' && url.startsWith('data:') && url.length > GLOBAL_AVATAR_MAX_DATA_URL_SIZE;
 }
-function saveGlobalAvatars(map) {
-    try { localStorage.setItem('cx-global-avatars', JSON.stringify(map)); }
+
+function loadGlobalAvatars() {
+    if (_globalAvatarCache) return _globalAvatarCache;
+    try {
+        const raw = JSON.parse(localStorage.getItem(GLOBAL_AVATAR_STORE_KEY) || '{}');
+        const entries = {};
+        for (const [key, value] of Object.entries(raw)) {
+            if (!key) continue;
+            // Support both old flat {key: url} format and new {key: {url, lastUsed}} format
+            if (typeof value === 'string') {
+                if (!_isAvatarUrlOversized(value)) entries[key] = { url: value, lastUsed: 0 };
+            } else if (value && typeof value.url === 'string' && !_isAvatarUrlOversized(value.url)) {
+                entries[key] = { url: value.url, lastUsed: Number.isFinite(value.lastUsed) ? value.lastUsed : 0 };
+            }
+        }
+        _globalAvatarCache = entries;
+    } catch {
+        _globalAvatarCache = {};
+    }
+    return _globalAvatarCache;
+}
+
+function saveGlobalAvatars(entries) {
+    // Trim to max entries by LRU (most recently used kept)
+    let sorted = Object.entries(entries).sort((a, b) => (b[1]?.lastUsed || 0) - (a[1]?.lastUsed || 0));
+    if (sorted.length > GLOBAL_AVATAR_MAX_ENTRIES) sorted = sorted.slice(0, GLOBAL_AVATAR_MAX_ENTRIES);
+    const trimmed = Object.fromEntries(sorted);
+    _globalAvatarCache = trimmed;
+    try { localStorage.setItem(GLOBAL_AVATAR_STORE_KEY, JSON.stringify(trimmed)); }
     catch (e) { console.warn('[command-x] global avatar save', e); }
 }
+
 function getGlobalAvatar(name) {
     if (!name) return null;
-    return loadGlobalAvatars()[normalizeContactName(name)] || null;
+    const entries = loadGlobalAvatars();
+    const key = normalizeContactName(name);
+    const entry = entries[key];
+    if (!entry?.url) return null;
+    // Update lastUsed in-memory only (no write-back on read to avoid churn)
+    entry.lastUsed = Date.now();
+    return entry.url;
 }
+
 function setGlobalAvatar(name, url) {
     if (!name) return;
-    const map = loadGlobalAvatars();
+    const entries = loadGlobalAvatars();
     const key = normalizeContactName(name);
-    if (url) map[key] = url;
-    else delete map[key];
-    saveGlobalAvatars(map);
+    if (url && !_isAvatarUrlOversized(url)) {
+        entries[key] = { url, lastUsed: Date.now() };
+    } else {
+        delete entries[key];
+    }
+    saveGlobalAvatars(entries);
 }
 
 function sanitizeContactValue(field, value) {
@@ -777,6 +820,7 @@ function mergeStoredContactRecord(existing = {}, incoming = {}, options = {}) {
 function mergeNpcs(incoming) {
     if (!incoming || !incoming.length) return;
     const stored = loadNpcs();
+    const avatarUpdates = {};
     for (const npc of incoming) {
         const idx = findStoredNpcIndexByName(npc.name, stored);
         if (idx >= 0) {
@@ -784,9 +828,18 @@ function mergeNpcs(incoming) {
         } else {
             stored.push({ ...npc, manualOverrides: { ...(npc.manualOverrides || {}) } });
         }
-        if (npc.avatarUrl) setGlobalAvatar(npc.name, npc.avatarUrl);
+        if (npc.avatarUrl) avatarUpdates[normalizeContactName(npc.name)] = npc.avatarUrl;
     }
     saveNpcs(stored);
+    // Batch: apply all avatar updates in a single load+save
+    if (Object.keys(avatarUpdates).length) {
+        const entries = loadGlobalAvatars();
+        const now = Date.now();
+        for (const [key, url] of Object.entries(avatarUpdates)) {
+            if (!_isAvatarUrlOversized(url)) entries[key] = { url, lastUsed: now };
+        }
+        saveGlobalAvatars(entries);
+    }
 }
 
 /** Hide [contacts] tags in rendered ST chat DOM */
@@ -1229,8 +1282,8 @@ function renderQuestSubtasks(quest) {
             <span>Checklist · ${doneCount}/${subtasks.length}</span>
             <div class="cx-quest-subtasks">
                 ${subtasks.map(item => `
-                    <button type="button" class="cx-quest-subtask ${item.done ? 'done' : ''}" data-cx-quest-subtask="${escAttr(quest.id)}" data-cx-subtask-id="${escAttr(item.id)}" aria-checked="${item.done ? 'true' : 'false'}">
-                        <span class="cx-quest-checkbox${item.done ? ' done' : ''}" role="checkbox" aria-hidden="true"></span>
+                    <button type="button" class="cx-quest-subtask ${item.done ? 'done' : ''}" data-cx-quest-subtask="${escAttr(quest.id)}" data-cx-subtask-id="${escAttr(item.id)}">
+                        <span class="cx-quest-checkbox${item.done ? ' done' : ''}"></span>
                         <strong>${escHtml(item.text)}</strong>
                     </button>
                 `).join('')}
@@ -2315,8 +2368,10 @@ async function pollPrivateMessages(options = {}) {
     privatePollInFlight = true;
     const button = phoneContainer?.querySelector('#cx-check-private');
     const status = phoneContainer?.querySelector('#cx-private-status');
-    if (button) button.disabled = true;
-    if (status) status.textContent = 'Checking private messages…';
+    if (!silent) {
+        if (button) button.disabled = true;
+        if (status) status.textContent = 'Checking private messages…';
+    }
 
     try {
         const raw = await ctx.generateQuietPrompt({
@@ -2337,21 +2392,21 @@ async function pollPrivateMessages(options = {}) {
                 && phoneContainer
                 && !document.getElementById('cx-panel-wrapper')?.classList.contains('cx-hidden');
             if (!isViewingThis) incrementUnread(event.from);
-            showToast(event.from, event.text);
+            if (!silent) showToast(event.from, event.text);
         }
 
         const area = phoneContainer?.querySelector('#cx-msg-area');
         if (area && currentContactName) renderAllBubbles(area, currentContactName, false);
         updateUnreadBadges();
 
-        if (status) status.textContent = events.length
+        if (status && !silent) status.textContent = events.length
             ? `Found ${events.length} private message${events.length === 1 ? '' : 's'}.`
             : 'No new private messages.';
     } catch (error) {
         console.error(`[${EXT}] Private message poll failed`, error);
-        if (status) status.textContent = `Private check failed: ${error?.message || error}`;
+        if (status && !silent) status.textContent = `Private check failed: ${error?.message || error}`;
     } finally {
-        if (button) button.disabled = false;
+        if (!silent && button) button.disabled = false;
         privatePollInFlight = false;
     }
 }
