@@ -33,6 +33,7 @@ const QUEST_PRIORITY_ORDER = { critical: 0, high: 1, normal: 2, low: 3 };
 const QUEST_URGENCY_ORDER = { urgent: 0, soon: 1, none: 2 };
 let settings = { ...DEFAULTS };
 let phoneContainer = null;
+let clockIntervalId = null;
 let commandMode = null; // null | 'COMMAND' | 'FORGET' | 'BELIEVE' | 'COMPEL'
 let neuralMode = false; // toggled via ⚡ button in chat header
 let profileEditorState = null;
@@ -48,7 +49,9 @@ function getOpenClawChatState() {
     ctx.chatMetadata[EXT] = ctx.chatMetadata[EXT] || {};
     ctx.chatMetadata[EXT].openclaw = ctx.chatMetadata[EXT].openclaw || {};
     const state = ctx.chatMetadata[EXT].openclaw;
-    if (!Number.isFinite(Number(state.resetNonce))) state.resetNonce = 0;
+    let mutated = false;
+    if (!Number.isFinite(Number(state.resetNonce))) { state.resetNonce = 0; mutated = true; }
+    if (mutated && typeof ctx.saveMetadata === 'function') ctx.saveMetadata();
     return state;
 }
 
@@ -71,9 +74,11 @@ function getExtensionChatState() {
     ctx.chatMetadata[EXT] = ctx.chatMetadata[EXT] || {};
     ctx.chatMetadata[EXT].privatePhone = ctx.chatMetadata[EXT].privatePhone || {};
     const state = ctx.chatMetadata[EXT].privatePhone;
-    if (!Array.isArray(state.events)) state.events = [];
-    if (!Number.isFinite(Number(state.lastPollAt))) state.lastPollAt = 0;
-    if (!Array.isArray(state.lastPollSummary)) state.lastPollSummary = [];
+    let mutated = false;
+    if (!Array.isArray(state.events)) { state.events = []; mutated = true; }
+    if (!Number.isFinite(Number(state.lastPollAt))) { state.lastPollAt = 0; mutated = true; }
+    if (!Array.isArray(state.lastPollSummary)) { state.lastPollSummary = []; mutated = true; }
+    if (mutated && typeof ctx.saveMetadata === 'function') ctx.saveMetadata();
     return state;
 }
 
@@ -1357,8 +1362,8 @@ async function enrichQuestDraftIfNeeded(draft) {
     let raw = null;
     try {
         raw = await ctx.generateQuietPrompt({
-            prompt: buildQuestEnrichmentPrompt(draft),
-            schema: questEnrichmentSchema(),
+            quietPrompt: buildQuestEnrichmentPrompt(draft),
+            jsonSchema: questEnrichmentSchema(),
         });
         const parsed = parseQuestEnrichmentResponse(raw);
         const enriched = { ...draft };
@@ -1816,7 +1821,7 @@ function showToast(contactName, text) {
     const toast = document.createElement('div');
     toast.id = 'cx-toast';
     toast.className = 'cx-toast cx-toast-show';
-    toast.innerHTML = `<div class="cx-toast-icon">📱</div><div class="cx-toast-body"><div class="cx-toast-name">${contactName}</div><div class="cx-toast-text">${escHtml(preview)}</div></div>`;
+    toast.innerHTML = `<div class="cx-toast-icon">📱</div><div class="cx-toast-body"><div class="cx-toast-name">${escHtml(contactName)}</div><div class="cx-toast-text">${escHtml(preview)}</div></div>`;
     toast.addEventListener('click', () => {
         toast.remove();
         // Open phone to this contact's chat
@@ -2014,8 +2019,8 @@ function getContactsFromContext() {
 
 const now = () => new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 const today = () => new Date().toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
-function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>'); }
-function escAttr(s) { return String(s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escHtml(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>'); }
+function escAttr(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
 
 function buildOutOfBandPollPrompt() {
@@ -2460,6 +2465,13 @@ function sendImmediate(contactName, chatText, isNeural, cmdType) {
     // assistant message regardless of whether an SMS reply is expected. SMS-specific
     // UI (typing indicator, auto-route) is gated separately by the caller.
     awaitingReply = true;
+    // Parity with flushQueue: ensure awaitingReply gets cleared even if the LLM never
+    // responds with a parseable [sms] block.
+    if (typingTimeout) { clearTimeout(typingTimeout); typingTimeout = null; }
+    typingTimeout = setTimeout(() => {
+        clearTypingIndicator();
+        if (awaitingReply) awaitingReply = false;
+    }, 30000);
     sendToChat(chatText, contactName, !!cmdType || isNeural);
 }
 
@@ -2468,10 +2480,12 @@ function sendImmediate(contactName, chatText, isNeural, cmdType) {
    ====================================================================== */
 
 function avatarHTML(c, sizeClass = '') {
+    const gradient = escAttr(c.gradient || '');
+    const emoji = escHtml(c.emoji || '');
     if (c.avatarUrl) {
-        return `<div class="cx-avatar ${sizeClass}" style="background:${c.gradient}"><img class="cx-avatar-img" src="${c.avatarUrl}" alt="" onerror="this.style.display='none';this.nextSibling.style.display=''"><span style="display:none">${c.emoji}</span></div>`;
+        return `<div class="cx-avatar ${sizeClass}" style="background:${gradient}"><img class="cx-avatar-img" data-cx-avatar-fallback="1" src="${escAttr(c.avatarUrl)}" alt=""><span class="cx-avatar-emoji-fallback" style="display:none">${emoji}</span></div>`;
     }
-    return `<div class="cx-avatar ${sizeClass}" style="background:${c.gradient}">${c.emoji}</div>`;
+    return `<div class="cx-avatar ${sizeClass}" style="background:${gradient}">${emoji}</div>`;
 }
 
 function profileEditorModalHTML() {
@@ -2480,7 +2494,7 @@ function profileEditorModalHTML() {
     const title = profileEditorState.mode === 'new' ? 'Add Contact' : 'Edit Profile';
     const saveLabel = profileEditorState.mode === 'new' ? 'Add Contact' : 'Save Changes';
     const avatarPreview = draft.avatarUrl
-        ? `<div class="cx-profile-editor-avatar-preview"><img src="${draft.avatarUrl}" alt="Avatar preview" /></div>`
+        ? `<div class="cx-profile-editor-avatar-preview"><img src="${escAttr(draft.avatarUrl)}" alt="Avatar preview" /></div>`
         : `<div class="cx-profile-editor-avatar-fallback">${escHtml(draft.emoji || '🧑')}</div>`;
     return `
     <div class="cx-profile-editor-backdrop" id="cx-profile-editor-backdrop">
@@ -2555,10 +2569,10 @@ function contactRowHTML(c, i, app) {
     const npcBadge = c.isNpc ? '<span class="cx-npc-badge">NPC</span>' : '';
 
     return `
-    <div class="cx-contact-row" data-idx="${i}" data-app="${app}" data-cid="${c.id}" data-cname="${c.name}">
+    <div class="cx-contact-row" data-idx="${i}" data-app="${app}" data-cid="${escAttr(c.id)}" data-cname="${escAttr(c.name)}">
         ${avatarHTML(c)}
         <div class="cx-contact-info">
-            <div class="cx-contact-name">${c.name} ${npcBadge}</div>
+            <div class="cx-contact-name">${escHtml(c.name)} ${npcBadge}</div>
             <div class="cx-contact-preview">${escHtml(previewTrunc)}</div>
         </div>
         <div class="cx-status-col">
@@ -2657,18 +2671,18 @@ function buildPhone() {
             </div>
             <div class="cx-profiles-list">
                 ${hasContacts ? contacts.map(c => `
-                <div class="cx-profile-card" data-pname="${c.name}">
+                <div class="cx-profile-card" data-pname="${escAttr(c.name)}">
                     <div class="cx-profile-top">
                         ${avatarHTML(c, 'cx-avatar-lg')}
                         <div class="cx-profile-name-col">
-                            <div class="cx-profile-name">${c.name} ${c.isNpc ? '<span class="cx-npc-badge">NPC</span>' : ''}</div>
-                            <div class="cx-profile-status">${c.mood || (c.online ? '🟢 Online' : '⚫ Offline')}</div>
+                            <div class="cx-profile-name">${escHtml(c.name)} ${c.isNpc ? '<span class="cx-npc-badge">NPC</span>' : ''}</div>
+                            <div class="cx-profile-status">${escHtml(c.mood || (c.online ? '🟢 Online' : '⚫ Offline'))}</div>
                         </div>
                     </div>
                     <div class="cx-profile-actions">
-                        <button class="cx-profile-action-btn" data-cx-edit="${c.name}">Edit</button>
-                        <button class="cx-profile-action-btn" data-cx-avatar="${c.name}">Avatar</button>
-                        ${c.isNpc ? `<button class="cx-profile-action-btn cx-profile-action-danger" data-cx-delete="${c.name}">Delete</button>` : ``}
+                        <button class="cx-profile-action-btn" data-cx-edit="${escAttr(c.name)}">Edit</button>
+                        <button class="cx-profile-action-btn" data-cx-avatar="${escAttr(c.name)}">Avatar</button>
+                        ${c.isNpc ? `<button class="cx-profile-action-btn cx-profile-action-danger" data-cx-delete="${escAttr(c.name)}">Delete</button>` : ``}
                     </div>
                     <div class="cx-profile-fields">
                         ${c.location ? `<div class="cx-profile-field"><span class="cx-pf-label">📍 Location</span><span class="cx-pf-value">${escHtml(c.location)}</span></div>` : ''}
@@ -3318,7 +3332,18 @@ saveQuestEditor().catch(error => alert(String(error?.message || error)));
         const area = phoneContainer?.querySelector('#cx-msg-area');
         if (area && currentContactName) renderAllBubbles(area, currentContactName, false);
     });
-    setInterval(() => {
+    // Avatar <img> onerror — fall back to the emoji span (CSP-safe, replaces inline onerror).
+    phoneContainer.addEventListener('error', (e) => {
+        const img = e.target;
+        if (!(img instanceof HTMLImageElement)) return;
+        if (!img.hasAttribute('data-cx-avatar-fallback')) return;
+        img.style.display = 'none';
+        const fallback = img.parentElement?.querySelector('.cx-avatar-emoji-fallback');
+        if (fallback) fallback.style.display = '';
+    }, true);
+
+    if (clockIntervalId) { clearInterval(clockIntervalId); clockIntervalId = null; }
+    clockIntervalId = setInterval(() => {
         const t = now();
         phoneContainer?.querySelectorAll('#cx-clock, .cx-lock-time, .cx-home-time').forEach(el => { el.textContent = t; });
     }, 30000);
@@ -3393,6 +3418,7 @@ function rebuildPhone() {
 }
 
 function destroyPanel() {
+    if (clockIntervalId) { clearInterval(clockIntervalId); clockIntervalId = null; }
     document.getElementById('cx-panel-wrapper')?.remove();
     document.getElementById('cx-menu-button')?.remove();
     phoneContainer = null;
@@ -3488,15 +3514,20 @@ jQuery(async () => {
 
         // Style {{COMMAND}} tags + hide [sms] and [contacts] tags in rendered messages
         eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, (mesId) => {
+            if (!settings.enabled) return;
             styleCommandsInMessage(mesId);
             hideSmsTagsInDom(mesId);
             hideContactsTagsInDom(mesId);
             hideQuestTagsInDom(mesId);
         });
-        eventSource.on(event_types.USER_MESSAGE_RENDERED, styleCommandsInMessage);
+        eventSource.on(event_types.USER_MESSAGE_RENDERED, (mesId) => {
+            if (!settings.enabled) return;
+            styleCommandsInMessage(mesId);
+        });
 
         // ── Live reply capture: parse [sms] + [contacts] from character response ──
         eventSource.on(event_types.MESSAGE_RECEIVED, () => {
+            if (!settings.enabled) return;
             const freshCtx = getContext();
             const chat = freshCtx.chat || [];
             if (!chat.length) return;
@@ -3546,7 +3577,9 @@ jQuery(async () => {
                         } else if (currentContactName) {
                             targetContact = currentContactName;
                         } else {
-                            targetContact = allContacts.length ? allContacts[0].name : null;
+                            // No reliable target — drop rather than mis-route to the first contact.
+                            console.log(`[${EXT}] Skipping [sms] with no from/to and no current chat`);
+                            continue;
                         }
                     }
 
@@ -3619,6 +3652,7 @@ jQuery(async () => {
 
         // ── Swipe/regeneration handling: remove stale phone messages ──
         eventSource.on(event_types.MESSAGE_SWIPED, (mesId) => {
+            if (!settings.enabled) return;
             removeMessagesForMesId(mesId);
             removePrivatePhoneEventsForMesId(mesId);
             // Re-render current chat if open
@@ -3627,11 +3661,14 @@ jQuery(async () => {
                 renderAllBubbles(area, currentContactName, false);
             }
         });
-        eventSource.on(event_types.MESSAGE_DELETED, () => {
-            // On delete, the mesId is chat.length (post-delete), so the deleted
-            // message was at chat.length. Clean up and re-render.
+        eventSource.on(event_types.MESSAGE_DELETED, (deletedMesId) => {
+            if (!settings.enabled) return;
+            // Prefer the event's mesId argument (ST emits the deleted index); fall back
+            // to chat.length for older ST builds that don't pass it.
             const freshCtx = getContext();
-            const deletedId = (freshCtx.chat || []).length; // this was the deleted index
+            const deletedId = Number.isFinite(Number(deletedMesId))
+                ? Number(deletedMesId)
+                : (freshCtx.chat || []).length;
             removeMessagesForMesId(deletedId);
             removePrivatePhoneEventsForMesId(deletedId);
             const area = phoneContainer?.querySelector('#cx-msg-area');
@@ -3642,6 +3679,7 @@ jQuery(async () => {
 
         // Chat changed — reset state
         eventSource.on(event_types.CHAT_CHANGED, () => {
+            if (!settings.enabled) return;
             currentContactName = null;
             currentApp = null;
             awaitingReply = false;

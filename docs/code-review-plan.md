@@ -7,25 +7,25 @@ can be browsed and referenced from the source tree.
 
 ## Phase 1 — Correctness & security fixes (high priority)
 
-- [ ] Clear the 30s clock `setInterval` on `rebuildPhone()` / `destroyPanel()`
+- [x] Clear the 30s clock `setInterval` on `rebuildPhone()` / `destroyPanel()`
       to stop timer accumulation.
-- [ ] Escape all LLM-sourced strings (contact name, avatar URL, mood,
+- [x] Escape all LLM-sourced strings (contact name, avatar URL, mood,
       thoughts, toast text) that are interpolated into HTML templates.
-- [ ] Replace the inline `onerror=` handler on avatar `<img>` with a
+- [x] Replace the inline `onerror=` handler on avatar `<img>` with a
       delegated, CSP-safe listener.
-- [ ] Fix `enrichQuestDraftIfNeeded` to use `{ quietPrompt, jsonSchema }`
+- [x] Fix `enrichQuestDraftIfNeeded` to use `{ quietPrompt, jsonSchema }`
       (matches `pollPrivateMessages`).
-- [ ] Gate `eventSource` handlers (MESSAGE_RECEIVED /
+- [x] Gate `eventSource` handlers (MESSAGE_RECEIVED /
       CHARACTER_MESSAGE_RENDERED / USER_MESSAGE_RENDERED / MESSAGE_SWIPED /
       MESSAGE_DELETED / CHAT_CHANGED) on `settings.enabled`.
-- [ ] Fix `MESSAGE_DELETED` to use the event's `mesId` argument and handle
+- [x] Fix `MESSAGE_DELETED` to use the event's `mesId` argument and handle
       non-tail deletions correctly.
-- [ ] Make `escHtml` string-coerce its input and unify with `escapeHtml`.
-- [ ] Persist defaults written by `getExtensionChatState` /
+- [x] Make `escHtml` string-coerce its input and unify with `escapeHtml`.
+- [x] Persist defaults written by `getExtensionChatState` /
       `getOpenClawChatState` on first init (call `saveMetadata` once).
-- [ ] Arm a cleanup timeout for `awaitingReply` in `sendImmediate` (parity
+- [x] Arm a cleanup timeout for `awaitingReply` in `sendImmediate` (parity
       with `flushQueue`).
-- [ ] Tighten `[sms]` reply-capture fallback: drop the "first contact"
+- [x] Tighten `[sms]` reply-capture fallback: drop the "first contact"
       fallback and require `to="user"` or `awaitingReply`.
 
 ## Phase 2 — Performance & storage
