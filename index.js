@@ -512,9 +512,11 @@ function flushQueue() {
 
     // Inject prompt for all targets
     injectSmsPrompt(targets);
-    // Only await a reply if at least one target is a normal (non-neural) text
-    const expectingSmsReply = targets.some(t => !t.isNeural);
-    if (expectingSmsReply) awaitingReply = true;
+    // Always arm cleanup so the injected per-message prompt is cleared on the next
+    // assistant message. SMS-specific UI behavior (typing indicator) is gated below.
+    awaitingReply = true;
+    // A target expects an SMS reply only if it's neither neural nor a legacy command.
+    const expectingSmsReply = targets.some(t => !t.isNeural && !t.cmdType);
 
     for (const queued of composeQueue) {
         pushPrivatePhoneEvent({
@@ -540,7 +542,7 @@ function flushQueue() {
     }
 
     // Show typing indicator in current chat only if expecting a text reply
-    const currentInQueue = expectingSmsReply && composeQueue.some(q => q.contactName === currentContactName && !q.isNeural);
+    const currentInQueue = expectingSmsReply && composeQueue.some(q => q.contactName === currentContactName && !q.isNeural && !q.cmdType);
     if (currentInQueue) {
         clearTypingIndicator();
         const area = phoneContainer?.querySelector('#cx-msg-area');
@@ -1547,7 +1549,9 @@ function questEditorModalHTML() {
  * Build a single SMS prompt instruction for one target.
  */
 function buildSmsInstruction(contactName, isNeural, cmdType) {
-    if (isNeural && cmdType) {
+    // Any command (neural-mode or legacy {{COMMAND}} syntax) is treated as subliminal —
+    // character unaware, no SMS reply.
+    if (cmdType) {
         const cmdContext = {
             COMMAND: `${contactName} is completely unaware any command was sent. They simply feel an irresistible compulsion to comply, as if it were their own idea. They do NOT see, read, or acknowledge the command itself.`,
             FORGET: `${contactName} is completely unaware their memory is being altered. The specified memory or knowledge simply fades away as if it was never there. They do NOT see, read, or acknowledge any command.`,
@@ -1575,8 +1579,9 @@ function injectSmsPrompt(targets) {
     const names = targets.map(t => t.name);
     const multi = targets.length > 1;
 
-    // Determine which targets expect an SMS reply (non-neural texting only)
-    const smsTargets = targets.filter(t => !t.isNeural);
+    // Determine which targets expect an SMS reply (non-neural, non-command texting only).
+    // Commands (whether via neural mode or legacy {{COMMAND}} syntax) don't produce [sms] replies.
+    const smsTargets = targets.filter(t => !t.isNeural && !t.cmdType);
     const allNeural = smsTargets.length === 0;
 
     let instruction = `[System: ${parts.join(' ')}`;
@@ -2451,8 +2456,10 @@ async function sendToChat(text, contactName, isCommand) {
 /** Send immediately (instant mode) — single target */
 function sendImmediate(contactName, chatText, isNeural, cmdType) {
     injectSmsPrompt([{ name: contactName, isNeural, cmdType }]);
-    // Neural commands don't expect an SMS reply — character reacts narratively only
-    if (!isNeural) awaitingReply = true;
+    // Always arm cleanup so the injected per-message prompt is cleared on the next
+    // assistant message regardless of whether an SMS reply is expected. SMS-specific
+    // UI (typing indicator, auto-route) is gated separately by the caller.
+    awaitingReply = true;
     sendToChat(chatText, contactName, !!cmdType || isNeural);
 }
 
@@ -2980,28 +2987,29 @@ function sendPhoneMessage() {
         });
         sendImmediate(currentContactName, chatText, isNeural, cmdType);
 
-        // Typing indicator — only show when expecting an SMS reply (non-neural)
-        if (!isNeural) {
-        clearTypingIndicator();
-        const typing = document.createElement('div');
-        typing.id = 'cx-typing-indicator';
-        typing.className = 'cx-typing-row';
-        typing.innerHTML = `<div class="cx-typing-bubble"><span></span><span></span><span></span></div>`;
-        area.appendChild(typing);
-        area.scrollTop = area.scrollHeight;
-
-        typingTimeout = setTimeout(() => {
+        // Typing indicator — only show when expecting an SMS reply.
+        // Commands (neural or legacy {{COMMAND}}) don't produce an SMS reply.
+        if (!isNeural && !cmdType) {
             clearTypingIndicator();
-            if (awaitingReply) {
-                awaitingReply = false;
-                const hint = document.createElement('div');
-                hint.className = 'cx-chat-hint';
-                hint.textContent = 'No phone reply received';
-                hint.style.fontSize = '11px';
-                area.appendChild(hint);
-                area.scrollTop = area.scrollHeight;
-            }
-        }, 30000);
+            const typing = document.createElement('div');
+            typing.id = 'cx-typing-indicator';
+            typing.className = 'cx-typing-row';
+            typing.innerHTML = `<div class="cx-typing-bubble"><span></span><span></span><span></span></div>`;
+            area.appendChild(typing);
+            area.scrollTop = area.scrollHeight;
+
+            typingTimeout = setTimeout(() => {
+                clearTypingIndicator();
+                if (awaitingReply) {
+                    awaitingReply = false;
+                    const hint = document.createElement('div');
+                    hint.className = 'cx-chat-hint';
+                    hint.textContent = 'No phone reply received';
+                    hint.style.fontSize = '11px';
+                    area.appendChild(hint);
+                    area.scrollTop = area.scrollHeight;
+                }
+            }, 30000);
         }
     }
 }
