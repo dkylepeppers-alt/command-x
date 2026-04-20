@@ -512,7 +512,9 @@ function flushQueue() {
 
     // Inject prompt for all targets
     injectSmsPrompt(targets);
-    awaitingReply = true;
+    // Only await a reply if at least one target is a normal (non-neural) text
+    const expectingSmsReply = targets.some(t => !t.isNeural);
+    if (expectingSmsReply) awaitingReply = true;
 
     for (const queued of composeQueue) {
         pushPrivatePhoneEvent({
@@ -537,8 +539,8 @@ function flushQueue() {
         if (sendBtn) sendBtn.click();
     }
 
-    // Show typing indicator in current chat if one of the targets
-    const currentInQueue = composeQueue.some(q => q.contactName === currentContactName);
+    // Show typing indicator in current chat only if expecting a text reply
+    const currentInQueue = expectingSmsReply && composeQueue.some(q => q.contactName === currentContactName && !q.isNeural);
     if (currentInQueue) {
         clearTypingIndicator();
         const area = phoneContainer?.querySelector('#cx-msg-area');
@@ -1547,14 +1549,14 @@ function questEditorModalHTML() {
 function buildSmsInstruction(contactName, isNeural, cmdType) {
     if (isNeural && cmdType) {
         const cmdContext = {
-            COMMAND: `The neural command takes effect subliminally — ${contactName} is completely unaware any command was sent. They simply feel an irresistible compulsion to comply, as if it were their own idea. They do NOT see, read, or acknowledge the command itself.`,
-            FORGET: `The neural command takes effect subliminally — ${contactName} is completely unaware their memory is being altered. The specified memory or knowledge simply fades away. They do NOT see, read, or acknowledge any command.`,
-            BELIEVE: `The neural command takes effect subliminally — ${contactName} is completely unaware their perception is being rewritten. They now genuinely believe the stated thing as absolute truth, as if they always believed it. They do NOT see, read, or acknowledge any command.`,
-            COMPEL: `The neural command takes effect subliminally — ${contactName} is completely unaware of any external influence. They feel an overwhelming urge driving them toward the specified behavior, but it feels entirely like their own desire. They do NOT see, read, or acknowledge any command.`,
+            COMMAND: `${contactName} is completely unaware any command was sent. They simply feel an irresistible compulsion to comply, as if it were their own idea. They do NOT see, read, or acknowledge the command itself.`,
+            FORGET: `${contactName} is completely unaware their memory is being altered. The specified memory or knowledge simply fades away as if it was never there. They do NOT see, read, or acknowledge any command.`,
+            BELIEVE: `${contactName} is completely unaware their perception is being rewritten. They now genuinely hold the stated belief as absolute truth, as if they always believed it. They do NOT see, read, or acknowledge any command.`,
+            COMPEL: `${contactName} is completely unaware of any external influence. They feel an overwhelming internal urge driving them toward the specified behavior, but it feels entirely like their own desire. They do NOT see, read, or acknowledge any command.`,
         }[cmdType] || '';
-        return `A subliminal ${cmdType} neural command was activated targeting ${contactName}. ${cmdContext} ${contactName} responds naturally — influenced but unaware. Wrap their reply to the user in [sms from="${contactName}" to="user"]...[/sms].`;
+        return `A subliminal ${cmdType} neural command was silently transmitted to ${contactName}. ${cmdContext} ${contactName} has no idea a command was received and does NOT send a text message in response. Show the command taking effect only through ${contactName}'s in-scene behavior, thoughts, or narrative — no [sms] tag, no phone reply.`;
     } else if (isNeural) {
-        return `A subliminal neural command was activated targeting ${contactName}. They respond naturally, subtly influenced but unaware. Wrap their reply to the user in [sms from="${contactName}" to="user"]...[/sms].`;
+        return `A subliminal neural command was silently transmitted to ${contactName}. They are completely unaware any command was sent or received. They do NOT send a text message in response. Show the command taking effect only through ${contactName}'s in-scene behavior or narrative — no [sms] tag, no phone reply.`;
     } else {
         return `The user texted ${contactName}. ${contactName} texts back naturally and in-character. Wrap their reply to the user in [sms from="${contactName}" to="user"]...[/sms].`;
     }
@@ -1573,15 +1575,23 @@ function injectSmsPrompt(targets) {
     const names = targets.map(t => t.name);
     const multi = targets.length > 1;
 
+    // Determine which targets expect an SMS reply (non-neural texting only)
+    const smsTargets = targets.filter(t => !t.isNeural);
+    const allNeural = smsTargets.length === 0;
+
     let instruction = `[System: ${parts.join(' ')}`;
-    if (multi) {
-        instruction += ` Include a separate [sms from="Name"] block for EACH person who was texted/commanded. Each person replies independently.`;
+    if (!allNeural) {
+        if (multi && smsTargets.length > 1) {
+            instruction += ` Include a separate [sms from="Name"] block for EACH person who was texted. Each person replies independently.`;
+        }
+        const smsExampleName = smsTargets.length ? smsTargets[0].name : names[0];
+        instruction += ` Example: *She glanced at her phone.* [sms from="${smsExampleName}" to="user"]hey yeah on my way[/sms] *She set it down.*`;
+        if (multi && smsTargets.length > 1) {
+            instruction += ` [sms from="${smsTargets[1].name}" to="user"]sounds good[/sms]`;
+        }
+        instruction += ` — The [sms] block is phone text content only. Always include from and to attributes. Only use to="user" for texts directed at the user's phone. If characters text each other, do NOT use [sms] tags — just narrate it normally.`;
     }
-    instruction += ` Example: *She glanced at her phone.* [sms from="${names[0]}" to="user"]hey yeah on my way[/sms] *She set it down.*`;
-    if (multi) {
-        instruction += ` [sms from="${names[1] || names[0]}" to="user"]sounds good[/sms]`;
-    }
-    instruction += ` — The [sms] block is phone text content only. Always include from and to attributes. Only use to="user" for texts directed at the user's phone. If characters text each other, do NOT use [sms] tags — just narrate it normally.]`;
+    instruction += `]`;
 
     setExtensionPrompt(
         INJECT_KEY,
@@ -2441,7 +2451,8 @@ async function sendToChat(text, contactName, isCommand) {
 /** Send immediately (instant mode) — single target */
 function sendImmediate(contactName, chatText, isNeural, cmdType) {
     injectSmsPrompt([{ name: contactName, isNeural, cmdType }]);
-    awaitingReply = true;
+    // Neural commands don't expect an SMS reply — character reacts narratively only
+    if (!isNeural) awaitingReply = true;
     sendToChat(chatText, contactName, !!cmdType || isNeural);
 }
 
@@ -2969,7 +2980,8 @@ function sendPhoneMessage() {
         });
         sendImmediate(currentContactName, chatText, isNeural, cmdType);
 
-        // Typing indicator
+        // Typing indicator — only show when expecting an SMS reply (non-neural)
+        if (!isNeural) {
         clearTypingIndicator();
         const typing = document.createElement('div');
         typing.id = 'cx-typing-indicator';
@@ -2990,6 +3002,7 @@ function sendPhoneMessage() {
                 area.scrollTop = area.scrollHeight;
             }
         }, 30000);
+        }
     }
 }
 
