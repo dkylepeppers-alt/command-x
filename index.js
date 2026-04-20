@@ -17,12 +17,28 @@ import {
     extension_prompt_roles,
 } from '../../../../script.js';
 
+const VERSION = '0.10.0';
 const EXT = 'command-x';
 const INJECT_KEY = 'command-x-sms';
 const INJECT_KEY_CONTACTS = 'command-x-contacts';
 const INJECT_KEY_PRIVATE_PHONE = 'command-x-private-phone';
 const INJECT_KEY_QUESTS = 'command-x-quests';
-const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true, manualHybridPrivateTexts: true, openclawMode: 'assist' };
+const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true, manualHybridPrivateTexts: true, openclawMode: 'assist', contactsInjectEveryN: 1, questsInjectEveryN: 1 };
+const MAX_AVATAR_FILE_BYTES = 8 * 1024 * 1024; // 8 MB hard cap on raw upload size
+const AWAIT_TIMEOUT_MS = 30_000;             // ms before awaitingReply auto-clears
+const CLOCK_INTERVAL_MS = 30_000;            // clock display refresh interval
+const MESSAGE_HISTORY_CAP = 200;             // max messages stored per contact
+const QUEST_HISTORY_CAP = 150;              // max quests stored
+const TOAST_DURATION_MS = 4_000;            // toast auto-dismiss duration
+const CONTACT_GRADIENTS = [
+    'linear-gradient(135deg,#553355,#442244)',
+    'linear-gradient(135deg,#334455,#223344)',
+    'linear-gradient(135deg,#ffaa88,#ff7755)',
+    'linear-gradient(135deg,#88aacc,#557799)',
+    'linear-gradient(135deg,#55aa77,#338855)',
+    'linear-gradient(135deg,#aa5577,#883355)',
+];
+const CONTACT_EMOJIS = ['👩','👩‍🦰','👱‍♀️','👩‍🏫','🧑','👨','👩‍🎤','🧑‍💼','👧','🧝‍♀️'];
 const CONTACT_FIELDS = ['emoji', 'status', 'mood', 'location', 'relationship', 'thoughts', 'avatarUrl'];
 const VOLATILE_CONTACT_FIELDS = ['status', 'mood', 'location', 'thoughts'];
 const STABLE_CONTACT_FIELDS = ['emoji', 'relationship', 'avatarUrl'];
@@ -33,6 +49,7 @@ const QUEST_PRIORITY_ORDER = { critical: 0, high: 1, normal: 2, low: 3 };
 const QUEST_URGENCY_ORDER = { urgent: 0, soon: 1, none: 2 };
 let settings = { ...DEFAULTS };
 let phoneContainer = null;
+let clockIntervalId = null;
 let commandMode = null; // null | 'COMMAND' | 'FORGET' | 'BELIEVE' | 'COMPEL'
 let neuralMode = false; // toggled via ⚡ button in chat header
 let profileEditorState = null;
@@ -48,7 +65,9 @@ function getOpenClawChatState() {
     ctx.chatMetadata[EXT] = ctx.chatMetadata[EXT] || {};
     ctx.chatMetadata[EXT].openclaw = ctx.chatMetadata[EXT].openclaw || {};
     const state = ctx.chatMetadata[EXT].openclaw;
-    if (!Number.isFinite(Number(state.resetNonce))) state.resetNonce = 0;
+    let mutated = false;
+    if (!Number.isFinite(Number(state.resetNonce))) { state.resetNonce = 0; mutated = true; }
+    if (mutated && typeof ctx.saveMetadata === 'function') ctx.saveMetadata();
     return state;
 }
 
@@ -71,9 +90,11 @@ function getExtensionChatState() {
     ctx.chatMetadata[EXT] = ctx.chatMetadata[EXT] || {};
     ctx.chatMetadata[EXT].privatePhone = ctx.chatMetadata[EXT].privatePhone || {};
     const state = ctx.chatMetadata[EXT].privatePhone;
-    if (!Array.isArray(state.events)) state.events = [];
-    if (!Number.isFinite(Number(state.lastPollAt))) state.lastPollAt = 0;
-    if (!Array.isArray(state.lastPollSummary)) state.lastPollSummary = [];
+    let mutated = false;
+    if (!Array.isArray(state.events)) { state.events = []; mutated = true; }
+    if (!Number.isFinite(Number(state.lastPollAt))) { state.lastPollAt = 0; mutated = true; }
+    if (!Array.isArray(state.lastPollSummary)) { state.lastPollSummary = []; mutated = true; }
+    if (mutated && typeof ctx.saveMetadata === 'function') ctx.saveMetadata();
     return state;
 }
 
@@ -557,7 +578,7 @@ function flushQueue() {
         typingTimeout = setTimeout(() => {
             clearTypingIndicator();
             if (awaitingReply) awaitingReply = false;
-        }, 30000);
+        }, AWAIT_TIMEOUT_MS);
     }
 
     clearQueue();
@@ -808,7 +829,7 @@ function sortQuests(quests) {
 }
 
 function saveQuests(quests) {
-    try { localStorage.setItem(questStoreKey(), JSON.stringify(sortQuests(quests).slice(-150))); }
+    try { localStorage.setItem(questStoreKey(), JSON.stringify(sortQuests(quests).slice(-QUEST_HISTORY_CAP))); }
     catch (e) { console.warn('[command-x] quest store save', e); }
 }
 
@@ -1120,6 +1141,29 @@ function clearQuestPrompt() {
     setExtensionPrompt(INJECT_KEY_QUESTS, '', extension_prompt_types.NONE, 0);
 }
 
+/* ------------------------------------------------------------------
+   Prompt injection throttling (Phase 2). Counted per received message;
+   when `contactsInjectEveryN` / `questsInjectEveryN` is > 1 we clear
+   the relevant injection on off-turns and re-inject on the matching
+   turn. A value of 1 (default) keeps the legacy every-turn behavior.
+   ------------------------------------------------------------------ */
+let _turnCounter = 0;
+
+function applyInjectionThrottle() {
+    _turnCounter += 1;
+    const contactsN = Math.max(1, Number(settings.contactsInjectEveryN) || 1);
+    const questsN = Math.max(1, Number(settings.questsInjectEveryN) || 1);
+
+    if (!settings.enabled) return;
+
+    if (settings.autoDetectNpcs !== false) {
+        if (_turnCounter % contactsN === 0) injectContactsPrompt();
+        else if (contactsN > 1) clearContactsPrompt();
+    }
+    if (_turnCounter % questsN === 0) injectQuestPrompt();
+    else if (questsN > 1) clearQuestPrompt();
+}
+
 function hideQuestTagsInDom(mesId) {
     const el = document.querySelector(`.mes[mesid="${mesId}"] .mes_text`);
     if (!el) return;
@@ -1357,8 +1401,8 @@ async function enrichQuestDraftIfNeeded(draft) {
     let raw = null;
     try {
         raw = await ctx.generateQuietPrompt({
-            prompt: buildQuestEnrichmentPrompt(draft),
-            schema: questEnrichmentSchema(),
+            quietPrompt: buildQuestEnrichmentPrompt(draft),
+            jsonSchema: questEnrichmentSchema(),
         });
         const parsed = parseQuestEnrichmentResponse(raw);
         const enriched = { ...draft };
@@ -1427,7 +1471,7 @@ async function saveQuestEditor() {
     };
 
     if (!draft.title) {
-        alert('Quest title is required.');
+        await cxAlert('Quest title is required.', 'Quest Editor');
         return;
     }
 
@@ -1449,7 +1493,7 @@ async function saveQuestEditor() {
         switchView('quests');
         showToast(saved.title, wasNew ? 'Quest added.' : 'Quest updated.');
     } catch (error) {
-        alert(String(error?.message || error));
+        await cxAlert(String(error?.message || error), 'Quest Error');
     }
 }
 
@@ -1571,10 +1615,6 @@ function buildSmsInstruction(contactName, isNeural, cmdType) {
  * @param {Array<{name:string, isNeural:boolean, cmdType:string|null}>} targets
  */
 function injectSmsPrompt(targets) {
-    if (!Array.isArray(targets)) {
-        // Legacy single-call compat: injectSmsPrompt(name, isNeural, cmdType)
-        targets = [{ name: arguments[0], isNeural: arguments[1], cmdType: arguments[2] }];
-    }
     const parts = targets.map(t => buildSmsInstruction(t.name, t.isNeural, t.cmdType));
     const names = targets.map(t => t.name);
     const multi = targets.length > 1;
@@ -1622,14 +1662,42 @@ function storeKey(contactName) {
     return `cx-msgs-${chatId}-${contactName}`;
 }
 
+/* ------------------------------------------------------------------
+   Phase 2 caches — keyed by current chat id, invalidated on any write.
+   historyContactNames() used to scan every localStorage key, and sort
+   helpers re-parsed every message thread for a single timestamp each
+   time the phone rebuilt. These caches make both O(1) amortized.
+   ------------------------------------------------------------------ */
+let _historyContactNamesCache = { chatId: null, names: null };
+const _lastMsgTsCache = new Map(); // key: `${chatId}::${contactName}` -> ts
+
+function invalidateContactCaches(contactName = null) {
+    _historyContactNamesCache = { chatId: null, names: null };
+    if (contactName == null) _lastMsgTsCache.clear();
+    else {
+        const prefix = `${currentChatId()}::`;
+        _lastMsgTsCache.delete(prefix + contactName);
+    }
+}
+
+function lastMessageTs(contactName) {
+    const key = `${currentChatId()}::${contactName}`;
+    if (_lastMsgTsCache.has(key)) return _lastMsgTsCache.get(key);
+    const msgs = loadMessages(contactName);
+    const ts = msgs.length ? (msgs[msgs.length - 1].ts || 0) : 0;
+    _lastMsgTsCache.set(key, ts);
+    return ts;
+}
+
 function loadMessages(contactName) {
     try { return JSON.parse(localStorage.getItem(storeKey(contactName)) || '[]'); }
     catch { return []; }
 }
 
 function saveMessages(contactName, msgs) {
-    try { localStorage.setItem(storeKey(contactName), JSON.stringify(msgs.slice(-200))); }
+    try { localStorage.setItem(storeKey(contactName), JSON.stringify(msgs.slice(-MESSAGE_HISTORY_CAP))); }
     catch (e) { console.warn('[command-x] store save', e); }
+    invalidateContactCaches(contactName);
 }
 
 function pushMessage(contactName, type, text, mesId) {
@@ -1639,7 +1707,11 @@ function pushMessage(contactName, type, text, mesId) {
 }
 
 function historyContactNames() {
-    const prefix = `cx-msgs-${currentChatId()}-`;
+    const chatId = currentChatId();
+    if (_historyContactNamesCache.chatId === chatId && _historyContactNamesCache.names) {
+        return _historyContactNamesCache.names.slice();
+    }
+    const prefix = `cx-msgs-${chatId}-`;
     const names = new Set();
     for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i);
@@ -1647,19 +1719,13 @@ function historyContactNames() {
         const name = key.slice(prefix.length).trim();
         if (name) names.add(name);
     }
-    return [...names];
+    const result = [...names];
+    _historyContactNamesCache = { chatId, names: result };
+    return result.slice();
 }
 
 function getKnownContactsForPrivateMessaging() {
     const contacts = getContactsFromContext();
-    const gradients = [
-        'linear-gradient(135deg,#553355,#442244)',
-        'linear-gradient(135deg,#334455,#223344)',
-        'linear-gradient(135deg,#ffaa88,#ff7755)',
-        'linear-gradient(135deg,#88aacc,#557799)',
-        'linear-gradient(135deg,#55aa77,#338855)',
-        'linear-gradient(135deg,#aa5577,#883355)',
-    ];
     const byName = new Map(contacts.map(c => [normalizeContactName(c.name), c]));
     for (const name of historyContactNames()) {
         const normalized = normalizeContactName(name);
@@ -1668,7 +1734,7 @@ function getKnownContactsForPrivateMessaging() {
             id: `history_${normalized}`,
             name,
             emoji: '🧑',
-            gradient: gradients[byName.size % gradients.length],
+            gradient: CONTACT_GRADIENTS[byName.size % CONTACT_GRADIENTS.length],
             online: false,
             isNpc: true,
             status: 'known',
@@ -1681,10 +1747,8 @@ function getKnownContactsForPrivateMessaging() {
         });
     }
     return [...byName.values()].sort((a, b) => {
-        const aMsgs = loadMessages(a.name);
-        const bMsgs = loadMessages(b.name);
-        const aTs = aMsgs.length ? (aMsgs[aMsgs.length - 1].ts || 0) : 0;
-        const bTs = bMsgs.length ? (bMsgs[bMsgs.length - 1].ts || 0) : 0;
+        const aTs = lastMessageTs(a.name);
+        const bTs = lastMessageTs(b.name);
         if (aTs && !bTs) return -1;
         if (!aTs && bTs) return 1;
         return bTs - aTs;
@@ -1731,7 +1795,7 @@ function savePrivatePhoneEvents(events) {
         .map(sanitizePhoneEvent)
         .filter(Boolean)
         .sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0))
-        .slice(-200);
+        .slice(-MESSAGE_HISTORY_CAP);
     saveExtensionChatState({ events: clean });
     return clean;
 }
@@ -1816,8 +1880,15 @@ function showToast(contactName, text) {
     const toast = document.createElement('div');
     toast.id = 'cx-toast';
     toast.className = 'cx-toast cx-toast-show';
-    toast.innerHTML = `<div class="cx-toast-icon">📱</div><div class="cx-toast-body"><div class="cx-toast-name">${contactName}</div><div class="cx-toast-text">${escHtml(preview)}</div></div>`;
+    toast.setAttribute('role', 'status');
+    toast.setAttribute('aria-live', 'polite');
+    toast.setAttribute('aria-label', `New message from ${contactName}`);
+    toast.innerHTML = `<div class="cx-toast-icon">📱</div><div class="cx-toast-body"><div class="cx-toast-name">${escHtml(contactName)}</div><div class="cx-toast-text">${escHtml(preview)}</div></div>`;
+    // Esc key listener variable — declared early so the click handler can reference it
+    let onKey;
+
     toast.addEventListener('click', () => {
+        document.removeEventListener('keydown', onKey);
         toast.remove();
         // Open phone to this contact's chat
         const wrapper = document.getElementById('cx-panel-wrapper');
@@ -1830,8 +1901,91 @@ function showToast(contactName, text) {
         }
     });
     document.body.appendChild(toast);
-    // Auto-dismiss after 4s
-    setTimeout(() => { toast.classList.remove('cx-toast-show'); setTimeout(() => toast.remove(), 400); }, 4000);
+
+    // Auto-dismiss with pause-on-hover
+    let remainingMs = TOAST_DURATION_MS;
+    let startedAt = Date.now();
+    let dismissTimer = null;
+    const dismiss = () => {
+        document.removeEventListener('keydown', onKey);
+        if (dismissTimer) { clearTimeout(dismissTimer); dismissTimer = null; }
+        toast.classList.remove('cx-toast-show');
+        setTimeout(() => toast.remove(), 400);
+    };
+    const armDismiss = (ms) => {
+        if (dismissTimer) clearTimeout(dismissTimer);
+        dismissTimer = setTimeout(dismiss, ms);
+    };
+    toast.addEventListener('mouseenter', () => {
+        if (dismissTimer) { clearTimeout(dismissTimer); dismissTimer = null; }
+        remainingMs = Math.max(0, remainingMs - (Date.now() - startedAt));
+    });
+    toast.addEventListener('mouseleave', () => {
+        startedAt = Date.now();
+        armDismiss(remainingMs);
+    });
+    armDismiss(TOAST_DURATION_MS);
+
+    // Dismiss on Esc — listener always cleaned up inside dismiss()
+    onKey = (e) => { if (e.key === 'Escape') dismiss(); };
+    document.addEventListener('keydown', onKey);
+}
+
+/**
+ * Styled in-phone alert (replaces native alert()).
+ * Returns a Promise that resolves when the user clicks OK.
+ * Esc also closes the dialog. Enter is handled natively by the focused OK button.
+ */
+function cxAlert(message, title = 'Command-X') {
+    return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'cx-modal-overlay';
+        overlay.innerHTML = `
+        <div class="cx-modal-box" role="alertdialog" aria-modal="true" aria-labelledby="cx-modal-title" aria-describedby="cx-modal-body">
+            <div class="cx-modal-title" id="cx-modal-title">${escHtml(title)}</div>
+            <div class="cx-modal-body" id="cx-modal-body">${escHtml(message)}</div>
+            <div class="cx-modal-actions">
+                <button class="cx-modal-btn cx-modal-btn-primary" id="cx-modal-ok" autofocus>OK</button>
+            </div>
+        </div>`;
+        const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); resolve(); };
+        const onKey = (e) => { if (e.key === 'Escape') close(); };
+        overlay.querySelector('#cx-modal-ok').addEventListener('click', close);
+        document.addEventListener('keydown', onKey);
+        document.body.appendChild(overlay);
+        overlay.querySelector('#cx-modal-ok').focus();
+    });
+}
+
+/**
+ * Styled in-phone confirm dialog (replaces native confirm()).
+ * Returns a Promise<boolean> — true if user confirms, false if cancelled.
+ * Esc cancels. Enter is handled natively by the focused button.
+ * When danger=true the cancel button receives initial focus to reduce accidental
+ * confirmation of destructive operations.
+ */
+function cxConfirm(message, title = 'Are you sure?', { confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = false } = {}) {
+    return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'cx-modal-overlay';
+        overlay.innerHTML = `
+        <div class="cx-modal-box" role="alertdialog" aria-modal="true" aria-labelledby="cx-modal-title" aria-describedby="cx-modal-body">
+            <div class="cx-modal-title" id="cx-modal-title">${escHtml(title)}</div>
+            <div class="cx-modal-body" id="cx-modal-body">${escHtml(message)}</div>
+            <div class="cx-modal-actions">
+                <button class="cx-modal-btn cx-modal-btn-secondary" id="cx-modal-cancel">${escHtml(cancelLabel)}</button>
+                <button class="cx-modal-btn ${danger ? 'cx-modal-btn-danger' : 'cx-modal-btn-primary'}" id="cx-modal-confirm">${escHtml(confirmLabel)}</button>
+            </div>
+        </div>`;
+        const close = (result) => { overlay.remove(); document.removeEventListener('keydown', onKey); resolve(result); };
+        const onKey = (e) => { if (e.key === 'Escape') close(false); };
+        overlay.querySelector('#cx-modal-cancel').addEventListener('click', () => close(false));
+        overlay.querySelector('#cx-modal-confirm').addEventListener('click', () => close(true));
+        document.addEventListener('keydown', onKey);
+        document.body.appendChild(overlay);
+        // Dangerous actions default to cancel focus; safe confirms default to confirm focus.
+        overlay.querySelector(danger ? '#cx-modal-cancel' : '#cx-modal-confirm').focus();
+    });
 }
 
 function markRead(contactName) {
@@ -1922,15 +2076,6 @@ function getContactsFromContext() {
     const chars = getChatCharacters();
     const ctx = getContext();
     const userName = normalizeContactName(ctx.name1 || '');
-    const emojis = ['👩','👩‍🦰','👱‍♀️','👩‍🏫','🧑','👨','👩‍🎤','🧑‍💼','👧','🧝‍♀️'];
-    const gradients = [
-        'linear-gradient(135deg,#553355,#442244)',
-        'linear-gradient(135deg,#334455,#223344)',
-        'linear-gradient(135deg,#ffaa88,#ff7755)',
-        'linear-gradient(135deg,#88aacc,#557799)',
-        'linear-gradient(135deg,#55aa77,#338855)',
-        'linear-gradient(135deg,#aa5577,#883355)',
-    ];
     const storedNpcs = loadNpcs();
     const storedByName = new Map(storedNpcs.map(npc => [normalizeContactName(npc.name), npc]));
     const deduped = new Map();
@@ -1948,8 +2093,8 @@ function getContactsFromContext() {
             const liveContact = {
                 id: c.avatar || `char_${i}`,
                 name: c.name || `Character ${i + 1}`,
-                emoji: emojis[i % emojis.length],
-                gradient: gradients[i % gradients.length],
+                emoji: CONTACT_EMOJIS[i % CONTACT_EMOJIS.length],
+                gradient: CONTACT_GRADIENTS[i % CONTACT_GRADIENTS.length],
                 online: true,
                 isNpc: false,
                 status: 'online',
@@ -1973,7 +2118,7 @@ function getContactsFromContext() {
                 id: `npc_${i}`,
                 name: npc.name,
                 emoji: npc.emoji || '🧑',
-                gradient: gradients[(chars.length + i) % gradients.length],
+                gradient: CONTACT_GRADIENTS[(chars.length + i) % CONTACT_GRADIENTS.length],
                 online: npc.status === 'online' || npc.status === 'nearby',
                 isNpc: true,
                 status: npc.status || 'nearby',
@@ -2001,10 +2146,8 @@ function getContactsFromContext() {
 
     const contacts = [...deduped.values()];
     contacts.sort((a, b) => {
-        const aMsgs = loadMessages(a.name);
-        const bMsgs = loadMessages(b.name);
-        const aTs = aMsgs.length ? (aMsgs[aMsgs.length - 1].ts || 0) : 0;
-        const bTs = bMsgs.length ? (bMsgs[bMsgs.length - 1].ts || 0) : 0;
+        const aTs = lastMessageTs(a.name);
+        const bTs = lastMessageTs(b.name);
         if (aTs && !bTs) return -1;
         if (!aTs && bTs) return 1;
         return bTs - aTs;
@@ -2014,8 +2157,8 @@ function getContactsFromContext() {
 
 const now = () => new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 const today = () => new Date().toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
-function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>'); }
-function escAttr(s) { return String(s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escHtml(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>'); }
+function escAttr(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
 
 function buildOutOfBandPollPrompt() {
@@ -2129,12 +2272,12 @@ async function pollPrivateMessages() {
     }
     const ctx = getContext();
     if (typeof ctx.generateQuietPrompt !== 'function') {
-        alert('This SillyTavern build does not expose generateQuietPrompt() for private polling.');
+        await cxAlert('This SillyTavern build does not expose generateQuietPrompt() for private polling.');
         return;
     }
     const contacts = getKnownContactsForPrivateMessaging();
     if (!contacts.length) {
-        alert('No known contacts are available to poll yet.');
+        await cxAlert('No known contacts are available to poll yet.');
         return;
     }
 
@@ -2199,6 +2342,11 @@ function safeDataUrlFromFile(file, maxWidth = 256, quality = 0.82) {
     return new Promise((resolve, reject) => {
         if (!file || !file.type || !file.type.startsWith('image/')) {
             reject(new Error('Please choose an image file.'));
+            return;
+        }
+        if (Number.isFinite(file.size) && file.size > MAX_AVATAR_FILE_BYTES) {
+            const mb = (MAX_AVATAR_FILE_BYTES / (1024 * 1024)).toFixed(0);
+            reject(new Error(`Image is too large (over ${mb} MB). Please choose a smaller file.`));
             return;
         }
         const reader = new FileReader();
@@ -2269,6 +2417,7 @@ function renameContactThread(oldName, newName) {
     if (oldMsgs.length) {
         saveMessages(newName, oldMsgs);
         try { localStorage.removeItem(storeKey(oldName)); } catch { /* ignore */ }
+        invalidateContactCaches();
     }
     const unread = getUnread(oldName);
     if (unread) {
@@ -2287,6 +2436,7 @@ function deleteStoredContact(name) {
     saveNpcs(stored);
     try { localStorage.removeItem(storeKey(name)); } catch { /* ignore */ }
     try { localStorage.removeItem(unreadKey(name)); } catch { /* ignore */ }
+    invalidateContactCaches();
     composeQueue = composeQueue.filter(item => item.contactName !== name);
     if (currentContactName === name) currentContactName = null;
     return true;
@@ -2366,7 +2516,7 @@ function saveProfileEditor() {
     };
 
     if (!draft.name) {
-        alert('Contact name is required.');
+        await cxAlert('Contact name is required.', 'Contact Editor');
         return;
     }
 
@@ -2378,7 +2528,7 @@ function saveProfileEditor() {
         switchView('profiles');
         showToast(saved.name, wasNew ? 'Contact added.' : 'Profile updated.');
     } catch (error) {
-        alert(String(error?.message || error));
+        await cxAlert(String(error?.message || error), 'Contact Error');
     }
 }
 
@@ -2413,7 +2563,7 @@ function triggerAvatarPicker(contactName) {
             switchView('profiles');
             showToast(existing.name, 'Avatar updated.');
         } catch (error) {
-            alert(String(error?.message || error));
+            await cxAlert(String(error?.message || error), 'Avatar Error');
         } finally {
             input.remove();
         }
@@ -2421,13 +2571,13 @@ function triggerAvatarPicker(contactName) {
     input.click();
 }
 
-function promptDeleteContact(contactName) {
+async function promptDeleteContact(contactName) {
     const contact = getEditableContact(contactName);
     if (!contact?.isNpc) {
-        alert('Only manual/NPC contacts can be deleted from Command-X.');
+        await cxAlert('Only manual/NPC contacts can be deleted from Command-X.');
         return;
     }
-    if (!confirm(`Delete ${contactName} from Command-X contacts for this chat?`)) return;
+    if (!await cxConfirm(`Delete ${contactName} from Command-X contacts for this chat?`, 'Delete Contact', { confirmLabel: 'Delete', danger: true })) return;
     deleteStoredContact(contactName);
     rebuildPhone();
     switchView('profiles');
@@ -2451,6 +2601,13 @@ async function sendToChat(text, contactName, isCommand) {
         const sendBtn = document.querySelector('#send_but');
         if (sendBtn) sendBtn.click();
     }
+    // Disable the in-phone send button while we're awaiting a reply to prevent
+    // double-send. It is re-enabled in clearTypingIndicator() + the AWAIT timeout.
+    const inPhoneSend = phoneContainer?.querySelector('#cx-send');
+    if (inPhoneSend) {
+        inPhoneSend.disabled = true;
+        inPhoneSend.setAttribute('aria-disabled', 'true');
+    }
 }
 
 /** Send immediately (instant mode) — single target */
@@ -2460,6 +2617,13 @@ function sendImmediate(contactName, chatText, isNeural, cmdType) {
     // assistant message regardless of whether an SMS reply is expected. SMS-specific
     // UI (typing indicator, auto-route) is gated separately by the caller.
     awaitingReply = true;
+    // Parity with flushQueue: ensure awaitingReply gets cleared even if the LLM never
+    // responds with a parseable [sms] block.
+    if (typingTimeout) { clearTimeout(typingTimeout); typingTimeout = null; }
+    typingTimeout = setTimeout(() => {
+        clearTypingIndicator();
+        if (awaitingReply) awaitingReply = false;
+    }, AWAIT_TIMEOUT_MS);
     sendToChat(chatText, contactName, !!cmdType || isNeural);
 }
 
@@ -2468,10 +2632,12 @@ function sendImmediate(contactName, chatText, isNeural, cmdType) {
    ====================================================================== */
 
 function avatarHTML(c, sizeClass = '') {
+    const gradient = escAttr(c.gradient || '');
+    const emoji = escHtml(c.emoji || '');
     if (c.avatarUrl) {
-        return `<div class="cx-avatar ${sizeClass}" style="background:${c.gradient}"><img class="cx-avatar-img" src="${c.avatarUrl}" alt="" onerror="this.style.display='none';this.nextSibling.style.display=''"><span style="display:none">${c.emoji}</span></div>`;
+        return `<div class="cx-avatar ${sizeClass}" style="background:${gradient}"><img class="cx-avatar-img" data-cx-avatar-fallback="1" src="${escAttr(c.avatarUrl)}" alt=""><span class="cx-avatar-emoji-fallback" style="display:none">${emoji}</span></div>`;
     }
-    return `<div class="cx-avatar ${sizeClass}" style="background:${c.gradient}">${c.emoji}</div>`;
+    return `<div class="cx-avatar ${sizeClass}" style="background:${gradient}">${emoji}</div>`;
 }
 
 function profileEditorModalHTML() {
@@ -2480,7 +2646,7 @@ function profileEditorModalHTML() {
     const title = profileEditorState.mode === 'new' ? 'Add Contact' : 'Edit Profile';
     const saveLabel = profileEditorState.mode === 'new' ? 'Add Contact' : 'Save Changes';
     const avatarPreview = draft.avatarUrl
-        ? `<div class="cx-profile-editor-avatar-preview"><img src="${draft.avatarUrl}" alt="Avatar preview" /></div>`
+        ? `<div class="cx-profile-editor-avatar-preview"><img src="${escAttr(draft.avatarUrl)}" alt="Avatar preview" /></div>`
         : `<div class="cx-profile-editor-avatar-fallback">${escHtml(draft.emoji || '🧑')}</div>`;
     return `
     <div class="cx-profile-editor-backdrop" id="cx-profile-editor-backdrop">
@@ -2555,10 +2721,10 @@ function contactRowHTML(c, i, app) {
     const npcBadge = c.isNpc ? '<span class="cx-npc-badge">NPC</span>' : '';
 
     return `
-    <div class="cx-contact-row" data-idx="${i}" data-app="${app}" data-cid="${c.id}" data-cname="${c.name}">
+    <div class="cx-contact-row" role="button" tabindex="0" aria-label="Open chat with ${escAttr(c.name)}" data-idx="${i}" data-app="${app}" data-cid="${escAttr(c.id)}" data-cname="${escAttr(c.name)}">
         ${avatarHTML(c)}
         <div class="cx-contact-info">
-            <div class="cx-contact-name">${c.name} ${npcBadge}</div>
+            <div class="cx-contact-name">${escHtml(c.name)} ${npcBadge}</div>
             <div class="cx-contact-preview">${escHtml(previewTrunc)}</div>
         </div>
         <div class="cx-status-col">
@@ -2590,12 +2756,12 @@ function buildPhone() {
             <div class="cx-lock-time">${now()}</div>
             <div class="cx-lock-date">${today()}</div>
             ${hasContacts ? `
-            <div class="cx-notif" data-goto="cmdx">
+            <div class="cx-notif" data-goto="cmdx" role="button" tabindex="0" aria-label="Open Command-X — neural link active">
                 <div class="cx-notif-app">COMMAND-X</div>
                 <div class="cx-notif-title">Neural Link Active</div>
                 <div class="cx-notif-body">${contacts.length} contact${contacts.length > 1 ? 's' : ''} synced. Tap to open.</div>
             </div>` : ''}
-            <div class="cx-lock-hint" data-action="unlock">Tap to unlock</div>
+            <div class="cx-lock-hint" data-action="unlock" role="button" tabindex="0" aria-label="Unlock phone">Tap to unlock</div>
         </div>
 
         <!-- Home Screen -->
@@ -2603,23 +2769,23 @@ function buildPhone() {
             <div class="cx-home-time">${now()}</div>
             <div class="cx-home-date">${today()}</div>
             <div class="cx-app-grid">
-                <div class="cx-app-icon" data-app="cmdx">
+                <div class="cx-app-icon" data-app="cmdx" role="button" tabindex="0" aria-label="Open Command-X app">
                     <div class="cx-icon-img cx-icon-cmdx">⚡</div>
                     <div class="cx-icon-label">Command-X</div>
                 </div>
-                <div class="cx-app-icon" data-app="profiles">
+                <div class="cx-app-icon" data-app="profiles" role="button" tabindex="0" aria-label="Open Profiles app">
                     <div class="cx-icon-img cx-icon-profiles">🔍</div>
                     <div class="cx-icon-label">Profiles</div>
                 </div>
-                <div class="cx-app-icon" data-app="quests">
+                <div class="cx-app-icon" data-app="quests" role="button" tabindex="0" aria-label="Open Quests app">
                     <div class="cx-icon-img cx-icon-quests">🗺️</div>
                     <div class="cx-icon-label">Quests${activeQuestCount ? ` (${activeQuestCount})` : ''}</div>
                 </div>
-                <div class="cx-app-icon" data-app="openclaw">
+                <div class="cx-app-icon" data-app="openclaw" role="button" tabindex="0" aria-label="Open OpenClaw app">
                     <div class="cx-icon-img cx-icon-openclaw">🦞</div>
                     <div class="cx-icon-label">OpenClaw</div>
                 </div>
-                <div class="cx-app-icon" data-app="phone-settings">
+                <div class="cx-app-icon" data-app="phone-settings" role="button" tabindex="0" aria-label="Open Settings">
                     <div class="cx-icon-img cx-icon-settings">⚙️</div>
                     <div class="cx-icon-label">Settings</div>
                 </div>
@@ -2642,7 +2808,7 @@ function buildPhone() {
             </div>
             <div class="cx-navbar">
                 <div class="cx-nav active"><div class="cx-nav-ico">💬</div><div class="cx-nav-lbl">Chats</div></div>
-                <div class="cx-nav" data-goto="home"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
+                <div class="cx-nav" data-goto="home" role="button" tabindex="0" aria-label="Go to home screen"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
             </div>
         </div>
 
@@ -2657,18 +2823,18 @@ function buildPhone() {
             </div>
             <div class="cx-profiles-list">
                 ${hasContacts ? contacts.map(c => `
-                <div class="cx-profile-card" data-pname="${c.name}">
+                <div class="cx-profile-card" role="region" aria-label="Profile: ${escAttr(c.name)}" data-pname="${escAttr(c.name)}">
                     <div class="cx-profile-top">
                         ${avatarHTML(c, 'cx-avatar-lg')}
                         <div class="cx-profile-name-col">
-                            <div class="cx-profile-name">${c.name} ${c.isNpc ? '<span class="cx-npc-badge">NPC</span>' : ''}</div>
-                            <div class="cx-profile-status">${c.mood || (c.online ? '🟢 Online' : '⚫ Offline')}</div>
+                            <div class="cx-profile-name">${escHtml(c.name)} ${c.isNpc ? '<span class="cx-npc-badge">NPC</span>' : ''}</div>
+                            <div class="cx-profile-status">${escHtml(c.mood || (c.online ? '🟢 Online' : '⚫ Offline'))}</div>
                         </div>
                     </div>
                     <div class="cx-profile-actions">
-                        <button class="cx-profile-action-btn" data-cx-edit="${c.name}">Edit</button>
-                        <button class="cx-profile-action-btn" data-cx-avatar="${c.name}">Avatar</button>
-                        ${c.isNpc ? `<button class="cx-profile-action-btn cx-profile-action-danger" data-cx-delete="${c.name}">Delete</button>` : ``}
+                        <button class="cx-profile-action-btn" data-cx-edit="${escAttr(c.name)}">Edit</button>
+                        <button class="cx-profile-action-btn" data-cx-avatar="${escAttr(c.name)}">Avatar</button>
+                        ${c.isNpc ? `<button class="cx-profile-action-btn cx-profile-action-danger" data-cx-delete="${escAttr(c.name)}">Delete</button>` : ``}
                     </div>
                     <div class="cx-profile-fields">
                         ${c.location ? `<div class="cx-profile-field"><span class="cx-pf-label">📍 Location</span><span class="cx-pf-value">${escHtml(c.location)}</span></div>` : ''}
@@ -2680,7 +2846,7 @@ function buildPhone() {
             </div>
             <div class="cx-navbar">
                 <div class="cx-nav active"><div class="cx-nav-ico">🔍</div><div class="cx-nav-lbl">Profiles</div></div>
-                <div class="cx-nav" data-goto="home"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
+                <div class="cx-nav" data-goto="home" role="button" tabindex="0" aria-label="Go to home screen"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
             </div>
         </div>
 
@@ -2703,7 +2869,7 @@ function buildPhone() {
             </div>
             <div class="cx-navbar">
                 <div class="cx-nav active"><div class="cx-nav-ico">🗺️</div><div class="cx-nav-lbl">Quests</div></div>
-                <div class="cx-nav" data-goto="home"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
+                <div class="cx-nav" data-goto="home" role="button" tabindex="0" aria-label="Go to home screen"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
             </div>
         </div>
 
@@ -2742,13 +2908,13 @@ function buildPhone() {
                 </div>
                 <div class="cx-settings-section">ABOUT</div>
                 <div class="cx-settings-row cx-settings-about">
-                    <div>Command-X v0.10.0</div>
+                    <div>Command-X v${VERSION}</div>
                     <div style="color:#666;font-size:11px;margin-top:4px">By Kyle & Bucky 🦌</div>
                 </div>
             </div>
             <div class="cx-navbar">
                 <div class="cx-nav active"><div class="cx-nav-ico">⚙️</div><div class="cx-nav-lbl">Settings</div></div>
-                <div class="cx-nav" data-goto="home"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
+                <div class="cx-nav" data-goto="home" role="button" tabindex="0" aria-label="Go to home screen"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
             </div>
         </div>
 
@@ -2803,7 +2969,7 @@ function buildPhone() {
             </div>
             <div class="cx-navbar">
                 <div class="cx-nav active"><div class="cx-nav-ico">🦞</div><div class="cx-nav-lbl">OpenClaw</div></div>
-                <div class="cx-nav" data-goto="home"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
+                <div class="cx-nav" data-goto="home" role="button" tabindex="0" aria-label="Go to home screen"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
             </div>
         </div>
 
@@ -2811,13 +2977,13 @@ function buildPhone() {
         <!-- Chat View -->
         <div class="cx-view" data-view="chat">
             <div class="cx-chat-header">
-                <div class="cx-chat-back" id="cx-back">‹</div>
+                <div class="cx-chat-back" id="cx-back" role="button" tabindex="0" aria-label="Back">‹</div>
                 <div class="cx-chat-header-info">
                     <div class="cx-chat-header-name" id="cx-chat-name"></div>
                     <div class="cx-chat-header-status" id="cx-chat-status"></div>
                 </div>
-                <div class="cx-neural-toggle" id="cx-neural-toggle" title="Toggle neural commands">⚡</div>
-                <div class="cx-batch-toggle ${settings.batchMode ? 'cx-batch-active' : ''}" id="cx-batch-toggle" title="Toggle batch mode (queue texts)">📋</div>
+                <div class="cx-neural-toggle" id="cx-neural-toggle" role="button" tabindex="0" aria-pressed="false" aria-label="Toggle neural commands" title="Toggle neural commands">⚡</div>
+                <div class="cx-batch-toggle ${settings.batchMode ? 'cx-batch-active' : ''}" id="cx-batch-toggle" role="button" tabindex="0" aria-pressed="${settings.batchMode}" aria-label="Toggle batch mode" title="Toggle batch mode (queue texts)">📋</div>
             </div>
             <div class="cx-messages" id="cx-msg-area"></div>
             <div class="cx-cmd-drawer cx-hidden" id="cx-cmd-drawer">
@@ -2925,6 +3091,12 @@ function openChat(contactName, app, preserveState = false) {
 function clearTypingIndicator() {
     if (typingTimeout) { clearTimeout(typingTimeout); typingTimeout = null; }
     phoneContainer?.querySelector('#cx-typing-indicator')?.remove();
+    // Re-enable the send button once the LLM has replied (or timed out)
+    const inPhoneSend = phoneContainer?.querySelector('#cx-send');
+    if (inPhoneSend) {
+        inPhoneSend.disabled = false;
+        inPhoneSend.removeAttribute('aria-disabled');
+    }
 }
 
 function sendPhoneMessage() {
@@ -3009,7 +3181,7 @@ function sendPhoneMessage() {
                     area.appendChild(hint);
                     area.scrollTop = area.scrollHeight;
                 }
-            }, 30000);
+            }, AWAIT_TIMEOUT_MS);
         }
     }
 }
@@ -3065,8 +3237,8 @@ function wirePhone() {
     phoneContainer.querySelector('#cx-set-add-contact')?.addEventListener('click', () => { openProfileEditor(); });
     phoneContainer.querySelector('#cx-add-quest')?.addEventListener('click', () => { openQuestEditor(); });
     phoneContainer.querySelector('#cx-check-private')?.addEventListener('click', () => { pollPrivateMessages().catch(error => console.error(`[${EXT}] Private poll click failed`, error)); });
-    phoneContainer.querySelector('#cx-set-clear-npcs')?.addEventListener('click', () => {
-        if (confirm('Clear all NPC contacts for this chat?')) {
+    phoneContainer.querySelector('#cx-set-clear-npcs')?.addEventListener('click', async () => {
+        if (await cxConfirm('Clear all NPC contacts for this chat?', 'Clear Contacts', { confirmLabel: 'Clear All', danger: true })) {
             saveNpcs([]);
             rebuildPhone();
         }
@@ -3136,7 +3308,7 @@ function wirePhone() {
     phoneContainer.querySelector('#cx-quest-cancel-footer')?.addEventListener('click', closeQuestEditor);
     phoneContainer.querySelector('#cx-quest-form')?.addEventListener('submit', (event) => {
         event.preventDefault();
-saveQuestEditor().catch(error => alert(String(error?.message || error)));
+saveQuestEditor().catch(error => cxAlert(String(error?.message || error), 'Quest Error'));
     });
     phoneContainer.querySelector('#cx-quest-editor-backdrop')?.addEventListener('click', (event) => {
         if (event.target?.id === 'cx-quest-editor-backdrop') closeQuestEditor();
@@ -3192,7 +3364,7 @@ saveQuestEditor().catch(error => alert(String(error?.message || error)));
             try {
                 await enhanceQuestById(btn.dataset.cxQuestEnhance);
             } catch (error) {
-                alert(String(error?.message || error));
+                await cxAlert(String(error?.message || error), 'Enhancement Error');
             }
         })
     );
@@ -3250,6 +3422,7 @@ saveQuestEditor().catch(error => alert(String(error?.message || error)));
         const btn = phoneContainer.querySelector('#cx-batch-toggle');
         if (settings.batchMode) btn?.classList.add('cx-batch-active');
         else { btn?.classList.remove('cx-batch-active'); }
+        btn?.setAttribute('aria-pressed', String(settings.batchMode));
         saveSettings();
         updateQueueBar();
     });
@@ -3259,6 +3432,7 @@ saveQuestEditor().catch(error => alert(String(error?.message || error)));
         const toggle = phoneContainer.querySelector('#cx-neural-toggle');
         const drawer = phoneContainer.querySelector('#cx-cmd-drawer');
         const input = phoneContainer.querySelector('#cx-msg-input');
+        toggle?.setAttribute('aria-pressed', String(neuralMode));
         if (neuralMode) {
             toggle?.classList.add('cx-neural-active');
             drawer?.classList.remove('cx-hidden');
@@ -3318,10 +3492,31 @@ saveQuestEditor().catch(error => alert(String(error?.message || error)));
         const area = phoneContainer?.querySelector('#cx-msg-area');
         if (area && currentContactName) renderAllBubbles(area, currentContactName, false);
     });
-    setInterval(() => {
+    // Avatar <img> onerror — fall back to the emoji span (CSP-safe, replaces inline onerror).
+    phoneContainer.addEventListener('error', (e) => {
+        const img = e.target;
+        if (!(img instanceof HTMLImageElement)) return;
+        if (!img.hasAttribute('data-cx-avatar-fallback')) return;
+        img.style.display = 'none';
+        const fallback = img.parentElement?.querySelector('.cx-avatar-emoji-fallback');
+        if (fallback) fallback.style.display = '';
+    }, true);
+
+    // Keyboard activation for role="button" elements — Enter / Space → click.
+    // Space default (page scroll) is suppressed for role="button" elements.
+    phoneContainer.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        const el = e.target;
+        if (el.getAttribute('role') !== 'button') return;
+        e.preventDefault(); // always suppress Space-scroll / Enter-submit for role="button"
+        if (!el.disabled) el.click();
+    });
+
+    if (clockIntervalId) { clearInterval(clockIntervalId); clockIntervalId = null; }
+    clockIntervalId = setInterval(() => {
         const t = now();
         phoneContainer?.querySelectorAll('#cx-clock, .cx-lock-time, .cx-home-time').forEach(el => { el.textContent = t; });
-    }, 30000);
+    }, CLOCK_INTERVAL_MS);
 }
 
 /* ======================================================================
@@ -3393,6 +3588,7 @@ function rebuildPhone() {
 }
 
 function destroyPanel() {
+    if (clockIntervalId) { clearInterval(clockIntervalId); clockIntervalId = null; }
     document.getElementById('cx-panel-wrapper')?.remove();
     document.getElementById('cx-menu-button')?.remove();
     phoneContainer = null;
@@ -3437,6 +3633,10 @@ function loadSettings() {
     if (!["observe", "assist", "operate"].includes(settings.openclawMode)) settings.openclawMode = 'assist';
     const openclawMode = document.getElementById('cx_ext_openclaw_mode');
     if (openclawMode) openclawMode.value = settings.openclawMode || 'assist';
+    const contactsN = document.getElementById('cx_ext_contacts_every_n');
+    if (contactsN) contactsN.value = Math.max(1, Number(settings.contactsInjectEveryN) || 1);
+    const questsN = document.getElementById('cx_ext_quests_every_n');
+    if (questsN) questsN.value = Math.max(1, Number(settings.questsInjectEveryN) || 1);
 }
 
 function saveSettings() {
@@ -3447,6 +3647,10 @@ function saveSettings() {
     settings.autoDetectNpcs = document.getElementById('cx_ext_auto_detect_npcs')?.checked ?? settings.autoDetectNpcs ?? true;
     settings.manualHybridPrivateTexts = document.getElementById('cx_set_private_hybrid')?.checked ?? document.getElementById('cx-set-private-hybrid')?.checked ?? settings.manualHybridPrivateTexts ?? true;
     settings.openclawMode = document.getElementById('cx_ext_openclaw_mode')?.value || settings.openclawMode || 'assist';
+    const contactsNRaw = Number(document.getElementById('cx_ext_contacts_every_n')?.value);
+    settings.contactsInjectEveryN = Number.isFinite(contactsNRaw) && contactsNRaw >= 1 ? Math.floor(contactsNRaw) : (settings.contactsInjectEveryN || 1);
+    const questsNRaw = Number(document.getElementById('cx_ext_quests_every_n')?.value);
+    settings.questsInjectEveryN = Number.isFinite(questsNRaw) && questsNRaw >= 1 ? Math.floor(questsNRaw) : (settings.questsInjectEveryN || 1);
     const ctx = getContext();
     ctx.extensionSettings[EXT] = { ...settings };
     ctx.saveSettingsDebounced();
@@ -3467,7 +3671,7 @@ jQuery(async () => {
 
         loadSettings();
         refreshPrivatePhonePrompt();
-        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_openclaw_mode').on('change', () => {
+        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_openclaw_mode, #cx_ext_contacts_every_n, #cx_ext_quests_every_n').on('change', () => {
             saveSettings();
             if (settings.enabled) {
                 createPanel();
@@ -3488,15 +3692,20 @@ jQuery(async () => {
 
         // Style {{COMMAND}} tags + hide [sms] and [contacts] tags in rendered messages
         eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, (mesId) => {
+            if (!settings.enabled) return;
             styleCommandsInMessage(mesId);
             hideSmsTagsInDom(mesId);
             hideContactsTagsInDom(mesId);
             hideQuestTagsInDom(mesId);
         });
-        eventSource.on(event_types.USER_MESSAGE_RENDERED, styleCommandsInMessage);
+        eventSource.on(event_types.USER_MESSAGE_RENDERED, (mesId) => {
+            if (!settings.enabled) return;
+            styleCommandsInMessage(mesId);
+        });
 
         // ── Live reply capture: parse [sms] + [contacts] from character response ──
         eventSource.on(event_types.MESSAGE_RECEIVED, () => {
+            if (!settings.enabled) return;
             const freshCtx = getContext();
             const chat = freshCtx.chat || [];
             if (!chat.length) return;
@@ -3546,7 +3755,9 @@ jQuery(async () => {
                         } else if (currentContactName) {
                             targetContact = currentContactName;
                         } else {
-                            targetContact = allContacts.length ? allContacts[0].name : null;
+                            // No reliable target — drop rather than mis-route to the first contact.
+                            console.log(`[${EXT}] Skipping [sms] with no from/to and no current chat`);
+                            continue;
                         }
                     }
 
@@ -3615,10 +3826,14 @@ jQuery(async () => {
             if (shouldRebuild && phoneContainer && !document.getElementById('cx-panel-wrapper')?.classList.contains('cx-hidden')) {
                 rebuildPhone();
             }
+
+            // Throttle [status] / [quests] re-injection to every N turns (Phase 2).
+            applyInjectionThrottle();
         });
 
         // ── Swipe/regeneration handling: remove stale phone messages ──
         eventSource.on(event_types.MESSAGE_SWIPED, (mesId) => {
+            if (!settings.enabled) return;
             removeMessagesForMesId(mesId);
             removePrivatePhoneEventsForMesId(mesId);
             // Re-render current chat if open
@@ -3627,11 +3842,14 @@ jQuery(async () => {
                 renderAllBubbles(area, currentContactName, false);
             }
         });
-        eventSource.on(event_types.MESSAGE_DELETED, () => {
-            // On delete, the mesId is chat.length (post-delete), so the deleted
-            // message was at chat.length. Clean up and re-render.
+        eventSource.on(event_types.MESSAGE_DELETED, (deletedMesId) => {
+            if (!settings.enabled) return;
+            // Prefer the event's mesId argument (ST emits the deleted index); fall back
+            // to chat.length for older ST builds that don't pass it.
             const freshCtx = getContext();
-            const deletedId = (freshCtx.chat || []).length; // this was the deleted index
+            const deletedId = Number.isFinite(Number(deletedMesId))
+                ? Number(deletedMesId)
+                : (freshCtx.chat || []).length;
             removeMessagesForMesId(deletedId);
             removePrivatePhoneEventsForMesId(deletedId);
             const area = phoneContainer?.querySelector('#cx-msg-area');
@@ -3642,10 +3860,13 @@ jQuery(async () => {
 
         // Chat changed — reset state
         eventSource.on(event_types.CHAT_CHANGED, () => {
+            if (!settings.enabled) return;
             currentContactName = null;
             currentApp = null;
             awaitingReply = false;
             commandMode = null;
+            _turnCounter = 0;
+            invalidateContactCaches();
             clearSmsPrompt();
             clearTypingIndicator();
             // Re-inject contacts prompt for new chat
@@ -3662,7 +3883,7 @@ jQuery(async () => {
             if (settings.autoDetectNpcs !== false) injectContactsPrompt();
             injectQuestPrompt();
         }
-        console.log(`[${EXT}] v0.10.0 Loaded OK`);
+        console.log(`[${EXT}] v${VERSION} Loaded OK`);
     } catch (err) {
         console.error(`[${EXT}] INIT FAILED:`, err);
     }

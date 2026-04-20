@@ -118,8 +118,31 @@ LLM responds with narration + [sms] tags + [status] tags
         ↓
 Extension extracts [sms] → phone bubbles
 Extension extracts [status] → NPC profile data
+Extension extracts [quests] → quest tracker updates
 ST chat shows narration with subtle 📱 indicators
 ```
+
+### Private Polling
+
+The **Check Messages** button in the Command-X app fires a background LLM prompt asking *"would any of your contacts text you right now?"* — completely out of band (no ST chat message is created). If the LLM decides a contact would message you, it responds with `[sms]` blocks that land directly in the phone's inbox.
+
+Requirements:
+- A SillyTavern build that exposes `generateQuietPrompt()` (v1.12.10+)
+- **Private hybrid texts** enabled in the in-phone Settings app
+
+### OpenClaw Operate Mode
+
+The OpenClaw app connects to an optional `openclaw-bridge` backend plugin and offers three escalating modes:
+
+| Mode | What it does |
+|------|-------------|
+| **Observe** | Sends the current ST chat context to OpenClaw for read-only analysis |
+| **Assist** | OpenClaw responds with advice, plans, or narrative suggestions (streamed into the console) |
+| **Operate** | OpenClaw proposes a list of SillyTavern slash commands (`/echo`, `/setvar`, etc.); you see each proposed action as an **Approve / Reject** card before anything runs |
+
+The operate approval loop ensures no side-effects happen without user confirmation. Each approved action is executed locally via SillyTavern's slash-command runner.
+
+The **OpenClaw** app requires the `openclaw-bridge` server plugin. The Command-X repo ships the phone UI only; the backend is a separate component.
 
 ### Tag Reference
 
