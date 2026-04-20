@@ -23,7 +23,7 @@ const INJECT_KEY = 'command-x-sms';
 const INJECT_KEY_CONTACTS = 'command-x-contacts';
 const INJECT_KEY_PRIVATE_PHONE = 'command-x-private-phone';
 const INJECT_KEY_QUESTS = 'command-x-quests';
-const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true, manualHybridPrivateTexts: true, openclawMode: 'assist', contactsInjectEveryN: 1, questsInjectEveryN: 1 };
+const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true, manualHybridPrivateTexts: true, openclawMode: 'assist', contactsInjectEveryN: 1, questsInjectEveryN: 1, autoPrivatePollEveryN: 0 };
 const MAX_AVATAR_FILE_BYTES = 8 * 1024 * 1024; // 8 MB hard cap on raw upload size
 const AWAIT_TIMEOUT_MS = 30_000;             // ms before awaitingReply auto-clears
 const CLOCK_INTERVAL_MS = 30_000;            // clock display refresh interval
@@ -674,6 +674,70 @@ function saveNpcs(npcs) {
     catch (e) { console.warn('[command-x] npc store save', e); }
 }
 
+/* ── Global avatar store (persists across chats, keyed by normalized name) ── */
+const GLOBAL_AVATAR_STORE_KEY = 'cx-global-avatars';
+const GLOBAL_AVATAR_MAX_ENTRIES = 50;
+const GLOBAL_AVATAR_MAX_DATA_URL_SIZE = 100 * 1024; // 100 KB
+
+let _globalAvatarCache = null; // in-memory cache; null = not yet loaded
+
+function _isAvatarUrlOversized(url) {
+    return typeof url === 'string' && url.startsWith('data:') && url.length > GLOBAL_AVATAR_MAX_DATA_URL_SIZE;
+}
+
+function loadGlobalAvatars() {
+    if (_globalAvatarCache) return _globalAvatarCache;
+    try {
+        const raw = JSON.parse(localStorage.getItem(GLOBAL_AVATAR_STORE_KEY) || '{}');
+        const entries = {};
+        for (const [key, value] of Object.entries(raw)) {
+            if (!key) continue;
+            // Support both old flat {key: url} format and new {key: {url, lastUsed}} format.
+            // Legacy entries get Date.now() so they aren't evicted before newly written ones.
+            if (typeof value === 'string') {
+                if (!_isAvatarUrlOversized(value)) entries[key] = { url: value, lastUsed: Date.now() };
+            } else if (value && typeof value.url === 'string' && !_isAvatarUrlOversized(value.url)) {
+                entries[key] = { url: value.url, lastUsed: Number.isFinite(value.lastUsed) ? value.lastUsed : Date.now() };
+            }
+        }
+        _globalAvatarCache = entries;
+    } catch {
+        _globalAvatarCache = {};
+    }
+    return _globalAvatarCache;
+}
+
+function saveGlobalAvatars(entries) {
+    // Trim to max entries by LRU (most recently used kept)
+    let sorted = Object.entries(entries).sort((a, b) => (b[1].lastUsed || 0) - (a[1].lastUsed || 0));
+    if (sorted.length > GLOBAL_AVATAR_MAX_ENTRIES) sorted = sorted.slice(0, GLOBAL_AVATAR_MAX_ENTRIES);
+    const trimmed = Object.fromEntries(sorted);
+    _globalAvatarCache = trimmed;
+    try { localStorage.setItem(GLOBAL_AVATAR_STORE_KEY, JSON.stringify(trimmed)); }
+    catch (e) { console.warn('[command-x] global avatar save', e); }
+}
+
+function getGlobalAvatar(name) {
+    if (!name) return null;
+    const entries = loadGlobalAvatars();
+    const key = normalizeContactName(name);
+    const entry = entries[key];
+    if (!entry?.url) return null;
+    return entry.url;
+}
+
+function setGlobalAvatar(name, url) {
+    if (!name) return;
+    const entries = loadGlobalAvatars();
+    const key = normalizeContactName(name);
+    if (url && !_isAvatarUrlOversized(url)) {
+        entries[key] = { url, lastUsed: Date.now() };
+    } else {
+        delete entries[key];
+    }
+    saveGlobalAvatars(entries);
+}
+
 function sanitizeContactValue(field, value) {
     if (field === 'emoji') return String(value || '').trim() || '🧑';
     if (field === 'status') {
@@ -755,6 +819,7 @@ function mergeStoredContactRecord(existing = {}, incoming = {}, options = {}) {
 function mergeNpcs(incoming) {
     if (!incoming || !incoming.length) return;
     const stored = loadNpcs();
+    const avatarUpdates = {};
     for (const npc of incoming) {
         const idx = findStoredNpcIndexByName(npc.name, stored);
         if (idx >= 0) {
@@ -762,8 +827,18 @@ function mergeNpcs(incoming) {
         } else {
             stored.push({ ...npc, manualOverrides: { ...(npc.manualOverrides || {}) } });
         }
+        if (npc.avatarUrl) avatarUpdates[normalizeContactName(npc.name)] = npc.avatarUrl;
     }
     saveNpcs(stored);
+    // Batch: apply all avatar updates in a single load+save
+    if (Object.keys(avatarUpdates).length) {
+        const entries = loadGlobalAvatars();
+        const now = Date.now();
+        for (const [key, url] of Object.entries(avatarUpdates)) {
+            if (!_isAvatarUrlOversized(url)) entries[key] = { url, lastUsed: now };
+        }
+        saveGlobalAvatars(entries);
+    }
 }
 
 /** Hide [contacts] tags in rendered ST chat DOM */
@@ -1164,6 +1239,11 @@ function applyInjectionThrottle() {
     }
     if (_turnCounter % questsN === 0) injectQuestPrompt();
     else if (questsN > 1) clearQuestPrompt();
+
+    const pollN = Math.floor(Number(settings.autoPrivatePollEveryN) || 0);
+    if (pollN > 0 && _turnCounter % pollN === 0) {
+        pollPrivateMessages({ silent: true }).catch(e => console.warn(`[${EXT}] Auto private poll error`, e));
+    }
 }
 
 function hideQuestTagsInDom(mesId) {
@@ -1202,7 +1282,7 @@ function renderQuestSubtasks(quest) {
             <div class="cx-quest-subtasks">
                 ${subtasks.map(item => `
                     <button type="button" class="cx-quest-subtask ${item.done ? 'done' : ''}" data-cx-quest-subtask="${escAttr(quest.id)}" data-cx-subtask-id="${escAttr(item.id)}">
-                        <span>${item.done ? '☑' : '☐'}</span>
+                        <span class="cx-quest-checkbox${item.done ? ' done' : ''}"></span>
                         <strong>${escHtml(item.text)}</strong>
                     </button>
                 `).join('')}
@@ -2104,7 +2184,7 @@ function getContactsFromContext() {
                 location: null,
                 relationship: null,
                 thoughts: null,
-                avatarUrl: thumbUrl || null,
+                avatarUrl: thumbUrl || npcData.avatarUrl || getGlobalAvatar(c.name) || null,
                 isManual: !!npcData.isManual,
                 manualOverrides: { ...(npcData.manualOverrides || {}) },
             };
@@ -2129,7 +2209,7 @@ function getContactsFromContext() {
                 location: npc.location || null,
                 relationship: npc.relationship || null,
                 thoughts: npc.thoughts || null,
-                avatarUrl: npc.avatarUrl || null,
+                avatarUrl: npc.avatarUrl || getGlobalAvatar(npc.name) || null,
                 isManual: !!npc.isManual,
                 manualOverrides: { ...(npc.manualOverrides || {}) },
             };
@@ -2139,7 +2219,7 @@ function getContactsFromContext() {
                 merged.name = existing.name || npc.name;
                 merged.isNpc = false;
                 merged.online = existing.online;
-                merged.avatarUrl = existing.avatarUrl || npc.avatarUrl || null;
+                merged.avatarUrl = existing.avatarUrl || npc.avatarUrl || getGlobalAvatar(npc.name) || null;
                 deduped.set(key, merged);
                 return;
             }
@@ -2266,28 +2346,31 @@ function parsePrivatePhoneGeneration(raw) {
         .slice(0, 3);
 }
 
-async function pollPrivateMessages() {
+async function pollPrivateMessages(options = {}) {
     if (privatePollInFlight) return;
+    const silent = !!options.silent;
     if (settings.manualHybridPrivateTexts === false) {
-        showToast('Command-X', 'Private polling is disabled in settings.');
+        if (!silent) showToast('Command-X', 'Private polling is disabled in settings.');
         return;
     }
     const ctx = getContext();
     if (typeof ctx.generateQuietPrompt !== 'function') {
-        await cxAlert('This SillyTavern build does not expose generateQuietPrompt() for private polling.');
+        if (!silent) await cxAlert('This SillyTavern build does not expose generateQuietPrompt() for private polling.');
         return;
     }
     const contacts = getKnownContactsForPrivateMessaging();
     if (!contacts.length) {
-        await cxAlert('No known contacts are available to poll yet.');
+        if (!silent) await cxAlert('No known contacts are available to poll yet.');
         return;
     }
 
     privatePollInFlight = true;
     const button = phoneContainer?.querySelector('#cx-check-private');
     const status = phoneContainer?.querySelector('#cx-private-status');
-    if (button) button.disabled = true;
-    if (status) status.textContent = 'Checking private messages…';
+    if (!silent) {
+        if (button) button.disabled = true;
+        if (status) status.textContent = 'Checking private messages…';
+    }
 
     try {
         const raw = await ctx.generateQuietPrompt({
@@ -2308,21 +2391,21 @@ async function pollPrivateMessages() {
                 && phoneContainer
                 && !document.getElementById('cx-panel-wrapper')?.classList.contains('cx-hidden');
             if (!isViewingThis) incrementUnread(event.from);
-            showToast(event.from, event.text);
+            if (!silent) showToast(event.from, event.text);
         }
 
         const area = phoneContainer?.querySelector('#cx-msg-area');
         if (area && currentContactName) renderAllBubbles(area, currentContactName, false);
         updateUnreadBadges();
 
-        if (status) status.textContent = events.length
+        if (status && !silent) status.textContent = events.length
             ? `Found ${events.length} private message${events.length === 1 ? '' : 's'}.`
             : 'No new private messages.';
     } catch (error) {
         console.error(`[${EXT}] Private message poll failed`, error);
-        if (status) status.textContent = `Private check failed: ${error?.message || error}`;
+        if (status && !silent) status.textContent = `Private check failed: ${error?.message || error}`;
     } finally {
-        if (button) button.disabled = false;
+        if (!silent && button) button.disabled = false;
         privatePollInFlight = false;
     }
 }
@@ -2460,6 +2543,7 @@ function upsertStoredContact(contact, options = {}) {
     if (existingIdx >= 0) stored[existingIdx] = { ...stored[existingIdx], ...clean, isManual: true };
     else stored.push(clean);
     saveNpcs(stored);
+    if (clean.avatarUrl) setGlobalAvatar(clean.name, clean.avatarUrl);
 
     if (options.oldName && normalizeContactName(options.oldName) !== targetName) renameContactThread(options.oldName, clean.name);
     return clean;
@@ -2952,6 +3036,10 @@ function buildPhone() {
                     <span class="cx-settings-label">Manual Hybrid Private Texts</span>
                     <label class="cx-toggle"><input type="checkbox" id="cx-set-private-hybrid" ${settings.manualHybridPrivateTexts !== false ? 'checked' : ''}><span class="cx-toggle-slider"></span></label>
                 </div>
+                <div class="cx-settings-row">
+                    <span class="cx-settings-label">Auto-poll private messages every N turns (0 = off)</span>
+                    <input type="number" id="cx-set-auto-poll-n" class="cx-settings-number-input" min="0" max="20" step="1" value="${Math.max(0, Number(settings.autoPrivatePollEveryN) || 0)}" />
+                </div>
                 <div class="cx-settings-row cx-settings-btn-row">
                     <button class="cx-settings-btn" id="cx-set-add-contact">Add Contact</button>
                     <button class="cx-settings-btn cx-settings-btn-danger" id="cx-set-clear-npcs">Clear All NPC Data</button>
@@ -3283,6 +3371,11 @@ function wirePhone() {
         saveSettings();
         refreshPrivatePhonePrompt();
         rebuildPhone();
+    });
+    phoneContainer.querySelector('#cx-set-auto-poll-n')?.addEventListener('change', (e) => {
+        const val = Math.max(0, Math.floor(Number(e.target.value) || 0));
+        settings.autoPrivatePollEveryN = val;
+        saveSettings();
     });
     phoneContainer.querySelector('#cx-set-lock')?.addEventListener('change', (e) => {
         settings.showLockscreen = e.target.checked;
@@ -3693,6 +3786,8 @@ function loadSettings() {
     if (contactsN) contactsN.value = Math.max(1, Number(settings.contactsInjectEveryN) || 1);
     const questsN = document.getElementById('cx_ext_quests_every_n');
     if (questsN) questsN.value = Math.max(1, Number(settings.questsInjectEveryN) || 1);
+    const autoPollN = document.getElementById('cx_ext_auto_private_poll_n');
+    if (autoPollN) autoPollN.value = Math.max(0, Number(settings.autoPrivatePollEveryN) || 0);
 }
 
 function saveSettings() {
@@ -3707,6 +3802,9 @@ function saveSettings() {
     settings.contactsInjectEveryN = Number.isFinite(contactsNRaw) && contactsNRaw >= 1 ? Math.floor(contactsNRaw) : (settings.contactsInjectEveryN || 1);
     const questsNRaw = Number(document.getElementById('cx_ext_quests_every_n')?.value);
     settings.questsInjectEveryN = Number.isFinite(questsNRaw) && questsNRaw >= 1 ? Math.floor(questsNRaw) : (settings.questsInjectEveryN || 1);
+    // cx_ext_auto_private_poll_n = ST settings panel; cx-set-auto-poll-n = in-phone settings view
+    const autoPollNRaw = Number(document.getElementById('cx_ext_auto_private_poll_n')?.value ?? document.getElementById('cx-set-auto-poll-n')?.value);
+    settings.autoPrivatePollEveryN = Number.isFinite(autoPollNRaw) && autoPollNRaw >= 0 ? Math.floor(autoPollNRaw) : (settings.autoPrivatePollEveryN || 0);
     const ctx = getContext();
     ctx.extensionSettings[EXT] = { ...settings };
     ctx.saveSettingsDebounced();
@@ -3727,7 +3825,7 @@ jQuery(async () => {
 
         loadSettings();
         refreshPrivatePhonePrompt();
-        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_openclaw_mode, #cx_ext_contacts_every_n, #cx_ext_quests_every_n').on('change', () => {
+        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_openclaw_mode, #cx_ext_contacts_every_n, #cx_ext_quests_every_n, #cx_ext_auto_private_poll_n').on('change', () => {
             saveSettings();
             if (settings.enabled) {
                 createPanel();
