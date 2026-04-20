@@ -26,6 +26,7 @@ const INJECT_KEY_QUESTS = 'command-x-quests';
 const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true, manualHybridPrivateTexts: true, openclawMode: 'assist', contactsInjectEveryN: 1, questsInjectEveryN: 1 };
 const MAX_AVATAR_FILE_BYTES = 8 * 1024 * 1024; // 8 MB hard cap on raw upload size
 const AWAIT_TIMEOUT_MS = 30_000;             // ms before awaitingReply auto-clears
+const CLOCK_INTERVAL_MS = 30_000;            // clock display refresh interval
 const MESSAGE_HISTORY_CAP = 200;             // max messages stored per contact
 const QUEST_HISTORY_CAP = 150;              // max quests stored
 const TOAST_DURATION_MS = 4_000;            // toast auto-dismiss duration
@@ -1470,7 +1471,7 @@ async function saveQuestEditor() {
     };
 
     if (!draft.title) {
-        alert('Quest title is required.');
+        await cxAlert('Quest title is required.', 'Quest Editor');
         return;
     }
 
@@ -1492,7 +1493,7 @@ async function saveQuestEditor() {
         switchView('quests');
         showToast(saved.title, wasNew ? 'Quest added.' : 'Quest updated.');
     } catch (error) {
-        alert(String(error?.message || error));
+        await cxAlert(String(error?.message || error), 'Quest Error');
     }
 }
 
@@ -1879,6 +1880,9 @@ function showToast(contactName, text) {
     const toast = document.createElement('div');
     toast.id = 'cx-toast';
     toast.className = 'cx-toast cx-toast-show';
+    toast.setAttribute('role', 'status');
+    toast.setAttribute('aria-live', 'polite');
+    toast.setAttribute('aria-label', `New message from ${contactName}`);
     toast.innerHTML = `<div class="cx-toast-icon">📱</div><div class="cx-toast-body"><div class="cx-toast-name">${escHtml(contactName)}</div><div class="cx-toast-text">${escHtml(preview)}</div></div>`;
     toast.addEventListener('click', () => {
         toast.remove();
@@ -1893,8 +1897,84 @@ function showToast(contactName, text) {
         }
     });
     document.body.appendChild(toast);
-    // Auto-dismiss after 4s
-    setTimeout(() => { toast.classList.remove('cx-toast-show'); setTimeout(() => toast.remove(), 400); }, TOAST_DURATION_MS);
+
+    // Auto-dismiss with pause-on-hover
+    let remainingMs = TOAST_DURATION_MS;
+    let startedAt = Date.now();
+    let dismissTimer = null;
+    const dismiss = () => {
+        toast.classList.remove('cx-toast-show');
+        setTimeout(() => toast.remove(), 400);
+    };
+    const armDismiss = (ms) => {
+        if (dismissTimer) clearTimeout(dismissTimer);
+        dismissTimer = setTimeout(dismiss, ms);
+    };
+    toast.addEventListener('mouseenter', () => {
+        if (dismissTimer) { clearTimeout(dismissTimer); dismissTimer = null; }
+        remainingMs = Math.max(0, remainingMs - (Date.now() - startedAt));
+    });
+    toast.addEventListener('mouseleave', () => {
+        startedAt = Date.now();
+        armDismiss(remainingMs);
+    });
+    armDismiss(TOAST_DURATION_MS);
+
+    // Dismiss on Esc key
+    const onKey = (e) => { if (e.key === 'Escape') { dismiss(); document.removeEventListener('keydown', onKey); } };
+    document.addEventListener('keydown', onKey);
+}
+
+/**
+ * Styled in-phone alert (replaces native alert()).
+ * Returns a Promise that resolves when the user clicks OK.
+ */
+function cxAlert(message, title = 'Command-X') {
+    return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'cx-modal-overlay';
+        overlay.innerHTML = `
+        <div class="cx-modal-box" role="alertdialog" aria-modal="true" aria-labelledby="cx-modal-title" aria-describedby="cx-modal-body">
+            <div class="cx-modal-title" id="cx-modal-title">${escHtml(title)}</div>
+            <div class="cx-modal-body" id="cx-modal-body">${escHtml(message)}</div>
+            <div class="cx-modal-actions">
+                <button class="cx-modal-btn cx-modal-btn-primary" id="cx-modal-ok" autofocus>OK</button>
+            </div>
+        </div>`;
+        const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); resolve(); };
+        const onKey = (e) => { if (e.key === 'Escape' || e.key === 'Enter') close(); };
+        overlay.querySelector('#cx-modal-ok').addEventListener('click', close);
+        document.addEventListener('keydown', onKey);
+        document.body.appendChild(overlay);
+        overlay.querySelector('#cx-modal-ok').focus();
+    });
+}
+
+/**
+ * Styled in-phone confirm dialog (replaces native confirm()).
+ * Returns a Promise<boolean> — true if user confirms, false if cancelled.
+ */
+function cxConfirm(message, title = 'Are you sure?', { confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = false } = {}) {
+    return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'cx-modal-overlay';
+        overlay.innerHTML = `
+        <div class="cx-modal-box" role="alertdialog" aria-modal="true" aria-labelledby="cx-modal-title" aria-describedby="cx-modal-body">
+            <div class="cx-modal-title" id="cx-modal-title">${escHtml(title)}</div>
+            <div class="cx-modal-body" id="cx-modal-body">${escHtml(message)}</div>
+            <div class="cx-modal-actions">
+                <button class="cx-modal-btn cx-modal-btn-secondary" id="cx-modal-cancel">${escHtml(cancelLabel)}</button>
+                <button class="cx-modal-btn ${danger ? 'cx-modal-btn-danger' : 'cx-modal-btn-primary'}" id="cx-modal-confirm" autofocus>${escHtml(confirmLabel)}</button>
+            </div>
+        </div>`;
+        const close = (result) => { overlay.remove(); document.removeEventListener('keydown', onKey); resolve(result); };
+        const onKey = (e) => { if (e.key === 'Escape') close(false); else if (e.key === 'Enter') close(true); };
+        overlay.querySelector('#cx-modal-cancel').addEventListener('click', () => close(false));
+        overlay.querySelector('#cx-modal-confirm').addEventListener('click', () => close(true));
+        document.addEventListener('keydown', onKey);
+        document.body.appendChild(overlay);
+        overlay.querySelector('#cx-modal-confirm').focus();
+    });
 }
 
 function markRead(contactName) {
@@ -2181,12 +2261,12 @@ async function pollPrivateMessages() {
     }
     const ctx = getContext();
     if (typeof ctx.generateQuietPrompt !== 'function') {
-        alert('This SillyTavern build does not expose generateQuietPrompt() for private polling.');
+        await cxAlert('This SillyTavern build does not expose generateQuietPrompt() for private polling.');
         return;
     }
     const contacts = getKnownContactsForPrivateMessaging();
     if (!contacts.length) {
-        alert('No known contacts are available to poll yet.');
+        await cxAlert('No known contacts are available to poll yet.');
         return;
     }
 
@@ -2425,7 +2505,7 @@ function saveProfileEditor() {
     };
 
     if (!draft.name) {
-        alert('Contact name is required.');
+        await cxAlert('Contact name is required.', 'Contact Editor');
         return;
     }
 
@@ -2437,7 +2517,7 @@ function saveProfileEditor() {
         switchView('profiles');
         showToast(saved.name, wasNew ? 'Contact added.' : 'Profile updated.');
     } catch (error) {
-        alert(String(error?.message || error));
+        await cxAlert(String(error?.message || error), 'Contact Error');
     }
 }
 
@@ -2472,7 +2552,7 @@ function triggerAvatarPicker(contactName) {
             switchView('profiles');
             showToast(existing.name, 'Avatar updated.');
         } catch (error) {
-            alert(String(error?.message || error));
+            await cxAlert(String(error?.message || error), 'Avatar Error');
         } finally {
             input.remove();
         }
@@ -2480,13 +2560,13 @@ function triggerAvatarPicker(contactName) {
     input.click();
 }
 
-function promptDeleteContact(contactName) {
+async function promptDeleteContact(contactName) {
     const contact = getEditableContact(contactName);
     if (!contact?.isNpc) {
-        alert('Only manual/NPC contacts can be deleted from Command-X.');
+        await cxAlert('Only manual/NPC contacts can be deleted from Command-X.');
         return;
     }
-    if (!confirm(`Delete ${contactName} from Command-X contacts for this chat?`)) return;
+    if (!await cxConfirm(`Delete ${contactName} from Command-X contacts for this chat?`, 'Delete Contact', { confirmLabel: 'Delete', danger: true })) return;
     deleteStoredContact(contactName);
     rebuildPhone();
     switchView('profiles');
@@ -2509,6 +2589,13 @@ async function sendToChat(text, contactName, isCommand) {
         textarea.dispatchEvent(new Event('input', { bubbles: true }));
         const sendBtn = document.querySelector('#send_but');
         if (sendBtn) sendBtn.click();
+    }
+    // Disable the in-phone send button while we're awaiting a reply to prevent
+    // double-send. It is re-enabled in clearTypingIndicator() + the AWAIT timeout.
+    const inPhoneSend = phoneContainer?.querySelector('#cx-send');
+    if (inPhoneSend) {
+        inPhoneSend.disabled = true;
+        inPhoneSend.setAttribute('aria-disabled', 'true');
     }
 }
 
@@ -2623,7 +2710,7 @@ function contactRowHTML(c, i, app) {
     const npcBadge = c.isNpc ? '<span class="cx-npc-badge">NPC</span>' : '';
 
     return `
-    <div class="cx-contact-row" data-idx="${i}" data-app="${app}" data-cid="${escAttr(c.id)}" data-cname="${escAttr(c.name)}">
+    <div class="cx-contact-row" role="button" tabindex="0" aria-label="Open chat with ${escAttr(c.name)}" data-idx="${i}" data-app="${app}" data-cid="${escAttr(c.id)}" data-cname="${escAttr(c.name)}">
         ${avatarHTML(c)}
         <div class="cx-contact-info">
             <div class="cx-contact-name">${escHtml(c.name)} ${npcBadge}</div>
@@ -2658,12 +2745,12 @@ function buildPhone() {
             <div class="cx-lock-time">${now()}</div>
             <div class="cx-lock-date">${today()}</div>
             ${hasContacts ? `
-            <div class="cx-notif" data-goto="cmdx">
+            <div class="cx-notif" data-goto="cmdx" role="button" tabindex="0" aria-label="Open Command-X — neural link active">
                 <div class="cx-notif-app">COMMAND-X</div>
                 <div class="cx-notif-title">Neural Link Active</div>
                 <div class="cx-notif-body">${contacts.length} contact${contacts.length > 1 ? 's' : ''} synced. Tap to open.</div>
             </div>` : ''}
-            <div class="cx-lock-hint" data-action="unlock">Tap to unlock</div>
+            <div class="cx-lock-hint" data-action="unlock" role="button" tabindex="0" aria-label="Unlock phone">Tap to unlock</div>
         </div>
 
         <!-- Home Screen -->
@@ -2671,23 +2758,23 @@ function buildPhone() {
             <div class="cx-home-time">${now()}</div>
             <div class="cx-home-date">${today()}</div>
             <div class="cx-app-grid">
-                <div class="cx-app-icon" data-app="cmdx">
+                <div class="cx-app-icon" data-app="cmdx" role="button" tabindex="0" aria-label="Open Command-X app">
                     <div class="cx-icon-img cx-icon-cmdx">⚡</div>
                     <div class="cx-icon-label">Command-X</div>
                 </div>
-                <div class="cx-app-icon" data-app="profiles">
+                <div class="cx-app-icon" data-app="profiles" role="button" tabindex="0" aria-label="Open Profiles app">
                     <div class="cx-icon-img cx-icon-profiles">🔍</div>
                     <div class="cx-icon-label">Profiles</div>
                 </div>
-                <div class="cx-app-icon" data-app="quests">
+                <div class="cx-app-icon" data-app="quests" role="button" tabindex="0" aria-label="Open Quests app">
                     <div class="cx-icon-img cx-icon-quests">🗺️</div>
                     <div class="cx-icon-label">Quests${activeQuestCount ? ` (${activeQuestCount})` : ''}</div>
                 </div>
-                <div class="cx-app-icon" data-app="openclaw">
+                <div class="cx-app-icon" data-app="openclaw" role="button" tabindex="0" aria-label="Open OpenClaw app">
                     <div class="cx-icon-img cx-icon-openclaw">🦞</div>
                     <div class="cx-icon-label">OpenClaw</div>
                 </div>
-                <div class="cx-app-icon" data-app="phone-settings">
+                <div class="cx-app-icon" data-app="phone-settings" role="button" tabindex="0" aria-label="Open Settings">
                     <div class="cx-icon-img cx-icon-settings">⚙️</div>
                     <div class="cx-icon-label">Settings</div>
                 </div>
@@ -2710,7 +2797,7 @@ function buildPhone() {
             </div>
             <div class="cx-navbar">
                 <div class="cx-nav active"><div class="cx-nav-ico">💬</div><div class="cx-nav-lbl">Chats</div></div>
-                <div class="cx-nav" data-goto="home"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
+                <div class="cx-nav" data-goto="home" role="button" tabindex="0" aria-label="Go to home screen"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
             </div>
         </div>
 
@@ -2725,7 +2812,7 @@ function buildPhone() {
             </div>
             <div class="cx-profiles-list">
                 ${hasContacts ? contacts.map(c => `
-                <div class="cx-profile-card" data-pname="${escAttr(c.name)}">
+                <div class="cx-profile-card" role="region" aria-label="Profile: ${escAttr(c.name)}" data-pname="${escAttr(c.name)}">
                     <div class="cx-profile-top">
                         ${avatarHTML(c, 'cx-avatar-lg')}
                         <div class="cx-profile-name-col">
@@ -2748,7 +2835,7 @@ function buildPhone() {
             </div>
             <div class="cx-navbar">
                 <div class="cx-nav active"><div class="cx-nav-ico">🔍</div><div class="cx-nav-lbl">Profiles</div></div>
-                <div class="cx-nav" data-goto="home"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
+                <div class="cx-nav" data-goto="home" role="button" tabindex="0" aria-label="Go to home screen"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
             </div>
         </div>
 
@@ -2771,7 +2858,7 @@ function buildPhone() {
             </div>
             <div class="cx-navbar">
                 <div class="cx-nav active"><div class="cx-nav-ico">🗺️</div><div class="cx-nav-lbl">Quests</div></div>
-                <div class="cx-nav" data-goto="home"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
+                <div class="cx-nav" data-goto="home" role="button" tabindex="0" aria-label="Go to home screen"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
             </div>
         </div>
 
@@ -2816,7 +2903,7 @@ function buildPhone() {
             </div>
             <div class="cx-navbar">
                 <div class="cx-nav active"><div class="cx-nav-ico">⚙️</div><div class="cx-nav-lbl">Settings</div></div>
-                <div class="cx-nav" data-goto="home"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
+                <div class="cx-nav" data-goto="home" role="button" tabindex="0" aria-label="Go to home screen"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
             </div>
         </div>
 
@@ -2871,7 +2958,7 @@ function buildPhone() {
             </div>
             <div class="cx-navbar">
                 <div class="cx-nav active"><div class="cx-nav-ico">🦞</div><div class="cx-nav-lbl">OpenClaw</div></div>
-                <div class="cx-nav" data-goto="home"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
+                <div class="cx-nav" data-goto="home" role="button" tabindex="0" aria-label="Go to home screen"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
             </div>
         </div>
 
@@ -2879,13 +2966,13 @@ function buildPhone() {
         <!-- Chat View -->
         <div class="cx-view" data-view="chat">
             <div class="cx-chat-header">
-                <div class="cx-chat-back" id="cx-back">‹</div>
+                <div class="cx-chat-back" id="cx-back" role="button" tabindex="0" aria-label="Back">‹</div>
                 <div class="cx-chat-header-info">
                     <div class="cx-chat-header-name" id="cx-chat-name"></div>
                     <div class="cx-chat-header-status" id="cx-chat-status"></div>
                 </div>
-                <div class="cx-neural-toggle" id="cx-neural-toggle" title="Toggle neural commands">⚡</div>
-                <div class="cx-batch-toggle ${settings.batchMode ? 'cx-batch-active' : ''}" id="cx-batch-toggle" title="Toggle batch mode (queue texts)">📋</div>
+                <div class="cx-neural-toggle" id="cx-neural-toggle" role="button" tabindex="0" aria-pressed="false" aria-label="Toggle neural commands" title="Toggle neural commands">⚡</div>
+                <div class="cx-batch-toggle ${settings.batchMode ? 'cx-batch-active' : ''}" id="cx-batch-toggle" role="button" tabindex="0" aria-pressed="${settings.batchMode}" aria-label="Toggle batch mode" title="Toggle batch mode (queue texts)">📋</div>
             </div>
             <div class="cx-messages" id="cx-msg-area"></div>
             <div class="cx-cmd-drawer cx-hidden" id="cx-cmd-drawer">
@@ -2993,6 +3080,12 @@ function openChat(contactName, app, preserveState = false) {
 function clearTypingIndicator() {
     if (typingTimeout) { clearTimeout(typingTimeout); typingTimeout = null; }
     phoneContainer?.querySelector('#cx-typing-indicator')?.remove();
+    // Re-enable the send button once the LLM has replied (or timed out)
+    const inPhoneSend = phoneContainer?.querySelector('#cx-send');
+    if (inPhoneSend) {
+        inPhoneSend.disabled = false;
+        inPhoneSend.removeAttribute('aria-disabled');
+    }
 }
 
 function sendPhoneMessage() {
@@ -3133,8 +3226,8 @@ function wirePhone() {
     phoneContainer.querySelector('#cx-set-add-contact')?.addEventListener('click', () => { openProfileEditor(); });
     phoneContainer.querySelector('#cx-add-quest')?.addEventListener('click', () => { openQuestEditor(); });
     phoneContainer.querySelector('#cx-check-private')?.addEventListener('click', () => { pollPrivateMessages().catch(error => console.error(`[${EXT}] Private poll click failed`, error)); });
-    phoneContainer.querySelector('#cx-set-clear-npcs')?.addEventListener('click', () => {
-        if (confirm('Clear all NPC contacts for this chat?')) {
+    phoneContainer.querySelector('#cx-set-clear-npcs')?.addEventListener('click', async () => {
+        if (await cxConfirm('Clear all NPC contacts for this chat?', 'Clear Contacts', { confirmLabel: 'Clear All', danger: true })) {
             saveNpcs([]);
             rebuildPhone();
         }
@@ -3204,7 +3297,7 @@ function wirePhone() {
     phoneContainer.querySelector('#cx-quest-cancel-footer')?.addEventListener('click', closeQuestEditor);
     phoneContainer.querySelector('#cx-quest-form')?.addEventListener('submit', (event) => {
         event.preventDefault();
-saveQuestEditor().catch(error => alert(String(error?.message || error)));
+saveQuestEditor().catch(error => cxAlert(String(error?.message || error), 'Quest Error'));
     });
     phoneContainer.querySelector('#cx-quest-editor-backdrop')?.addEventListener('click', (event) => {
         if (event.target?.id === 'cx-quest-editor-backdrop') closeQuestEditor();
@@ -3260,7 +3353,7 @@ saveQuestEditor().catch(error => alert(String(error?.message || error)));
             try {
                 await enhanceQuestById(btn.dataset.cxQuestEnhance);
             } catch (error) {
-                alert(String(error?.message || error));
+                await cxAlert(String(error?.message || error), 'Enhancement Error');
             }
         })
     );
@@ -3318,6 +3411,7 @@ saveQuestEditor().catch(error => alert(String(error?.message || error)));
         const btn = phoneContainer.querySelector('#cx-batch-toggle');
         if (settings.batchMode) btn?.classList.add('cx-batch-active');
         else { btn?.classList.remove('cx-batch-active'); }
+        btn?.setAttribute('aria-pressed', String(settings.batchMode));
         saveSettings();
         updateQueueBar();
     });
@@ -3327,6 +3421,7 @@ saveQuestEditor().catch(error => alert(String(error?.message || error)));
         const toggle = phoneContainer.querySelector('#cx-neural-toggle');
         const drawer = phoneContainer.querySelector('#cx-cmd-drawer');
         const input = phoneContainer.querySelector('#cx-msg-input');
+        toggle?.setAttribute('aria-pressed', String(neuralMode));
         if (neuralMode) {
             toggle?.classList.add('cx-neural-active');
             drawer?.classList.remove('cx-hidden');
@@ -3396,11 +3491,21 @@ saveQuestEditor().catch(error => alert(String(error?.message || error)));
         if (fallback) fallback.style.display = '';
     }, true);
 
+    // Keyboard activation for role="button" elements — Enter / Space → click.
+    phoneContainer.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        const el = e.target;
+        if (el.getAttribute('role') === 'button' && !el.disabled) {
+            e.preventDefault();
+            el.click();
+        }
+    });
+
     if (clockIntervalId) { clearInterval(clockIntervalId); clockIntervalId = null; }
     clockIntervalId = setInterval(() => {
         const t = now();
         phoneContainer?.querySelectorAll('#cx-clock, .cx-lock-time, .cx-home-time').forEach(el => { el.textContent = t; });
-    }, AWAIT_TIMEOUT_MS);
+    }, CLOCK_INTERVAL_MS);
 }
 
 /* ======================================================================
