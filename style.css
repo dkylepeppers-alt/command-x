@@ -1116,6 +1116,15 @@
 }
 .cx-quest-fail-btn { color: #fca5a5; border-color: rgba(239,68,68,.24); }
 .cx-quest-checkbox-row { display: flex; gap: 8px; align-items: center; }
+.cx-settings-number-input {
+    width: 52px;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 8px;
+    color: #e5e7eb;
+    padding: 4px 8px;
+    font-size: 13px;
+}
 
 .cx-quest-editor-backdrop {
     position: absolute;

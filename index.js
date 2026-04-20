@@ -1229,8 +1229,8 @@ function renderQuestSubtasks(quest) {
             <span>Checklist · ${doneCount}/${subtasks.length}</span>
             <div class="cx-quest-subtasks">
                 ${subtasks.map(item => `
-                    <button type="button" class="cx-quest-subtask ${item.done ? 'done' : ''}" data-cx-quest-subtask="${escAttr(quest.id)}" data-cx-subtask-id="${escAttr(item.id)}">
-                        <span class="cx-quest-checkbox${item.done ? ' done' : ''}"></span>
+                    <button type="button" class="cx-quest-subtask ${item.done ? 'done' : ''}" data-cx-quest-subtask="${escAttr(quest.id)}" data-cx-subtask-id="${escAttr(item.id)}" aria-checked="${item.done ? 'true' : 'false'}">
+                        <span class="cx-quest-checkbox${item.done ? ' done' : ''}" role="checkbox" aria-hidden="true"></span>
                         <strong>${escHtml(item.text)}</strong>
                     </button>
                 `).join('')}
@@ -2984,7 +2984,7 @@ function buildPhone() {
                 </div>
                 <div class="cx-settings-row">
                     <span class="cx-settings-label">Auto-poll private messages every N turns (0 = off)</span>
-                    <input type="number" id="cx-set-auto-poll-n" min="0" max="20" step="1" value="${Math.max(0, Number(settings.autoPrivatePollEveryN) || 0)}" style="width:52px;background:#1a1a1a;border:1px solid #333;border-radius:8px;color:#e5e7eb;padding:4px 8px;font-size:13px;" />
+                    <input type="number" id="cx-set-auto-poll-n" class="cx-settings-number-input" min="0" max="20" step="1" value="${Math.max(0, Number(settings.autoPrivatePollEveryN) || 0)}" />
                 </div>
                 <div class="cx-settings-row cx-settings-btn-row">
                     <button class="cx-settings-btn" id="cx-set-add-contact">Add Contact</button>
@@ -3748,6 +3748,7 @@ function saveSettings() {
     settings.contactsInjectEveryN = Number.isFinite(contactsNRaw) && contactsNRaw >= 1 ? Math.floor(contactsNRaw) : (settings.contactsInjectEveryN || 1);
     const questsNRaw = Number(document.getElementById('cx_ext_quests_every_n')?.value);
     settings.questsInjectEveryN = Number.isFinite(questsNRaw) && questsNRaw >= 1 ? Math.floor(questsNRaw) : (settings.questsInjectEveryN || 1);
+    // cx_ext_auto_private_poll_n = ST settings panel; cx-set-auto-poll-n = in-phone settings view
     const autoPollNRaw = Number(document.getElementById('cx_ext_auto_private_poll_n')?.value ?? document.getElementById('cx-set-auto-poll-n')?.value);
     settings.autoPrivatePollEveryN = Number.isFinite(autoPollNRaw) && autoPollNRaw >= 0 ? Math.floor(autoPollNRaw) : (settings.autoPrivatePollEveryN || 0);
     const ctx = getContext();
