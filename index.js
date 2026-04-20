@@ -17,6 +17,7 @@ import {
     extension_prompt_roles,
 } from '../../../../script.js';
 
+const VERSION = '0.10.0';
 const EXT = 'command-x';
 const INJECT_KEY = 'command-x-sms';
 const INJECT_KEY_CONTACTS = 'command-x-contacts';
@@ -24,6 +25,19 @@ const INJECT_KEY_PRIVATE_PHONE = 'command-x-private-phone';
 const INJECT_KEY_QUESTS = 'command-x-quests';
 const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true, manualHybridPrivateTexts: true, openclawMode: 'assist', contactsInjectEveryN: 1, questsInjectEveryN: 1 };
 const MAX_AVATAR_FILE_BYTES = 8 * 1024 * 1024; // 8 MB hard cap on raw upload size
+const AWAIT_TIMEOUT_MS = 30_000;             // ms before awaitingReply auto-clears
+const MESSAGE_HISTORY_CAP = 200;             // max messages stored per contact
+const QUEST_HISTORY_CAP = 150;              // max quests stored
+const TOAST_DURATION_MS = 4_000;            // toast auto-dismiss duration
+const CONTACT_GRADIENTS = [
+    'linear-gradient(135deg,#553355,#442244)',
+    'linear-gradient(135deg,#334455,#223344)',
+    'linear-gradient(135deg,#ffaa88,#ff7755)',
+    'linear-gradient(135deg,#88aacc,#557799)',
+    'linear-gradient(135deg,#55aa77,#338855)',
+    'linear-gradient(135deg,#aa5577,#883355)',
+];
+const CONTACT_EMOJIS = ['👩','👩‍🦰','👱‍♀️','👩‍🏫','🧑','👨','👩‍🎤','🧑‍💼','👧','🧝‍♀️'];
 const CONTACT_FIELDS = ['emoji', 'status', 'mood', 'location', 'relationship', 'thoughts', 'avatarUrl'];
 const VOLATILE_CONTACT_FIELDS = ['status', 'mood', 'location', 'thoughts'];
 const STABLE_CONTACT_FIELDS = ['emoji', 'relationship', 'avatarUrl'];
@@ -563,7 +577,7 @@ function flushQueue() {
         typingTimeout = setTimeout(() => {
             clearTypingIndicator();
             if (awaitingReply) awaitingReply = false;
-        }, 30000);
+        }, AWAIT_TIMEOUT_MS);
     }
 
     clearQueue();
@@ -814,7 +828,7 @@ function sortQuests(quests) {
 }
 
 function saveQuests(quests) {
-    try { localStorage.setItem(questStoreKey(), JSON.stringify(sortQuests(quests).slice(-150))); }
+    try { localStorage.setItem(questStoreKey(), JSON.stringify(sortQuests(quests).slice(-QUEST_HISTORY_CAP))); }
     catch (e) { console.warn('[command-x] quest store save', e); }
 }
 
@@ -1600,10 +1614,6 @@ function buildSmsInstruction(contactName, isNeural, cmdType) {
  * @param {Array<{name:string, isNeural:boolean, cmdType:string|null}>} targets
  */
 function injectSmsPrompt(targets) {
-    if (!Array.isArray(targets)) {
-        // Legacy single-call compat: injectSmsPrompt(name, isNeural, cmdType)
-        targets = [{ name: arguments[0], isNeural: arguments[1], cmdType: arguments[2] }];
-    }
     const parts = targets.map(t => buildSmsInstruction(t.name, t.isNeural, t.cmdType));
     const names = targets.map(t => t.name);
     const multi = targets.length > 1;
@@ -1684,7 +1694,7 @@ function loadMessages(contactName) {
 }
 
 function saveMessages(contactName, msgs) {
-    try { localStorage.setItem(storeKey(contactName), JSON.stringify(msgs.slice(-200))); }
+    try { localStorage.setItem(storeKey(contactName), JSON.stringify(msgs.slice(-MESSAGE_HISTORY_CAP))); }
     catch (e) { console.warn('[command-x] store save', e); }
     invalidateContactCaches(contactName);
 }
@@ -1715,14 +1725,6 @@ function historyContactNames() {
 
 function getKnownContactsForPrivateMessaging() {
     const contacts = getContactsFromContext();
-    const gradients = [
-        'linear-gradient(135deg,#553355,#442244)',
-        'linear-gradient(135deg,#334455,#223344)',
-        'linear-gradient(135deg,#ffaa88,#ff7755)',
-        'linear-gradient(135deg,#88aacc,#557799)',
-        'linear-gradient(135deg,#55aa77,#338855)',
-        'linear-gradient(135deg,#aa5577,#883355)',
-    ];
     const byName = new Map(contacts.map(c => [normalizeContactName(c.name), c]));
     for (const name of historyContactNames()) {
         const normalized = normalizeContactName(name);
@@ -1731,7 +1733,7 @@ function getKnownContactsForPrivateMessaging() {
             id: `history_${normalized}`,
             name,
             emoji: '🧑',
-            gradient: gradients[byName.size % gradients.length],
+            gradient: CONTACT_GRADIENTS[byName.size % CONTACT_GRADIENTS.length],
             online: false,
             isNpc: true,
             status: 'known',
@@ -1792,7 +1794,7 @@ function savePrivatePhoneEvents(events) {
         .map(sanitizePhoneEvent)
         .filter(Boolean)
         .sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0))
-        .slice(-200);
+        .slice(-MESSAGE_HISTORY_CAP);
     saveExtensionChatState({ events: clean });
     return clean;
 }
@@ -1892,7 +1894,7 @@ function showToast(contactName, text) {
     });
     document.body.appendChild(toast);
     // Auto-dismiss after 4s
-    setTimeout(() => { toast.classList.remove('cx-toast-show'); setTimeout(() => toast.remove(), 400); }, 4000);
+    setTimeout(() => { toast.classList.remove('cx-toast-show'); setTimeout(() => toast.remove(), 400); }, TOAST_DURATION_MS);
 }
 
 function markRead(contactName) {
@@ -1983,15 +1985,6 @@ function getContactsFromContext() {
     const chars = getChatCharacters();
     const ctx = getContext();
     const userName = normalizeContactName(ctx.name1 || '');
-    const emojis = ['👩','👩‍🦰','👱‍♀️','👩‍🏫','🧑','👨','👩‍🎤','🧑‍💼','👧','🧝‍♀️'];
-    const gradients = [
-        'linear-gradient(135deg,#553355,#442244)',
-        'linear-gradient(135deg,#334455,#223344)',
-        'linear-gradient(135deg,#ffaa88,#ff7755)',
-        'linear-gradient(135deg,#88aacc,#557799)',
-        'linear-gradient(135deg,#55aa77,#338855)',
-        'linear-gradient(135deg,#aa5577,#883355)',
-    ];
     const storedNpcs = loadNpcs();
     const storedByName = new Map(storedNpcs.map(npc => [normalizeContactName(npc.name), npc]));
     const deduped = new Map();
@@ -2009,8 +2002,8 @@ function getContactsFromContext() {
             const liveContact = {
                 id: c.avatar || `char_${i}`,
                 name: c.name || `Character ${i + 1}`,
-                emoji: emojis[i % emojis.length],
-                gradient: gradients[i % gradients.length],
+                emoji: CONTACT_EMOJIS[i % CONTACT_EMOJIS.length],
+                gradient: CONTACT_GRADIENTS[i % CONTACT_GRADIENTS.length],
                 online: true,
                 isNpc: false,
                 status: 'online',
@@ -2034,7 +2027,7 @@ function getContactsFromContext() {
                 id: `npc_${i}`,
                 name: npc.name,
                 emoji: npc.emoji || '🧑',
-                gradient: gradients[(chars.length + i) % gradients.length],
+                gradient: CONTACT_GRADIENTS[(chars.length + i) % CONTACT_GRADIENTS.length],
                 online: npc.status === 'online' || npc.status === 'nearby',
                 isNpc: true,
                 status: npc.status || 'nearby',
@@ -2532,7 +2525,7 @@ function sendImmediate(contactName, chatText, isNeural, cmdType) {
     typingTimeout = setTimeout(() => {
         clearTypingIndicator();
         if (awaitingReply) awaitingReply = false;
-    }, 30000);
+    }, AWAIT_TIMEOUT_MS);
     sendToChat(chatText, contactName, !!cmdType || isNeural);
 }
 
@@ -2817,7 +2810,7 @@ function buildPhone() {
                 </div>
                 <div class="cx-settings-section">ABOUT</div>
                 <div class="cx-settings-row cx-settings-about">
-                    <div>Command-X v0.10.0</div>
+                    <div>Command-X v${VERSION}</div>
                     <div style="color:#666;font-size:11px;margin-top:4px">By Kyle & Bucky 🦌</div>
                 </div>
             </div>
@@ -3084,7 +3077,7 @@ function sendPhoneMessage() {
                     area.appendChild(hint);
                     area.scrollTop = area.scrollHeight;
                 }
-            }, 30000);
+            }, AWAIT_TIMEOUT_MS);
         }
     }
 }
@@ -3407,7 +3400,7 @@ saveQuestEditor().catch(error => alert(String(error?.message || error)));
     clockIntervalId = setInterval(() => {
         const t = now();
         phoneContainer?.querySelectorAll('#cx-clock, .cx-lock-time, .cx-home-time').forEach(el => { el.textContent = t; });
-    }, 30000);
+    }, AWAIT_TIMEOUT_MS);
 }
 
 /* ======================================================================
@@ -3774,7 +3767,7 @@ jQuery(async () => {
             if (settings.autoDetectNpcs !== false) injectContactsPrompt();
             injectQuestPrompt();
         }
-        console.log(`[${EXT}] v0.10.0 Loaded OK`);
+        console.log(`[${EXT}] v${VERSION} Loaded OK`);
     } catch (err) {
         console.error(`[${EXT}] INIT FAILED:`, err);
     }
