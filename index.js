@@ -2495,7 +2495,7 @@ function syncProfileEditorDraftFromForm() {
     };
 }
 
-function saveProfileEditor() {
+async function saveProfileEditor() {
     if (!profileEditorState) return;
     const form = phoneContainer?.querySelector('#cx-profile-form');
     if (!form) return;
