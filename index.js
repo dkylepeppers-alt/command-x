@@ -692,11 +692,12 @@ function loadGlobalAvatars() {
         const entries = {};
         for (const [key, value] of Object.entries(raw)) {
             if (!key) continue;
-            // Support both old flat {key: url} format and new {key: {url, lastUsed}} format
+            // Support both old flat {key: url} format and new {key: {url, lastUsed}} format.
+            // Legacy entries get Date.now() so they aren't evicted before newly written ones.
             if (typeof value === 'string') {
-                if (!_isAvatarUrlOversized(value)) entries[key] = { url: value, lastUsed: 0 };
+                if (!_isAvatarUrlOversized(value)) entries[key] = { url: value, lastUsed: Date.now() };
             } else if (value && typeof value.url === 'string' && !_isAvatarUrlOversized(value.url)) {
-                entries[key] = { url: value.url, lastUsed: Number.isFinite(value.lastUsed) ? value.lastUsed : 0 };
+                entries[key] = { url: value.url, lastUsed: Number.isFinite(value.lastUsed) ? value.lastUsed : Date.now() };
             }
         }
         _globalAvatarCache = entries;
@@ -708,7 +709,7 @@ function loadGlobalAvatars() {
 
 function saveGlobalAvatars(entries) {
     // Trim to max entries by LRU (most recently used kept)
-    let sorted = Object.entries(entries).sort((a, b) => (b[1]?.lastUsed || 0) - (a[1]?.lastUsed || 0));
+    let sorted = Object.entries(entries).sort((a, b) => (b[1].lastUsed || 0) - (a[1].lastUsed || 0));
     if (sorted.length > GLOBAL_AVATAR_MAX_ENTRIES) sorted = sorted.slice(0, GLOBAL_AVATAR_MAX_ENTRIES);
     const trimmed = Object.fromEntries(sorted);
     _globalAvatarCache = trimmed;
@@ -722,8 +723,6 @@ function getGlobalAvatar(name) {
     const key = normalizeContactName(name);
     const entry = entries[key];
     if (!entry?.url) return null;
-    // Update lastUsed in-memory only (no write-back on read to avoid churn)
-    entry.lastUsed = Date.now();
     return entry.url;
 }
 
