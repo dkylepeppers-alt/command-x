@@ -57,7 +57,7 @@ can be browsed and referenced from the source tree.
       `TOAST_DURATION_MS`).
 - [x] Remove the legacy single-call compatibility in `injectSmsPrompt`.
 - [x] Add `node --test` unit tests for pure helpers (tag extractors,
-      sanitizers, normalizers) — 63 assertions across 11 suites.
+      sanitizers, normalizers).
 
 ## Phase 4 — UX & accessibility
 

@@ -1882,9 +1882,13 @@ function showToast(contactName, text) {
     toast.className = 'cx-toast cx-toast-show';
     toast.setAttribute('role', 'status');
     toast.setAttribute('aria-live', 'polite');
-    toast.setAttribute('aria-label', `New message from ${escAttr(contactName)}`);
+    toast.setAttribute('aria-label', `New message from ${contactName}`);
     toast.innerHTML = `<div class="cx-toast-icon">📱</div><div class="cx-toast-body"><div class="cx-toast-name">${escHtml(contactName)}</div><div class="cx-toast-text">${escHtml(preview)}</div></div>`;
+    // Esc key listener variable — declared early so the click handler can reference it
+    let onKey;
+
     toast.addEventListener('click', () => {
+        document.removeEventListener('keydown', onKey);
         toast.remove();
         // Open phone to this contact's chat
         const wrapper = document.getElementById('cx-panel-wrapper');
@@ -1903,6 +1907,8 @@ function showToast(contactName, text) {
     let startedAt = Date.now();
     let dismissTimer = null;
     const dismiss = () => {
+        document.removeEventListener('keydown', onKey);
+        if (dismissTimer) { clearTimeout(dismissTimer); dismissTimer = null; }
         toast.classList.remove('cx-toast-show');
         setTimeout(() => toast.remove(), 400);
     };
@@ -1920,8 +1926,8 @@ function showToast(contactName, text) {
     });
     armDismiss(TOAST_DURATION_MS);
 
-    // Dismiss on Esc key
-    const onKey = (e) => { if (e.key === 'Escape') { dismiss(); document.removeEventListener('keydown', onKey); } };
+    // Dismiss on Esc — listener always cleaned up inside dismiss()
+    onKey = (e) => { if (e.key === 'Escape') dismiss(); };
     document.addEventListener('keydown', onKey);
 }
 
@@ -1954,7 +1960,9 @@ function cxAlert(message, title = 'Command-X') {
 /**
  * Styled in-phone confirm dialog (replaces native confirm()).
  * Returns a Promise<boolean> — true if user confirms, false if cancelled.
- * Esc cancels. Enter is handled natively by the focused button (confirm by default).
+ * Esc cancels. Enter is handled natively by the focused button.
+ * When danger=true the cancel button receives initial focus to reduce accidental
+ * confirmation of destructive operations.
  */
 function cxConfirm(message, title = 'Are you sure?', { confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = false } = {}) {
     return new Promise((resolve) => {
@@ -1966,7 +1974,7 @@ function cxConfirm(message, title = 'Are you sure?', { confirmLabel = 'Confirm',
             <div class="cx-modal-body" id="cx-modal-body">${escHtml(message)}</div>
             <div class="cx-modal-actions">
                 <button class="cx-modal-btn cx-modal-btn-secondary" id="cx-modal-cancel">${escHtml(cancelLabel)}</button>
-                <button class="cx-modal-btn ${danger ? 'cx-modal-btn-danger' : 'cx-modal-btn-primary'}" id="cx-modal-confirm" autofocus>${escHtml(confirmLabel)}</button>
+                <button class="cx-modal-btn ${danger ? 'cx-modal-btn-danger' : 'cx-modal-btn-primary'}" id="cx-modal-confirm">${escHtml(confirmLabel)}</button>
             </div>
         </div>`;
         const close = (result) => { overlay.remove(); document.removeEventListener('keydown', onKey); resolve(result); };
@@ -1975,7 +1983,8 @@ function cxConfirm(message, title = 'Are you sure?', { confirmLabel = 'Confirm',
         overlay.querySelector('#cx-modal-confirm').addEventListener('click', () => close(true));
         document.addEventListener('keydown', onKey);
         document.body.appendChild(overlay);
-        overlay.querySelector('#cx-modal-confirm').focus();
+        // Dangerous actions default to cancel focus; safe confirms default to confirm focus.
+        overlay.querySelector(danger ? '#cx-modal-cancel' : '#cx-modal-confirm').focus();
     });
 }
 

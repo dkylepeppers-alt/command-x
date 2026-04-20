@@ -48,12 +48,12 @@ USER SENDS TEXT:
 
 LLM RESPONDS:
   MESSAGE_RECEIVED →
-    1. applyInjectionThrottle() — manage per-turn prompt injection cadence
-    2. extractSmsBlocks() — parse [sms] tags FIRST
-    3. Route each block to correct contact by from/to attributes
-    4. extractContacts() — parse [status] tags SECOND
-    5. extractQuests() — parse [quests] tags THIRD
-    6. mergeNpcs() + upsertQuestsFromLlm() + rebuildPhone() if panel visible
+    1. extractSmsBlocks() — parse [sms] tags FIRST
+    2. Route each block to correct contact by from/to attributes
+    3. extractContacts() — parse [status] tags SECOND
+    4. extractQuests() — parse [quests] tags THIRD
+    5. mergeNpcs() + mergeQuests() + rebuildPhone() if panel visible
+    6. applyInjectionThrottle() — manage per-turn prompt injection cadence
 
   CHARACTER_MESSAGE_RENDERED →
     1. hideSmsTagsInDom() — replace [sms] with 📱 indicator

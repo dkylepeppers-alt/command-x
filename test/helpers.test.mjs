@@ -2,11 +2,13 @@
  * Unit tests for Command-X pure helper functions.
  * Run with: node --test test/helpers.test.mjs
  *
- * These functions are copied verbatim from index.js because the extension
- * file imports SillyTavern runtime modules (getContext, setExtensionPrompt,
- * etc.) that are unavailable in a plain Node.js environment.
+ * These are inline test copies/adaptations of helper logic from index.js.
+ * They live here because the extension file imports SillyTavern runtime
+ * modules (getContext, setExtensionPrompt, etc.) that are unavailable in a
+ * plain Node.js environment.
  *
- * When the helpers in index.js change, keep these copies in sync.
+ * When helper behavior in index.js changes, review these test copies and
+ * update them as needed so the tests continue to reflect production logic.
  */
 
 import { describe, it } from 'node:test';
@@ -143,7 +145,7 @@ describe('escHtml', () => {
     it('coerces null to empty string', () => assert.equal(escHtml(null), ''));
     it('coerces undefined to empty string', () => assert.equal(escHtml(undefined), ''));
     it('coerces number', () => assert.equal(escHtml(42), '42'));
-    it('double-escapes are not applied (idempotent input)', () => assert.equal(escHtml('&amp;'), '&amp;amp;'));
+    it('escapes already-escaped ampersands again (non-idempotent for entities)', () => assert.equal(escHtml('&amp;'), '&amp;amp;'));
 });
 
 describe('escAttr', () => {
