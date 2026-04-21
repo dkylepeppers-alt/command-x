@@ -5,7 +5,7 @@
     "optional": [],
     "js": "index.js",
     "css": "style.css",
-    "version": "0.11.0",
+    "version": "0.12.0",
     "homePage": "https://github.com/dkylepeppers-alt/command-x",
-    "description": "Smartphone UI with Command-X neural messaging, iMessage-style texting, NPC profiles, an embedded OpenClaw bridge console, and in-phone settings. Uses prompt injection for structured [sms] and [status] tag extraction."
+    "description": "Smartphone UI with Command-X neural messaging, iMessage-style texting, NPC profiles, a persistent Quests app, an embedded OpenClaw bridge console, a Map app for tracking contact locations, and in-phone settings. Uses prompt injection for structured [sms], [status], [quests], and [place] tag extraction."
 }
