@@ -1924,7 +1924,7 @@ async function withUtilityProfile(fn) {
         } else if (profileSelect) {
             profileSelect.value = profileId;
             profileSelect.dispatchEvent(new Event('change'));
-            await new Promise(r => setTimeout(r, 300));
+            await new Promise(r => setTimeout(r, 500));
         }
     } catch (e) {
         console.warn(`[${EXT}] withUtilityProfile: profile switch failed`, e);
@@ -5015,8 +5015,8 @@ function loadSettings() {
     if (utilityProfileEl) {
         // Clear existing options (keep the blank "use main" option at index 0)
         while (utilityProfileEl.options.length > 1) utilityProfileEl.remove(1);
-        const ctx2 = getContext();
-        const profiles = (typeof ctx2.getConnectionProfiles === 'function') ? (ctx2.getConnectionProfiles() || []) : [];
+        const profileCtx = getContext();
+        const profiles = (typeof profileCtx.getConnectionProfiles === 'function') ? (profileCtx.getConnectionProfiles() || []) : [];
         for (const p of profiles) {
             const opt = document.createElement('option');
             opt.value = p.id || p.name || '';
