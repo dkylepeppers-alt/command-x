@@ -1,5 +1,7 @@
 # CLAUDE.md — Command-X Phone Extension
 
+> **Before starting any work, read [`AGENT_MEMORY.md`](AGENT_MEMORY.md) at the repo root.** It is the append-only shared memory for agents working on this repo. Update it at the end of every pull request with anything a future agent would want to know.
+
 ## What This Is
 
 A SillyTavern third-party extension (v0.10.0) that adds a smartphone UI overlay to RP chats. Five apps: **Command-X** (neural commands + unified messaging), **Profiles** (NPC intel cards), **Quests** (persistent story tracker), **OpenClaw** (bridge console), and **Settings**. Messages flow through the RP — the extension injects system prompts so the LLM wraps phone replies in `[sms]` tags, which get extracted for the phone UI.

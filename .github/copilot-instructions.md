@@ -1,5 +1,7 @@
 # Copilot Instructions — Command-X Phone
 
+> **Before starting any work, read [`AGENT_MEMORY.md`](../AGENT_MEMORY.md) at the repo root.** It is the append-only shared memory for agents working on this repo. Update it at the end of every pull request with anything a future agent would want to know.
+
 ## Summary
 
 SillyTavern third-party extension (~103KB, ~1550 lines) that adds a floating smartphone UI with two apps: **Command-X** (neural command messaging) and **Messages** (standard iMessage-style texting). Pure browser JavaScript + CSS — no build system, no Node.js, no dependencies beyond SillyTavern's runtime.
