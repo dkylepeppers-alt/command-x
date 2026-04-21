@@ -1898,10 +1898,16 @@ function parseQuestEnrichmentResponse(raw) {
     }
 }
 
+let utilityProfileQueue = Promise.resolve();
+
 /**
  * Switch to the user-configured utility Connection Profile (if any), run fn(),
  * then restore the original profile.  Mirrors the approach used by ScenePulse.
  * If no utility profile is configured, fn() runs on the current profile.
+ *
+ * Calls are serialized via a shared promise queue so that concurrent utility
+ * generations (quest enrichment, auto-poll, contact scan) never interleave
+ * their profile switches/restores.
  *
  * @param {Function} fn  Async callback to execute under the utility profile.
  * @returns {*} Whatever fn() returns.
@@ -1910,46 +1916,54 @@ async function withUtilityProfile(fn) {
     const profileId = settings.utilityConnectionProfile || '';
     if (!profileId) return fn();
 
-    const ctx = getContext();
-    let previousProfileId = null;
+    const run = async () => {
+        const ctx = getContext();
+        let previousProfileId = null;
 
-    // ── Capture current profile ──────────────────────────────────────────────
-    const profileSelect = document.querySelector('#connection_profiles, #connection_profile');
-    if (profileSelect) previousProfileId = profileSelect.value;
+        // ── Capture current profile ──────────────────────────────────────────
+        const profileSelect = document.querySelector('#connection_profiles, #connection_profile');
+        if (profileSelect) previousProfileId = profileSelect.value;
 
-    // ── Switch to utility profile ────────────────────────────────────────────
-    try {
-        if (typeof ctx.setConnectionProfile === 'function') {
-            await ctx.setConnectionProfile(profileId);
-        } else if (profileSelect) {
-            profileSelect.value = profileId;
-            profileSelect.dispatchEvent(new Event('change'));
-            await new Promise(r => setTimeout(r, 500));
+        // ── Switch to utility profile ────────────────────────────────────────
+        try {
+            if (typeof ctx.setConnectionProfile === 'function') {
+                await ctx.setConnectionProfile(profileId);
+                await new Promise(r => setTimeout(r, 500));
+            } else if (profileSelect) {
+                profileSelect.value = profileId;
+                profileSelect.dispatchEvent(new Event('change'));
+                await new Promise(r => setTimeout(r, 500));
+            }
+        } catch (e) {
+            console.warn(`[${EXT}] withUtilityProfile: profile switch failed`, e);
         }
-    } catch (e) {
-        console.warn(`[${EXT}] withUtilityProfile: profile switch failed`, e);
-    }
 
-    // ── Run the utility generation ───────────────────────────────────────────
-    try {
-        return await fn();
-    } finally {
-        // Restore original profile after a short delay so ST event handlers
-        // triggered by the profile switch have time to settle.
-        await new Promise(r => setTimeout(r, 500));
-        if (previousProfileId) {
-            try {
-                if (typeof ctx.setConnectionProfile === 'function') {
-                    await ctx.setConnectionProfile(previousProfileId);
-                } else if (profileSelect) {
-                    profileSelect.value = previousProfileId;
-                    profileSelect.dispatchEvent(new Event('change'));
+        // ── Run the utility generation ───────────────────────────────────────
+        try {
+            return await fn();
+        } finally {
+            // Restore original profile after a short delay so ST event handlers
+            // triggered by the profile switch have time to settle.
+            await new Promise(r => setTimeout(r, 500));
+            if (previousProfileId) {
+                try {
+                    if (typeof ctx.setConnectionProfile === 'function') {
+                        await ctx.setConnectionProfile(previousProfileId);
+                        await new Promise(r => setTimeout(r, 500));
+                    } else if (profileSelect) {
+                        profileSelect.value = previousProfileId;
+                        profileSelect.dispatchEvent(new Event('change'));
+                    }
+                } catch (e) {
+                    console.warn(`[${EXT}] withUtilityProfile: profile restore failed`, e);
                 }
-            } catch (e) {
-                console.warn(`[${EXT}] withUtilityProfile: profile restore failed`, e);
             }
         }
-    }
+    };
+
+    const task = utilityProfileQueue.then(run, run);
+    utilityProfileQueue = task.catch(() => {});
+    return task;
 }
 
 async function enrichQuestDraftIfNeeded(draft) {
