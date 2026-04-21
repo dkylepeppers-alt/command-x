@@ -3345,8 +3345,8 @@ function buildMapView(contacts) {
     const meta = loadMapMeta();
     const places = loadPlaces();
     const isImage = meta.mode === 'image' && meta.imageDataUrl;
-    // The background (uploaded image or schematic gradient) lives on the inner
-    // viewport so it scales/pans with the pins when the user zooms.
+    // The uploaded map image lives on the inner viewport so it scales/pans
+    // with the pins when the user zooms.
     const viewportStyle = isImage
         ? `background-image:url("${escAttr(meta.imageDataUrl)}");background-size:cover;background-position:center;`
         : '';
@@ -3459,7 +3459,7 @@ function buildMapView(contacts) {
                         <button type="button" class="cx-map-ctrl-btn" id="cx-map-zoom-out" aria-label="Zoom out" title="Zoom out">−</button>
                         <button type="button" class="cx-map-ctrl-btn" id="cx-map-zoom-reset" aria-label="Reset view" title="Reset view">⟲</button>
                     </div>
-                    <div class="cx-map-zoom-indicator" id="cx-map-zoom-indicator" aria-live="polite">100%</div>
+                    <div class="cx-map-zoom-indicator" id="cx-map-zoom-indicator" aria-hidden="true">100%</div>
                 </div>
                 <div class="cx-map-legend">
                     <div class="cx-map-legend-title">Places</div>
@@ -3978,13 +3978,16 @@ function clearAllMapDataForCurrentChat() {
  * interaction model, and how to revert to the schematic view.
  */
 function showMapUploadHelp() {
-    const sizeMb = (MAX_AVATAR_FILE_BYTES / (1024 * 1024)).toFixed(0);
+    // Map uploads share the avatar upload byte cap; alias here so the help
+    // copy and future maintainers read this as a map-image limit.
+    const MAX_MAP_IMAGE_FILE_BYTES = MAX_AVATAR_FILE_BYTES;
+    const sizeMb = (MAX_MAP_IMAGE_FILE_BYTES / (1024 * 1024)).toFixed(0);
     const maxW = MAX_MAP_IMAGE_WIDTH;
     const message = [
         'Tap "Upload Image" to set a custom background for the map (city plan, floor plan, fantasy map, screenshot — anything you like).',
         '',
         'Supported formats: PNG, JPG, GIF, or WebP.',
-        `Max file size: ${sizeMb} MB — raw files larger than that are rejected. If an accepted image is wider than ${maxW}px on the long edge, the extension automatically downscales it and re-encodes it as JPEG to keep chat storage small.`,
+        `Max file size: ${sizeMb} MB — raw files larger than that are rejected. Accepted uploads are stored locally as JPEG to keep chat storage small; if an image is wider than ${maxW}px on the long edge, it is also automatically downscaled first.`,
         '',
         'Recommended image shape: square (1:1). The map surface is a square frame and non-square images are cropped to "cover" it, so anything near the edges of a wide or tall image may be trimmed.',
         '',

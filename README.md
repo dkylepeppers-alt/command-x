@@ -44,14 +44,14 @@ Messages flow through the RP naturally. The extension uses prompt injection so t
 ### 🧭 Map App
 - **Visual location tracker** — Shows a smartphone-style map with pins for every place in the story plus one pin per known contact at their current location
 - **Schematic or custom background** — Uses a built-in dark grid by default, or upload any image (city plan, floor plan, fantasy map, screenshot) as the backdrop
-- **Zoom and pan** — Scroll-wheel / pinch / double-click to zoom (1×–5×), drag to pan; a control overlay (＋ − ⟲) and live percentage indicator are always available
+- **Zoom and pan** — Scroll-wheel / pinch / double-click to zoom (1×–5×), drag to pan; the control overlay (＋ − ⟲) stays available, and the live percentage indicator appears while zooming and briefly after zoom changes
 - **Interactive pins** — Tap empty map to add a place, drag pins to reposition, tap a contact pin to open their chat, tap "📍 You" to drop your own position marker
 - **Movement trails** — Optional dashed trails show each contact's last few locations so you can see where they've been
 - **Auto-registration** — The LLM can register new places and move contacts between them via `[status]` tags; manual edits are preserved
 
 **Uploading your own map background:**
 1. Open the phone, tap the **🧭 Map** app, then tap **Upload Image** in the header. Tap the **ℹ️** button next to it at any time to see this guidance in the app.
-2. Pick any PNG, JPG, GIF, or WebP image. Raw files over **8 MB are rejected**. If an accepted image is wider than **1024 px** on the long edge, it is automatically downscaled and re-encoded as JPEG to keep chat storage small.
+2. Pick any PNG, JPG, GIF, or WebP image. Raw files over **8 MB are rejected**. Accepted images are stored as JPEG to keep chat storage small; if an image is wider than **1024 px** on the long edge, it is also automatically downscaled first.
 3. Prefer a roughly **square (1:1)** image — the map surface is a square frame and wider/taller images are cropped to "cover" it, so content near the edges may be trimmed.
 4. After uploading, tap any empty spot on the map to drop a place pin, drag pins to fine-tune, and use zoom/pan to work with dense areas. Pin coordinates are anchored to the image, so they stay correct at any zoom level.
 5. To revert, tap **Use Schematic**. The uploaded image is removed but your place pins are kept.
