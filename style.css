@@ -1125,6 +1125,20 @@
     padding: 4px 8px;
     font-size: 13px;
 }
+.cx-settings-row-column {
+    flex-direction: column; align-items: flex-start; gap: 6px;
+}
+.cx-settings-hint { font-size: 11px; color: #777; line-height: 1.4; }
+.cx-settings-select {
+    width: 100%;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 8px;
+    color: #e5e7eb;
+    padding: 6px 8px;
+    font-size: 13px;
+    cursor: pointer;
+}
 
 .cx-quest-editor-backdrop {
     position: absolute;
