@@ -3306,12 +3306,21 @@ function buildMapView(contacts) {
         : '';
     const surfaceClass = isImage ? 'cx-map-surface cx-map-surface-image' : 'cx-map-surface cx-map-surface-schematic';
 
+    // Cache all contact trails in a single pass rather than re-reading localStorage
+    // several times per contact during rendering.
+    const trailsByContact = new Map();
+    for (const c of contacts) trailsByContact.set(c.name, loadLocationTrail(c.name));
+    const currentPlaceIdFor = (name) => {
+        const t = trailsByContact.get(name);
+        return t && t.length ? t[t.length - 1].placeId : null;
+    };
+
     // Build trail SVG paths when enabled
+    const placeById = new Map(places.map(p => [p.id, p]));
     const trailsSvg = settings.showLocationTrails ? (() => {
-        const placeById = new Map(places.map(p => [p.id, p]));
         const paths = [];
         for (const c of contacts) {
-            const trail = loadLocationTrail(c.name).slice(-6);
+            const trail = (trailsByContact.get(c.name) || []).slice(-6);
             if (trail.length < 2) continue;
             const pts = trail
                 .map(e => placeById.get(e.placeId))
@@ -3321,20 +3330,20 @@ function buildMapView(contacts) {
             paths.push(`<polyline class="cx-map-trail" points="${pts.join(' ')}" />`);
         }
         return paths.length
-            ? `<svg class="cx-map-trails" viewBox="0 0 100 100" preserveAspectRatio="none">${paths.join('')}</svg>`
+            ? `<svg class="cx-map-trails" data-cx-map-decoration="1" viewBox="0 0 100 100" preserveAspectRatio="none">${paths.join('')}</svg>`
             : '';
     })() : '';
 
     // Render contact pins at their current place
     const contactPins = contacts.map(c => {
-        const placeId = getContactCurrentPlaceId(c.name);
+        const placeId = currentPlaceIdFor(c.name);
         if (!placeId) return '';
-        const place = places.find(p => p.id === placeId);
+        const place = placeById.get(placeId);
         if (!place) return '';
         const x = (place.x * 100).toFixed(2);
         const y = (place.y * 100).toFixed(2);
         const avatarInner = c.avatarUrl
-            ? `<img class="cx-avatar-img" data-cx-avatar-fallback="1" src="${escAttr(c.avatarUrl)}" alt=""><span class="cx-avatar-emoji-fallback" style="display:none">${escHtml(c.emoji || '🧑')}</span>`
+            ? `<img class="cx-avatar-img" data-cx-avatar-fallback="1" src="${escAttr(c.avatarUrl)}" alt="${escAttr(c.name)}"><span class="cx-avatar-emoji-fallback" style="display:none">${escHtml(c.emoji || '🧑')}</span>`
             : escHtml(c.emoji || '🧑');
         return `<div class="cx-map-pin cx-map-pin-contact" data-cx-map-contact="${escAttr(c.name)}" role="button" tabindex="0" aria-label="Open chat with ${escAttr(c.name)} at ${escAttr(place.name)}" title="${escAttr(c.name)} — ${escAttr(place.name)}" style="left:${x}%;top:${y}%;background:${escAttr(c.gradient || 'linear-gradient(135deg,#553355,#442244)')}">${avatarInner}</div>`;
     }).join('');
@@ -3356,7 +3365,7 @@ function buildMapView(contacts) {
 
     const placeList = places.length
         ? places.map(p => {
-            const assigned = contacts.filter(c => getContactCurrentPlaceId(c.name) === p.id).map(c => c.name);
+            const assigned = contacts.filter(c => currentPlaceIdFor(c.name) === p.id).map(c => c.name);
             return `
             <div class="cx-map-place-row" data-cx-map-place-row="${escAttr(p.id)}">
                 <div class="cx-map-place-main">
@@ -3390,7 +3399,7 @@ function buildMapView(contacts) {
             </div>
             <div class="cx-map-body">
                 <div class="${surfaceClass}" id="cx-map-surface" style="${surfaceStyle}">
-                    ${isImage ? '' : '<div class="cx-map-schematic-grid" aria-hidden="true"></div>'}
+                    ${isImage ? '' : '<div class="cx-map-schematic-grid" data-cx-map-decoration="1" aria-hidden="true"></div>'}
                     ${trailsSvg}
                     ${placePins}
                     ${contactPins}
@@ -4035,11 +4044,8 @@ function wireMapInteractions() {
     surface.addEventListener('click', async (e) => {
         // Bail if the click landed on a pin (pins stopPropagation, but be defensive).
         if (e.target.closest('.cx-map-pin')) return;
-        // Allow clicks on the surface and its pointer-events:none decorations.
-        if (e.target !== surface
-            && !e.target.classList?.contains('cx-map-schematic-grid')
-            && e.target.tagName !== 'svg'
-            && e.target.tagName !== 'polyline') {
+        // Allow clicks on the surface or any of its explicit click-through decorations.
+        if (e.target !== surface && !e.target.closest('[data-cx-map-decoration="1"]')) {
             return;
         }
         const rect = surface.getBoundingClientRect();
@@ -4068,17 +4074,19 @@ function wireMapInteractions() {
             if (ev.button !== undefined && ev.button !== 0) return;
             ev.stopPropagation();
             ev.preventDefault();
-            const rect = surface.getBoundingClientRect();
             el.setPointerCapture?.(ev.pointerId);
+            const startX = ev.clientX;
+            const startY = ev.clientY;
             let moved = false;
+            // Recompute the surface rect on each move/up so a resize or scroll mid-drag
+            // doesn't desync coordinates.
             const onMove = (mv) => {
-                const mvx = (mv.clientX - rect.left) / rect.width;
-                const mvy = (mv.clientY - rect.top) / rect.height;
-                const cx = clampUnit(mvx) * 100;
-                const cy = clampUnit(mvy) * 100;
+                const rect = surface.getBoundingClientRect();
+                const cx = clampUnit((mv.clientX - rect.left) / rect.width) * 100;
+                const cy = clampUnit((mv.clientY - rect.top) / rect.height) * 100;
                 el.style.left = `${cx.toFixed(2)}%`;
                 el.style.top = `${cy.toFixed(2)}%`;
-                if (Math.abs(mv.clientX - ev.clientX) > 3 || Math.abs(mv.clientY - ev.clientY) > 3) moved = true;
+                if (Math.abs(mv.clientX - startX) > 3 || Math.abs(mv.clientY - startY) > 3) moved = true;
             };
             const onUp = (up) => {
                 el.removeEventListener('pointermove', onMove);
@@ -4086,6 +4094,7 @@ function wireMapInteractions() {
                 el.removeEventListener('pointercancel', onUp);
                 el._wasDragged = moved;
                 if (moved) {
+                    const rect = surface.getBoundingClientRect();
                     const finalX = clampUnit((up.clientX - rect.left) / rect.width);
                     const finalY = clampUnit((up.clientY - rect.top) / rect.height);
                     onCommit(finalX, finalY);
