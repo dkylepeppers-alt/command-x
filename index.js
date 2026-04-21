@@ -1232,36 +1232,79 @@ function clearQuestPrompt() {
 const PLACE_TAG_RE = /\[place\]([\s\S]*?)\[\/place\]/gi;
 
 function placeStoreKey() {
-    const ctx = getContext();
-    const chatId = ctx.chatId || ctx.groupId || 'default';
-    return `cx-places-${chatId}`;
+    return `cx-places-${currentChatId()}`;
 }
 
 function mapMetaKey() {
-    const ctx = getContext();
-    const chatId = ctx.chatId || ctx.groupId || 'default';
-    return `cx-map-${chatId}`;
+    return `cx-map-${currentChatId()}`;
 }
 
 function locationTrailKey(contactName) {
-    const ctx = getContext();
-    const chatId = ctx.chatId || ctx.groupId || 'default';
-    return `cx-loctrail-${chatId}-${contactName}`;
+    return `cx-loctrail-${currentChatId()}-${contactName}`;
+}
+
+/**
+ * Normalize a stored place entry, tolerating legacy/corrupt shapes. Returns
+ * null if the entry can't be salvaged (missing name). All callers rely on
+ * `id` being a string and `x`/`y` being finite 0..1 numbers.
+ */
+function normalizeStoredPlace(raw, siblingList = []) {
+    if (!raw || typeof raw !== 'object') return null;
+    const name = typeof raw.name === 'string' ? raw.name.trim() : '';
+    if (!name) return null;
+    const xNum = Number(raw.x);
+    const yNum = Number(raw.y);
+    const hasCoords = Number.isFinite(xNum) && Number.isFinite(yNum);
+    const coords = hasCoords
+        ? { x: clampUnit(xNum), y: clampUnit(yNum) }
+        : assignAutoPlaceCoords({ name }, siblingList);
+    const aliasesIn = Array.isArray(raw.aliases) ? raw.aliases : [];
+    const aliases = aliasesIn.map(a => String(a || '').trim()).filter(Boolean).slice(0, 8);
+    const id = (typeof raw.id === 'string' && raw.id.trim())
+        ? raw.id.trim()
+        : ensurePlaceId({ name }, siblingList);
+    return {
+        id,
+        name,
+        emoji: (typeof raw.emoji === 'string' && raw.emoji.trim()) ? raw.emoji.trim() : '📍',
+        x: coords.x,
+        y: coords.y,
+        aliases,
+        userPinned: !!raw.userPinned,
+    };
 }
 
 function loadPlaces() {
     try {
-        const list = JSON.parse(localStorage.getItem(placeStoreKey()) || '[]');
-        return Array.isArray(list) ? list.filter(p => p && typeof p.name === 'string') : [];
+        const parsed = JSON.parse(localStorage.getItem(placeStoreKey()) || '[]');
+        if (!Array.isArray(parsed)) return [];
+        const result = [];
+        for (const raw of parsed) {
+            const clean = normalizeStoredPlace(raw, result);
+            if (!clean) continue;
+            // Guarantee unique id across the loaded set.
+            if (result.some(p => p.id === clean.id)) {
+                clean.id = ensurePlaceId({ name: clean.name }, result);
+            }
+            result.push(clean);
+        }
+        return result;
     } catch { return []; }
 }
 
 function savePlaces(places) {
     try {
-        const clean = (Array.isArray(places) ? places : [])
-            .filter(p => p && typeof p.name === 'string')
-            .slice(-PLACES_CAP);
-        localStorage.setItem(placeStoreKey(), JSON.stringify(clean));
+        const list = Array.isArray(places) ? places : [];
+        const clean = [];
+        for (const raw of list) {
+            const norm = normalizeStoredPlace(raw, clean);
+            if (!norm) continue;
+            if (clean.some(p => p.id === norm.id)) {
+                norm.id = ensurePlaceId({ name: norm.name }, clean);
+            }
+            clean.push(norm);
+        }
+        localStorage.setItem(placeStoreKey(), JSON.stringify(clean.slice(-PLACES_CAP)));
     } catch (e) { console.warn('[command-x] place store save', e); }
 }
 
@@ -1455,13 +1498,14 @@ function saveLocationTrail(contactName, trail) {
 }
 
 function pushLocationTrail(contactName, placeId, mesId = null) {
-    if (!contactName || !placeId) return;
+    if (!contactName || !placeId) return false;
     const trail = loadLocationTrail(contactName);
     const last = trail[trail.length - 1];
     // Collapse consecutive identical entries
-    if (last && last.placeId === placeId) return;
+    if (last && last.placeId === placeId) return false;
     trail.push({ placeId, ts: Date.now(), mesId: mesId ?? null });
     saveLocationTrail(contactName, trail);
+    return true;
 }
 
 function removeTrailForMesId(mesId) {
@@ -1549,7 +1593,8 @@ function registerIncomingPlaces(incoming) {
 function applyContactPlaces(contacts, mesId) {
     if (!settings.trackLocations) return false;
     if (!contacts || !contacts.length) return false;
-    let changed = false;
+    let placesChanged = false;
+    let trailChanged = false;
     const stored = loadPlaces();
     for (const c of contacts) {
         if (!c.place) continue;
@@ -1560,13 +1605,12 @@ function applyContactPlaces(contacts, mesId) {
             if (!clean) continue;
             stored.push(clean);
             place = clean;
-            changed = true;
+            placesChanged = true;
         }
-        pushLocationTrail(c.name, place.id, mesId);
-        changed = true;
+        if (pushLocationTrail(c.name, place.id, mesId)) trailChanged = true;
     }
-    if (changed) savePlaces(stored);
-    return changed;
+    if (placesChanged) savePlaces(stored);
+    return placesChanged || trailChanged;
 }
 
 function describeKnownPlacesForPrompt() {
@@ -3985,6 +4029,11 @@ async function addPlaceAtCoords(x, y) {
 function wireMapInteractions() {
     if (!phoneContainer) return;
     const surface = phoneContainer.querySelector('#cx-map-surface');
+    // Idempotency guard: if this DOM tree has already been wired we skip,
+    // to prevent duplicate handlers if callers invoke us more than once.
+    const wireRoot = surface || phoneContainer.querySelector('[data-view="map"]');
+    if (wireRoot?.dataset.cxMapWired === '1') return;
+    if (wireRoot) wireRoot.dataset.cxMapWired = '1';
 
     phoneContainer.querySelector('#cx-map-upload')?.addEventListener('click', triggerMapImagePicker);
     phoneContainer.querySelector('#cx-map-clear-image')?.addEventListener('click', async () => {
@@ -4143,9 +4192,6 @@ function wirePhone() {
                 if (app === 'openclaw') {
                     syncOpenClawView();
                     setOpenClawStatus('Ready.');
-                }
-                if (app === 'map') {
-                    wireMapInteractions();
                 }
             }
         })
