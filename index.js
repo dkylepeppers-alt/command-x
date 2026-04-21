@@ -24,7 +24,7 @@ const INJECT_KEY_CONTACTS = 'command-x-contacts';
 const INJECT_KEY_PRIVATE_PHONE = 'command-x-private-phone';
 const INJECT_KEY_QUESTS = 'command-x-quests';
 const INJECT_KEY_MAP = 'command-x-map';
-const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true, manualHybridPrivateTexts: true, openclawMode: 'assist', contactsInjectEveryN: 1, questsInjectEveryN: 1, autoPrivatePollEveryN: 0, trackLocations: true, autoRegisterPlaces: true, mapInjectEveryN: 3, showLocationTrails: true };
+const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true, manualHybridPrivateTexts: true, openclawMode: 'assist', contactsInjectEveryN: 1, questsInjectEveryN: 1, autoPrivatePollEveryN: 0, trackLocations: true, autoRegisterPlaces: true, mapInjectEveryN: 3, showLocationTrails: true, utilityConnectionProfile: '' };
 const MAX_AVATAR_FILE_BYTES = 8 * 1024 * 1024; // 8 MB hard cap on raw upload size
 const MAX_MAP_IMAGE_WIDTH = 1024;           // max downscaled width for uploaded map image
 const AWAIT_TIMEOUT_MS = 30_000;             // ms before awaitingReply auto-clears
@@ -1898,6 +1898,60 @@ function parseQuestEnrichmentResponse(raw) {
     }
 }
 
+/**
+ * Switch to the user-configured utility Connection Profile (if any), run fn(),
+ * then restore the original profile.  Mirrors the approach used by ScenePulse.
+ * If no utility profile is configured, fn() runs on the current profile.
+ *
+ * @param {Function} fn  Async callback to execute under the utility profile.
+ * @returns {*} Whatever fn() returns.
+ */
+async function withUtilityProfile(fn) {
+    const profileId = settings.utilityConnectionProfile || '';
+    if (!profileId) return fn();
+
+    const ctx = getContext();
+    let previousProfileId = null;
+
+    // ── Capture current profile ──────────────────────────────────────────────
+    const profileSelect = document.querySelector('#connection_profiles, #connection_profile');
+    if (profileSelect) previousProfileId = profileSelect.value;
+
+    // ── Switch to utility profile ────────────────────────────────────────────
+    try {
+        if (typeof ctx.setConnectionProfile === 'function') {
+            await ctx.setConnectionProfile(profileId);
+        } else if (profileSelect) {
+            profileSelect.value = profileId;
+            profileSelect.dispatchEvent(new Event('change'));
+            await new Promise(r => setTimeout(r, 300));
+        }
+    } catch (e) {
+        console.warn(`[${EXT}] withUtilityProfile: profile switch failed`, e);
+    }
+
+    // ── Run the utility generation ───────────────────────────────────────────
+    try {
+        return await fn();
+    } finally {
+        // Restore original profile after a short delay so ST event handlers
+        // triggered by the profile switch have time to settle.
+        await new Promise(r => setTimeout(r, 500));
+        if (previousProfileId) {
+            try {
+                if (typeof ctx.setConnectionProfile === 'function') {
+                    await ctx.setConnectionProfile(previousProfileId);
+                } else if (profileSelect) {
+                    profileSelect.value = previousProfileId;
+                    profileSelect.dispatchEvent(new Event('change'));
+                }
+            } catch (e) {
+                console.warn(`[${EXT}] withUtilityProfile: profile restore failed`, e);
+            }
+        }
+    }
+}
+
 async function enrichQuestDraftIfNeeded(draft) {
     const ctx = getContext();
     if (typeof ctx.generateQuietPrompt !== 'function') return { draft, changed: false, error: new Error('generateQuietPrompt unavailable') };
@@ -1917,10 +1971,10 @@ async function enrichQuestDraftIfNeeded(draft) {
     questEnrichmentInFlight = true;
     let raw = null;
     try {
-        raw = await ctx.generateQuietPrompt({
+        raw = await withUtilityProfile(() => ctx.generateQuietPrompt({
             quietPrompt: buildQuestEnrichmentPrompt(draft),
             jsonSchema: questEnrichmentSchema(),
-        });
+        }));
         const parsed = parseQuestEnrichmentResponse(raw);
         const enriched = { ...draft };
         const fillIfMissing = (field, fallbackCheck) => {
@@ -2842,10 +2896,10 @@ async function pollPrivateMessages(options = {}) {
     }
 
     try {
-        const raw = await ctx.generateQuietPrompt({
+        const raw = await withUtilityProfile(() => ctx.generateQuietPrompt({
             quietPrompt: buildOutOfBandPollPrompt(),
             jsonSchema: privatePhoneSchema(),
-        });
+        }));
         const events = parsePrivatePhoneGeneration(raw);
         const nowTs = Date.now();
         saveExtensionChatState({
@@ -2912,7 +2966,7 @@ async function scanContactsNow() {
             `"status" is "online"/"offline"/"nearby", "mood" is an emoji + short descriptor, "location" is where they currently are, "relationship" is how they feel about the user, and "thoughts" is ONE short first-person sentence in the character's own voice — a brief passing thought (roughly under 15 words), NOT a recap or summary of the scene. ` +
             `Do NOT include ${excludeNote || 'the user'}. Do NOT include any prose, explanation, or other tags — output the [status] block only.`;
 
-        const raw = await ctx.generateQuietPrompt({ quietPrompt });
+        const raw = await withUtilityProfile(() => ctx.generateQuietPrompt({ quietPrompt }));
         const parsed = extractContacts(raw);
         if (!parsed || !parsed.length) {
             showToast('Command-X', 'Scan complete — no contacts detected.');
@@ -3473,6 +3527,22 @@ function buildMapView(contacts) {
         </div>`;
 }
 
+/**
+ * Returns <option> elements for all ST Connection Profiles, with the
+ * matching one pre-selected.  Falls back to an empty list if ST doesn't
+ * expose getConnectionProfiles().
+ */
+function buildConnectionProfileOptions(selectedId = '') {
+    const ctx = getContext();
+    const profiles = (typeof ctx.getConnectionProfiles === 'function') ? (ctx.getConnectionProfiles() || []) : [];
+    return profiles.map(p => {
+        const id = escAttr(p.id || p.name || '');
+        const label = escHtml(p.name || p.id || 'Unknown');
+        const sel = (id && id === escAttr(selectedId)) ? ' selected' : '';
+        return `<option value="${id}"${sel}>${label}</option>`;
+    }).join('');
+}
+
 function buildPhone() {
     const contacts = getKnownContactsForPrivateMessaging();
     const hasContacts = contacts.length > 0;
@@ -3675,6 +3745,15 @@ function buildPhone() {
                 <div class="cx-settings-row">
                     <span class="cx-settings-label">Lock Screen on Open</span>
                     <label class="cx-toggle"><input type="checkbox" id="cx-set-lock" ${settings.showLockscreen ? 'checked' : ''}><span class="cx-toggle-slider"></span></label>
+                </div>
+                <div class="cx-settings-section">ADVANCED</div>
+                <div class="cx-settings-row cx-settings-row-column">
+                    <span class="cx-settings-label">Utility model profile</span>
+                    <span class="cx-settings-hint">Used for AI fills (quest enrichment, contact scan, private poll). Leave blank to use the main chat model.</span>
+                    <select id="cx-set-utility-profile" class="cx-settings-select">
+                        <option value="">— use main chat model —</option>
+                        ${buildConnectionProfileOptions(settings.utilityConnectionProfile)}
+                    </select>
                 </div>
                 <div class="cx-settings-section">ABOUT</div>
                 <div class="cx-settings-row cx-settings-about">
@@ -4483,6 +4562,10 @@ function wirePhone() {
         settings.showLockscreen = e.target.checked;
         saveSettings();
     });
+    phoneContainer.querySelector('#cx-set-utility-profile')?.addEventListener('change', (e) => {
+        settings.utilityConnectionProfile = e.target.value || '';
+        saveSettings();
+    });
     // --- Map settings wiring ---
     phoneContainer.querySelector('#cx-set-track-locations')?.addEventListener('change', (e) => {
         settings.trackLocations = e.target.checked;
@@ -4927,6 +5010,21 @@ function loadSettings() {
     if (mapN) mapN.value = Math.max(1, Number(settings.mapInjectEveryN) || 3);
     const autoPollN = document.getElementById('cx_ext_auto_private_poll_n');
     if (autoPollN) autoPollN.value = Math.max(0, Number(settings.autoPrivatePollEveryN) || 0);
+    // Utility connection profile — populate the ST side panel select if present
+    const utilityProfileEl = document.getElementById('cx_ext_utility_profile');
+    if (utilityProfileEl) {
+        // Clear existing options (keep the blank "use main" option at index 0)
+        while (utilityProfileEl.options.length > 1) utilityProfileEl.remove(1);
+        const ctx2 = getContext();
+        const profiles = (typeof ctx2.getConnectionProfiles === 'function') ? (ctx2.getConnectionProfiles() || []) : [];
+        for (const p of profiles) {
+            const opt = document.createElement('option');
+            opt.value = p.id || p.name || '';
+            opt.textContent = p.name || p.id || 'Unknown';
+            utilityProfileEl.appendChild(opt);
+        }
+        utilityProfileEl.value = settings.utilityConnectionProfile || '';
+    }
 }
 
 function saveSettings() {
@@ -4949,6 +5047,9 @@ function saveSettings() {
     // cx_ext_auto_private_poll_n = ST settings panel; cx-set-auto-poll-n = in-phone settings view
     const autoPollNRaw = Number(document.getElementById('cx_ext_auto_private_poll_n')?.value ?? document.getElementById('cx-set-auto-poll-n')?.value);
     settings.autoPrivatePollEveryN = Number.isFinite(autoPollNRaw) && autoPollNRaw >= 0 ? Math.floor(autoPollNRaw) : (settings.autoPrivatePollEveryN || 0);
+    // cx_ext_utility_profile = ST side panel; cx-set-utility-profile = in-phone settings view
+    const utilityProfileRaw = document.getElementById('cx_ext_utility_profile')?.value ?? document.getElementById('cx-set-utility-profile')?.value;
+    if (utilityProfileRaw !== undefined) settings.utilityConnectionProfile = utilityProfileRaw || '';
     const ctx = getContext();
     ctx.extensionSettings[EXT] = { ...settings };
     ctx.saveSettingsDebounced();
@@ -4969,7 +5070,7 @@ jQuery(async () => {
 
         loadSettings();
         refreshPrivatePhonePrompt();
-        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_openclaw_mode, #cx_ext_contacts_every_n, #cx_ext_quests_every_n, #cx_ext_auto_private_poll_n, #cx_ext_track_locations, #cx_ext_auto_register_places, #cx_ext_show_trails, #cx_ext_map_every_n').on('change', () => {
+        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_openclaw_mode, #cx_ext_contacts_every_n, #cx_ext_quests_every_n, #cx_ext_auto_private_poll_n, #cx_ext_track_locations, #cx_ext_auto_register_places, #cx_ext_show_trails, #cx_ext_map_every_n, #cx_ext_utility_profile').on('change', () => {
             saveSettings();
             if (settings.enabled) {
                 createPanel();
