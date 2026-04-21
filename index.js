@@ -3345,10 +3345,13 @@ function buildMapView(contacts) {
     const meta = loadMapMeta();
     const places = loadPlaces();
     const isImage = meta.mode === 'image' && meta.imageDataUrl;
-    const surfaceStyle = isImage
+    // The uploaded map image lives on the inner viewport so it scales/pans
+    // with the pins when the user zooms.
+    const viewportStyle = isImage
         ? `background-image:url("${escAttr(meta.imageDataUrl)}");background-size:cover;background-position:center;`
         : '';
     const surfaceClass = isImage ? 'cx-map-surface cx-map-surface-image' : 'cx-map-surface cx-map-surface-schematic';
+    const viewportClass = isImage ? 'cx-map-viewport cx-map-viewport-image' : 'cx-map-viewport cx-map-viewport-schematic';
 
     // Cache all contact trails in a single pass rather than re-reading localStorage
     // several times per contact during rendering.
@@ -3437,17 +3440,26 @@ function buildMapView(contacts) {
                 </div>
                 <div class="cx-profiles-actions">
                     <button class="cx-settings-btn" id="cx-map-upload">${isImage ? 'Replace Image' : 'Upload Image'}</button>
+                    <button class="cx-settings-btn" id="cx-map-help" title="How to upload a map background" aria-label="Map upload help">ℹ️</button>
                     ${isImage ? '<button class="cx-settings-btn" id="cx-map-clear-image">Use Schematic</button>' : ''}
                     <button class="cx-settings-btn" id="cx-map-set-you" title="Set your position on the map">📍 You</button>
                 </div>
             </div>
             <div class="cx-map-body">
-                <div class="${surfaceClass}" id="cx-map-surface" style="${surfaceStyle}">
-                    ${isImage ? '' : '<div class="cx-map-schematic-grid" data-cx-map-decoration="1" aria-hidden="true"></div>'}
-                    ${trailsSvg}
-                    ${placePins}
-                    ${contactPins}
-                    ${youPinHtml}
+                <div class="${surfaceClass}" id="cx-map-surface">
+                    <div class="${viewportClass}" id="cx-map-viewport" style="${viewportStyle}">
+                        ${isImage ? '' : '<div class="cx-map-schematic-grid" data-cx-map-decoration="1" aria-hidden="true"></div>'}
+                        ${trailsSvg}
+                        ${placePins}
+                        ${contactPins}
+                        ${youPinHtml}
+                    </div>
+                    <div class="cx-map-controls" aria-hidden="false">
+                        <button type="button" class="cx-map-ctrl-btn" id="cx-map-zoom-in" aria-label="Zoom in" title="Zoom in">＋</button>
+                        <button type="button" class="cx-map-ctrl-btn" id="cx-map-zoom-out" aria-label="Zoom out" title="Zoom out">−</button>
+                        <button type="button" class="cx-map-ctrl-btn" id="cx-map-zoom-reset" aria-label="Reset view" title="Reset view">⟲</button>
+                    </div>
+                    <div class="cx-map-zoom-indicator" id="cx-map-zoom-indicator" aria-hidden="true">100%</div>
                 </div>
                 <div class="cx-map-legend">
                     <div class="cx-map-legend-title">Places</div>
@@ -3959,6 +3971,39 @@ function clearAllMapDataForCurrentChat() {
     } catch (e) { console.warn('[command-x] clear map data', e); }
 }
 
+/**
+ * Show user-facing instructions for uploading a custom map background.
+ * Invoked from the Map header's ℹ️ button. Content covers supported formats,
+ * recommended dimensions, how pins behave on the uploaded image, the zoom/pan
+ * interaction model, and how to revert to the schematic view.
+ */
+function showMapUploadHelp() {
+    // Map uploads share the avatar upload byte cap; alias here so the help
+    // copy and future maintainers read this as a map-image limit.
+    const MAX_MAP_IMAGE_FILE_BYTES = MAX_AVATAR_FILE_BYTES;
+    const sizeMb = (MAX_MAP_IMAGE_FILE_BYTES / (1024 * 1024)).toFixed(0);
+    const maxW = MAX_MAP_IMAGE_WIDTH;
+    const message = [
+        'Tap "Upload Image" to set a custom background for the map (city plan, floor plan, fantasy map, screenshot — anything you like).',
+        '',
+        'Supported formats: PNG, JPG, GIF, or WebP.',
+        `Max file size: ${sizeMb} MB — raw files larger than that are rejected. Accepted uploads are stored locally as JPEG to keep chat storage small; if an image is wider than ${maxW}px on the long edge, it is also automatically downscaled first.`,
+        '',
+        'Recommended image shape: square (1:1). The map surface is a square frame and non-square images are cropped to "cover" it, so anything near the edges of a wide or tall image may be trimmed.',
+        '',
+        'After uploading:',
+        '• Tap any empty spot on the map to add a new place pin at that location.',
+        '• Drag existing place pins or your 📍 You pin to fine-tune positions.',
+        '• Pinch, scroll-wheel, or double-click to zoom; drag to pan. Pin coordinates stay anchored to the image, so they stay correct at any zoom level.',
+        '• Tap "📍 You" then the map to drop your own position marker.',
+        '',
+        'Reverting: tap "Use Schematic" to remove the uploaded image and go back to the built-in grid background. Place pins you have created are kept either way — only the background changes.',
+        '',
+        'Privacy note: map images are stored locally in your browser (localStorage, per SillyTavern chat). They are never uploaded to the LLM or any server.',
+    ].join('\n');
+    cxAlert(message, 'Uploading a Map Background');
+}
+
 function triggerMapImagePicker() {
     const input = document.createElement('input');
     input.type = 'file';
@@ -4024,11 +4069,13 @@ async function addPlaceAtCoords(x, y) {
 
 /**
  * Wire all map-view interactions: tap-to-add place, tap-pin-to-open-chat,
- * drag-to-reposition, image upload/clear, "set You pin" toggle, delete-place.
+ * drag-to-reposition, image upload/clear, "set You pin" toggle, delete-place,
+ * plus wheel/pinch zoom and drag-to-pan of the whole map.
  */
 function wireMapInteractions() {
     if (!phoneContainer) return;
     const surface = phoneContainer.querySelector('#cx-map-surface');
+    const viewport = phoneContainer.querySelector('#cx-map-viewport');
     // Idempotency guard: if this DOM tree has already been wired we skip,
     // to prevent duplicate handlers if callers invoke us more than once.
     const wireRoot = surface || phoneContainer.querySelector('[data-view="map"]');
@@ -4036,6 +4083,7 @@ function wireMapInteractions() {
     if (wireRoot) wireRoot.dataset.cxMapWired = '1';
 
     phoneContainer.querySelector('#cx-map-upload')?.addEventListener('click', triggerMapImagePicker);
+    phoneContainer.querySelector('#cx-map-help')?.addEventListener('click', () => showMapUploadHelp());
     phoneContainer.querySelector('#cx-map-clear-image')?.addEventListener('click', async () => {
         if (!await cxConfirm('Switch back to the schematic map? The uploaded image will be removed.', 'Map', { confirmLabel: 'Clear' })) return;
         const meta = loadMapMeta();
@@ -4087,17 +4135,223 @@ function wireMapInteractions() {
         })
     );
 
-    if (!surface) return;
+    if (!surface || !viewport) return;
 
-    // Surface click → add new place (only on empty area of the surface itself)
+    /* === Zoom / pan state === */
+    // scale=1 means the viewport fills the surface exactly. We clamp translation
+    // so the viewport edges never move inside the surface edges — the user can
+    // never see "outside" the map.
+    const MIN_SCALE = 1;
+    const MAX_SCALE = 5;
+    const ZOOM_STEP = 1.25;
+    const PAN_THRESHOLD_PX = 5; // movement below this still counts as a tap
+    const view = { scale: 1, tx: 0, ty: 0 };
+    const zoomIndicator = phoneContainer.querySelector('#cx-map-zoom-indicator');
+    let hideIndicatorTimer = null;
+
+    const clampTranslation = () => {
+        const rect = surface.getBoundingClientRect();
+        // At scale s, inner viewport is rect.width * s wide.
+        // Translation tx in px is applied before scaling (transform-origin 0 0),
+        // so the viewport's screen-space left is rect.left + tx and its right is
+        // rect.left + tx + rect.width * scale. Constrain so it covers the surface:
+        // tx <= 0 and tx >= rect.width * (1 - scale).
+        const minTx = rect.width * (1 - view.scale);
+        const minTy = rect.height * (1 - view.scale);
+        if (view.tx > 0) view.tx = 0;
+        if (view.tx < minTx) view.tx = minTx;
+        if (view.ty > 0) view.ty = 0;
+        if (view.ty < minTy) view.ty = minTy;
+    };
+    const applyTransform = () => {
+        clampTranslation();
+        viewport.style.transform = `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})`;
+        if (zoomIndicator) {
+            zoomIndicator.textContent = `${Math.round(view.scale * 100)}%`;
+            zoomIndicator.classList.add('cx-map-zoom-indicator-visible');
+            if (hideIndicatorTimer) clearTimeout(hideIndicatorTimer);
+            hideIndicatorTimer = setTimeout(() => {
+                zoomIndicator.classList.remove('cx-map-zoom-indicator-visible');
+            }, 1200);
+        }
+    };
+    // Zoom toward a fixed point (in surface-local pixel coords) so the point
+    // under the cursor/pinch-center stays stationary.
+    const zoomAt = (surfacePxX, surfacePxY, newScale) => {
+        const clamped = Math.max(MIN_SCALE, Math.min(MAX_SCALE, newScale));
+        if (clamped === view.scale) return;
+        const ratio = clamped / view.scale;
+        view.tx = surfacePxX - (surfacePxX - view.tx) * ratio;
+        view.ty = surfacePxY - (surfacePxY - view.ty) * ratio;
+        view.scale = clamped;
+        applyTransform();
+    };
+    const zoomAtCenter = (newScale) => {
+        const rect = surface.getBoundingClientRect();
+        zoomAt(rect.width / 2, rect.height / 2, newScale);
+    };
+    const resetView = () => {
+        view.scale = 1; view.tx = 0; view.ty = 0;
+        applyTransform();
+    };
+
+    // Button controls
+    phoneContainer.querySelector('#cx-map-zoom-in')?.addEventListener('click', (e) => {
+        e.stopPropagation(); zoomAtCenter(view.scale * ZOOM_STEP);
+    });
+    phoneContainer.querySelector('#cx-map-zoom-out')?.addEventListener('click', (e) => {
+        e.stopPropagation(); zoomAtCenter(view.scale / ZOOM_STEP);
+    });
+    phoneContainer.querySelector('#cx-map-zoom-reset')?.addEventListener('click', (e) => {
+        e.stopPropagation(); resetView();
+    });
+
+    // Wheel zoom: zoom toward cursor position. Prevent default so the phone
+    // body doesn't scroll while the user is zooming.
+    surface.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const rect = surface.getBoundingClientRect();
+        const px = e.clientX - rect.left;
+        const py = e.clientY - rect.top;
+        // Scale factor per wheel notch. deltaY < 0 = zoom in.
+        const factor = e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+        zoomAt(px, py, view.scale * factor);
+    }, { passive: false });
+
+    // Double-click to zoom in toward the point.
+    surface.addEventListener('dblclick', (e) => {
+        if (e.target.closest('.cx-map-pin')) return;
+        if (e.target.closest('.cx-map-controls')) return;
+        const rect = surface.getBoundingClientRect();
+        zoomAt(e.clientX - rect.left, e.clientY - rect.top, view.scale * ZOOM_STEP * ZOOM_STEP);
+    });
+
+    /* === Pan + pinch via pointer events === */
+    // Active pointers (for pinch detection). We only track pointers that started
+    // on the surface/viewport background (not on pins or controls).
+    const pointers = new Map(); // pointerId -> { x, y }
+    let panState = null; // { startTx, startTy, startX, startY, moved }
+    let pinchState = null; // { startDist, startMidX, startMidY, startScale, startTx, startTy }
+    // Tracks whether the most recent pointer gesture panned (so the subsequent
+    // click event can be ignored by the tap-to-add-place handler).
+    let lastGestureWasPan = false;
+
+    const midpoint = () => {
+        const pts = Array.from(pointers.values());
+        return {
+            x: (pts[0].x + pts[1].x) / 2,
+            y: (pts[0].y + pts[1].y) / 2,
+        };
+    };
+    const distance = () => {
+        const pts = Array.from(pointers.values());
+        return Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+    };
+
+    surface.addEventListener('pointerdown', (e) => {
+        // Ignore pointers that started on interactive children.
+        if (e.target.closest('.cx-map-pin')) return;
+        if (e.target.closest('.cx-map-controls')) return;
+        if (e.button !== undefined && e.button !== 0) return;
+        surface.setPointerCapture?.(e.pointerId);
+        pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (pointers.size === 1) {
+            panState = {
+                startTx: view.tx,
+                startTy: view.ty,
+                startX: e.clientX,
+                startY: e.clientY,
+                moved: false,
+            };
+            pinchState = null;
+        } else if (pointers.size === 2) {
+            // Transition from pan to pinch.
+            const mid = midpoint();
+            const rect = surface.getBoundingClientRect();
+            pinchState = {
+                startDist: distance() || 1,
+                startMidSurfaceX: mid.x - rect.left,
+                startMidSurfaceY: mid.y - rect.top,
+                startScale: view.scale,
+                startTx: view.tx,
+                startTy: view.ty,
+                lastMidX: mid.x,
+                lastMidY: mid.y,
+            };
+            panState = null;
+            lastGestureWasPan = true; // any pinch cancels tap-to-add
+        }
+    });
+
+    surface.addEventListener('pointermove', (e) => {
+        if (!pointers.has(e.pointerId)) return;
+        pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+        if (pinchState && pointers.size >= 2) {
+            // Pinch: zoom by distance ratio anchored at initial midpoint; pan
+            // by the delta of the current midpoint from the start.
+            const dist = distance() || 1;
+            const mid = midpoint();
+            const newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, pinchState.startScale * (dist / pinchState.startDist)));
+            // Compute new tx/ty so that the point originally under the
+            // pinch midpoint stays under the current midpoint.
+            const rect = surface.getBoundingClientRect();
+            const curMidX = mid.x - rect.left;
+            const curMidY = mid.y - rect.top;
+            const ratio = newScale / pinchState.startScale;
+            view.scale = newScale;
+            view.tx = curMidX - (pinchState.startMidSurfaceX - pinchState.startTx) * ratio;
+            view.ty = curMidY - (pinchState.startMidSurfaceY - pinchState.startTy) * ratio;
+            applyTransform();
+            return;
+        }
+
+        if (panState && pointers.size === 1) {
+            const dx = e.clientX - panState.startX;
+            const dy = e.clientY - panState.startY;
+            if (!panState.moved && Math.hypot(dx, dy) > PAN_THRESHOLD_PX) {
+                panState.moved = true;
+            }
+            if (panState.moved) {
+                view.tx = panState.startTx + dx;
+                view.ty = panState.startTy + dy;
+                applyTransform();
+            }
+        }
+    });
+
+    const endPointer = (e) => {
+        if (!pointers.has(e.pointerId)) return;
+        pointers.delete(e.pointerId);
+        if (pointers.size < 2) pinchState = null;
+        if (pointers.size === 0) {
+            lastGestureWasPan = !!(panState && panState.moved) || lastGestureWasPan;
+            // Reset the flag on the next microtask — after the click event
+            // handler below has had a chance to read it.
+            if (lastGestureWasPan) {
+                queueMicrotask(() => { lastGestureWasPan = false; });
+            }
+            panState = null;
+        }
+    };
+    surface.addEventListener('pointerup', endPointer);
+    surface.addEventListener('pointercancel', endPointer);
+
+    // Surface click → add new place (only on empty area of the surface itself,
+    // and only when the most recent gesture wasn't a pan/pinch).
     surface.addEventListener('click', async (e) => {
         // Bail if the click landed on a pin (pins stopPropagation, but be defensive).
         if (e.target.closest('.cx-map-pin')) return;
-        // Allow clicks on the surface or any of its explicit click-through decorations.
-        if (e.target !== surface && !e.target.closest('[data-cx-map-decoration="1"]')) {
+        if (e.target.closest('.cx-map-controls')) return;
+        // Suppress click that was really the tail end of a drag/pan/pinch.
+        if (lastGestureWasPan) { lastGestureWasPan = false; return; }
+        // Allow clicks on the surface, viewport, or any explicit click-through decorations.
+        if (e.target !== surface && e.target !== viewport && !e.target.closest('[data-cx-map-decoration="1"]')) {
             return;
         }
-        const rect = surface.getBoundingClientRect();
+        // Convert click coordinates into original map space using the viewport's
+        // bounding rect (which already reflects the current scale/translation).
+        const rect = viewport.getBoundingClientRect();
         const x = (e.clientX - rect.left) / rect.width;
         const y = (e.clientY - rect.top) / rect.height;
         if (armYouPin) {
@@ -4116,7 +4370,9 @@ function wireMapInteractions() {
         await addPlaceAtCoords(x, y);
     });
 
-    // Drag pins (places + user "You" pin) — pointer events cover both mouse + touch
+    // Drag pins (places + user "You" pin) — pointer events cover both mouse + touch.
+    // Coordinates are computed against the viewport's rect (not the surface's)
+    // so the committed position stays correct regardless of zoom/pan.
     const makeDraggable = (el, onCommit) => {
         if (!el) return;
         el.addEventListener('pointerdown', (ev) => {
@@ -4127,10 +4383,10 @@ function wireMapInteractions() {
             const startX = ev.clientX;
             const startY = ev.clientY;
             let moved = false;
-            // Recompute the surface rect on each move/up so a resize or scroll mid-drag
-            // doesn't desync coordinates.
+            // Recompute the viewport rect on each move/up so a resize, scroll,
+            // or zoom mid-drag doesn't desync coordinates.
             const onMove = (mv) => {
-                const rect = surface.getBoundingClientRect();
+                const rect = viewport.getBoundingClientRect();
                 const cx = clampUnit((mv.clientX - rect.left) / rect.width) * 100;
                 const cy = clampUnit((mv.clientY - rect.top) / rect.height) * 100;
                 el.style.left = `${cx.toFixed(2)}%`;
@@ -4143,7 +4399,7 @@ function wireMapInteractions() {
                 el.removeEventListener('pointercancel', onUp);
                 el._wasDragged = moved;
                 if (moved) {
-                    const rect = surface.getBoundingClientRect();
+                    const rect = viewport.getBoundingClientRect();
                     const finalX = clampUnit((up.clientX - rect.left) / rect.width);
                     const finalY = clampUnit((up.clientY - rect.top) / rect.height);
                     onCommit(finalX, finalY);
