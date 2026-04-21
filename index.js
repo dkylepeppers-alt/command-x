@@ -3440,6 +3440,7 @@ function buildMapView(contacts) {
                 </div>
                 <div class="cx-profiles-actions">
                     <button class="cx-settings-btn" id="cx-map-upload">${isImage ? 'Replace Image' : 'Upload Image'}</button>
+                    <button class="cx-settings-btn" id="cx-map-help" title="How to upload a map background" aria-label="Map upload help">ℹ️</button>
                     ${isImage ? '<button class="cx-settings-btn" id="cx-map-clear-image">Use Schematic</button>' : ''}
                     <button class="cx-settings-btn" id="cx-map-set-you" title="Set your position on the map">📍 You</button>
                 </div>
@@ -3970,6 +3971,36 @@ function clearAllMapDataForCurrentChat() {
     } catch (e) { console.warn('[command-x] clear map data', e); }
 }
 
+/**
+ * Show user-facing instructions for uploading a custom map background.
+ * Invoked from the Map header's ℹ️ button. Content covers supported formats,
+ * recommended dimensions, how pins behave on the uploaded image, the zoom/pan
+ * interaction model, and how to revert to the schematic view.
+ */
+function showMapUploadHelp() {
+    const sizeMb = (MAX_AVATAR_FILE_BYTES / (1024 * 1024)).toFixed(0);
+    const maxW = MAX_MAP_IMAGE_WIDTH;
+    const message = [
+        'Tap "Upload Image" to set a custom background for the map (city plan, floor plan, fantasy map, screenshot — anything you like).',
+        '',
+        'Supported formats: PNG, JPG, GIF, or WebP.',
+        `Max file size: ${sizeMb} MB — raw files larger than that are rejected. If an accepted image is wider than ${maxW}px on the long edge, the extension automatically downscales it and re-encodes it as JPEG to keep chat storage small.`,
+        '',
+        'Recommended image shape: square (1:1). The map surface is a square frame and non-square images are cropped to "cover" it, so anything near the edges of a wide or tall image may be trimmed.',
+        '',
+        'After uploading:',
+        '• Tap any empty spot on the map to add a new place pin at that location.',
+        '• Drag existing place pins or your 📍 You pin to fine-tune positions.',
+        '• Pinch, scroll-wheel, or double-click to zoom; drag to pan. Pin coordinates stay anchored to the image, so they stay correct at any zoom level.',
+        '• Tap "📍 You" then the map to drop your own position marker.',
+        '',
+        'Reverting: tap "Use Schematic" to remove the uploaded image and go back to the built-in grid background. Place pins you have created are kept either way — only the background changes.',
+        '',
+        'Privacy note: map images are stored locally in your browser (localStorage, per SillyTavern chat). They are never uploaded to the LLM or any server.',
+    ].join('\n');
+    cxAlert(message, 'Uploading a Map Background');
+}
+
 function triggerMapImagePicker() {
     const input = document.createElement('input');
     input.type = 'file';
@@ -4049,6 +4080,7 @@ function wireMapInteractions() {
     if (wireRoot) wireRoot.dataset.cxMapWired = '1';
 
     phoneContainer.querySelector('#cx-map-upload')?.addEventListener('click', triggerMapImagePicker);
+    phoneContainer.querySelector('#cx-map-help')?.addEventListener('click', () => showMapUploadHelp());
     phoneContainer.querySelector('#cx-map-clear-image')?.addEventListener('click', async () => {
         if (!await cxConfirm('Switch back to the schematic map? The uploaded image will be removed.', 'Map', { confirmLabel: 'Clear' })) return;
         const meta = loadMapMeta();
