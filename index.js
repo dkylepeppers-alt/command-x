@@ -17,18 +17,22 @@ import {
     extension_prompt_roles,
 } from '../../../../script.js';
 
-const VERSION = '0.11.0';
+const VERSION = '0.12.0';
 const EXT = 'command-x';
 const INJECT_KEY = 'command-x-sms';
 const INJECT_KEY_CONTACTS = 'command-x-contacts';
 const INJECT_KEY_PRIVATE_PHONE = 'command-x-private-phone';
 const INJECT_KEY_QUESTS = 'command-x-quests';
-const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true, manualHybridPrivateTexts: true, openclawMode: 'assist', contactsInjectEveryN: 1, questsInjectEveryN: 1, autoPrivatePollEveryN: 0 };
+const INJECT_KEY_MAP = 'command-x-map';
+const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true, manualHybridPrivateTexts: true, openclawMode: 'assist', contactsInjectEveryN: 1, questsInjectEveryN: 1, autoPrivatePollEveryN: 0, trackLocations: true, autoRegisterPlaces: true, mapInjectEveryN: 3, showLocationTrails: true };
 const MAX_AVATAR_FILE_BYTES = 8 * 1024 * 1024; // 8 MB hard cap on raw upload size
+const MAX_MAP_IMAGE_WIDTH = 1024;           // max downscaled width for uploaded map image
 const AWAIT_TIMEOUT_MS = 30_000;             // ms before awaitingReply auto-clears
 const CLOCK_INTERVAL_MS = 30_000;            // clock display refresh interval
 const MESSAGE_HISTORY_CAP = 200;             // max messages stored per contact
 const QUEST_HISTORY_CAP = 150;              // max quests stored
+const PLACES_CAP = 40;                      // max registered places per chat
+const LOCATION_TRAIL_CAP = 50;              // max trail entries per contact
 const TOAST_DURATION_MS = 4_000;            // toast auto-dismiss duration
 const CONTACT_GRADIENTS = [
     'linear-gradient(135deg,#553355,#442244)',
@@ -773,6 +777,7 @@ function extractContacts(raw) {
             relationship: c.relationship || null,
             thoughts: c.thoughts || null,
             avatarUrl: c.avatarUrl || null,
+            place: typeof c.place === 'string' ? c.place.trim() || null : null,
         }));
     } catch (e) {
         console.warn('[command-x] failed to parse [status] JSON:', e);
@@ -1218,6 +1223,428 @@ function clearQuestPrompt() {
     setExtensionPrompt(INJECT_KEY_QUESTS, '', extension_prompt_types.NONE, 0);
 }
 
+/* ======================================================================
+   MAP STORE — places, map metadata, and per-contact location trails.
+   Keyed per chat. Places are first-class entities with normalized (x,y)
+   coordinates (0..1) over either a schematic canvas or uploaded image.
+   ====================================================================== */
+
+const PLACE_TAG_RE = /\[place\]([\s\S]*?)\[\/place\]/gi;
+
+function placeStoreKey() {
+    return `cx-places-${currentChatId()}`;
+}
+
+function mapMetaKey() {
+    return `cx-map-${currentChatId()}`;
+}
+
+function locationTrailKey(contactName) {
+    return `cx-loctrail-${currentChatId()}-${contactName}`;
+}
+
+/**
+ * Normalize a stored place entry, tolerating legacy/corrupt shapes. Returns
+ * null if the entry can't be salvaged (missing name). All callers rely on
+ * `id` being a string and `x`/`y` being finite 0..1 numbers.
+ */
+function normalizeStoredPlace(raw, siblingList = []) {
+    if (!raw || typeof raw !== 'object') return null;
+    const name = typeof raw.name === 'string' ? raw.name.trim() : '';
+    if (!name) return null;
+    const xNum = Number(raw.x);
+    const yNum = Number(raw.y);
+    const hasCoords = Number.isFinite(xNum) && Number.isFinite(yNum);
+    const coords = hasCoords
+        ? { x: clampUnit(xNum), y: clampUnit(yNum) }
+        : assignAutoPlaceCoords({ name }, siblingList);
+    const aliasesIn = Array.isArray(raw.aliases) ? raw.aliases : [];
+    const aliases = aliasesIn.map(a => String(a || '').trim()).filter(Boolean).slice(0, 8);
+    const id = (typeof raw.id === 'string' && raw.id.trim())
+        ? raw.id.trim()
+        : ensurePlaceId({ name }, siblingList);
+    return {
+        id,
+        name,
+        emoji: (typeof raw.emoji === 'string' && raw.emoji.trim()) ? raw.emoji.trim() : '📍',
+        x: coords.x,
+        y: coords.y,
+        aliases,
+        userPinned: !!raw.userPinned,
+    };
+}
+
+function loadPlaces() {
+    try {
+        const parsed = JSON.parse(localStorage.getItem(placeStoreKey()) || '[]');
+        if (!Array.isArray(parsed)) return [];
+        const result = [];
+        for (const raw of parsed) {
+            const clean = normalizeStoredPlace(raw, result);
+            if (!clean) continue;
+            // Guarantee unique id across the loaded set.
+            if (result.some(p => p.id === clean.id)) {
+                clean.id = ensurePlaceId({ name: clean.name }, result);
+            }
+            result.push(clean);
+        }
+        return result;
+    } catch { return []; }
+}
+
+function savePlaces(places) {
+    try {
+        const list = Array.isArray(places) ? places : [];
+        const clean = [];
+        for (const raw of list) {
+            const norm = normalizeStoredPlace(raw, clean);
+            if (!norm) continue;
+            if (clean.some(p => p.id === norm.id)) {
+                norm.id = ensurePlaceId({ name: norm.name }, clean);
+            }
+            clean.push(norm);
+        }
+        localStorage.setItem(placeStoreKey(), JSON.stringify(clean.slice(-PLACES_CAP)));
+    } catch (e) { console.warn('[command-x] place store save', e); }
+}
+
+function defaultMapMeta() {
+    return { mode: 'schematic', imageDataUrl: null, width: 0, height: 0, userPin: null };
+}
+
+function loadMapMeta() {
+    try {
+        const parsed = JSON.parse(localStorage.getItem(mapMetaKey()) || 'null');
+        if (!parsed || typeof parsed !== 'object') return defaultMapMeta();
+        return {
+            mode: parsed.mode === 'image' ? 'image' : 'schematic',
+            imageDataUrl: typeof parsed.imageDataUrl === 'string' ? parsed.imageDataUrl : null,
+            width: Number(parsed.width) || 0,
+            height: Number(parsed.height) || 0,
+            userPin: parsed.userPin && Number.isFinite(Number(parsed.userPin.x)) && Number.isFinite(Number(parsed.userPin.y))
+                ? { x: clampUnit(parsed.userPin.x), y: clampUnit(parsed.userPin.y) }
+                : null,
+        };
+    } catch { return defaultMapMeta(); }
+}
+
+function saveMapMeta(meta) {
+    try { localStorage.setItem(mapMetaKey(), JSON.stringify(meta || defaultMapMeta())); }
+    catch (e) { console.warn('[command-x] map meta save', e); }
+}
+
+function clampUnit(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return 0.5;
+    return Math.max(0.02, Math.min(0.98, v));
+}
+
+function normalizePlaceName(name) {
+    return String(name || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function placeMatchKeys(place) {
+    const keys = new Set();
+    const nm = normalizePlaceName(place?.name);
+    if (nm) keys.add(nm);
+    for (const alias of (Array.isArray(place?.aliases) ? place.aliases : [])) {
+        const a = normalizePlaceName(alias);
+        if (a) keys.add(a);
+    }
+    return keys;
+}
+
+function findPlaceByNameOrAlias(query, places = null) {
+    const list = places || loadPlaces();
+    const key = normalizePlaceName(query);
+    if (!key) return null;
+    for (const p of list) {
+        if (placeMatchKeys(p).has(key)) return p;
+    }
+    return null;
+}
+
+function ensurePlaceId(place = {}, existingList = []) {
+    const raw = String(place.id || '').trim();
+    if (raw) return raw;
+    const slug = normalizePlaceName(place.name).replace(/\s+/g, '-') || 'place';
+    let candidate = `place_${slug}`;
+    const taken = new Set(existingList.map(p => p.id));
+    let i = 1;
+    while (taken.has(candidate)) { candidate = `place_${slug}_${i++}`; }
+    return candidate;
+}
+
+/**
+ * Auto-assign normalized (x, y) coords for a new place in schematic mode.
+ * If an anchor (`near` place name) is supplied and exists, we place the new
+ * pin on a circular offset around the anchor; otherwise we spiral outward
+ * from the center, avoiding existing pins where possible.
+ */
+function assignAutoPlaceCoords(place, existingPlaces) {
+    if (Number.isFinite(Number(place.x)) && Number.isFinite(Number(place.y))) {
+        return { x: clampUnit(place.x), y: clampUnit(place.y) };
+    }
+    const anchor = place.near ? findPlaceByNameOrAlias(place.near, existingPlaces) : null;
+    if (anchor && Number.isFinite(Number(anchor.x)) && Number.isFinite(Number(anchor.y))) {
+        const angle = (existingPlaces.length * 0.9 + Math.random() * 0.4) * Math.PI;
+        const radius = 0.12 + Math.random() * 0.06;
+        return {
+            x: clampUnit(anchor.x + Math.cos(angle) * radius),
+            y: clampUnit(anchor.y + Math.sin(angle) * radius),
+        };
+    }
+    if (!existingPlaces.length) return { x: 0.5, y: 0.5 };
+    // spiral outward
+    const n = existingPlaces.length;
+    const angle = n * 2.4;
+    const radius = Math.min(0.42, 0.08 + n * 0.035);
+    return {
+        x: clampUnit(0.5 + Math.cos(angle) * radius),
+        y: clampUnit(0.5 + Math.sin(angle) * radius),
+    };
+}
+
+function sanitizePlace(place, existingPlaces = []) {
+    if (!place || typeof place.name !== 'string') return null;
+    const name = place.name.trim();
+    if (!name) return null;
+    const aliasesIn = Array.isArray(place.aliases) ? place.aliases : [];
+    const aliases = aliasesIn.map(a => String(a || '').trim()).filter(Boolean).slice(0, 8);
+    const coords = assignAutoPlaceCoords(place, existingPlaces);
+    return {
+        id: ensurePlaceId(place, existingPlaces),
+        name,
+        emoji: String(place.emoji || '📍').trim() || '📍',
+        x: coords.x,
+        y: coords.y,
+        aliases,
+        userPinned: !!place.userPinned,
+    };
+}
+
+function upsertPlace(place, options = {}) {
+    const stored = loadPlaces();
+    const existing = findPlaceByNameOrAlias(place.name, stored);
+    if (existing) {
+        // Only update coords if user explicitly repositioned OR existing has no coords
+        const merged = { ...existing, ...place, id: existing.id };
+        if (!options.reposition) {
+            merged.x = existing.x;
+            merged.y = existing.y;
+        } else {
+            merged.x = clampUnit(place.x);
+            merged.y = clampUnit(place.y);
+        }
+        merged.aliases = Array.isArray(place.aliases) && place.aliases.length
+            ? Array.from(new Set([...(existing.aliases || []), ...place.aliases.map(a => String(a || '').trim()).filter(Boolean)]))
+            : (existing.aliases || []);
+        merged.userPinned = !!(options.reposition || existing.userPinned || place.userPinned);
+        const idx = stored.findIndex(p => p.id === existing.id);
+        if (idx >= 0) stored[idx] = merged;
+        savePlaces(stored);
+        return merged;
+    }
+    const clean = sanitizePlace(place, stored);
+    if (!clean) return null;
+    stored.push(clean);
+    savePlaces(stored);
+    return clean;
+}
+
+function deletePlace(placeId) {
+    const stored = loadPlaces();
+    const idx = stored.findIndex(p => p.id === placeId);
+    if (idx < 0) return false;
+    stored.splice(idx, 1);
+    savePlaces(stored);
+    // Scrub trail entries pointing to this place (cheap pass over current-chat keys)
+    try {
+        const chatId = currentChatId();
+        const prefix = `cx-loctrail-${chatId}-`;
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (!key || !key.startsWith(prefix)) continue;
+            try {
+                const trail = JSON.parse(localStorage.getItem(key) || '[]');
+                if (!Array.isArray(trail)) continue;
+                const filtered = trail.filter(e => e && e.placeId !== placeId);
+                if (filtered.length !== trail.length) {
+                    localStorage.setItem(key, JSON.stringify(filtered));
+                }
+            } catch { /* ignore */ }
+        }
+    } catch { /* ignore */ }
+    return true;
+}
+
+function loadLocationTrail(contactName) {
+    try {
+        const trail = JSON.parse(localStorage.getItem(locationTrailKey(contactName)) || '[]');
+        return Array.isArray(trail) ? trail : [];
+    } catch { return []; }
+}
+
+function saveLocationTrail(contactName, trail) {
+    try {
+        const clean = (Array.isArray(trail) ? trail : []).slice(-LOCATION_TRAIL_CAP);
+        localStorage.setItem(locationTrailKey(contactName), JSON.stringify(clean));
+    } catch (e) { console.warn('[command-x] trail save', e); }
+}
+
+function pushLocationTrail(contactName, placeId, mesId = null) {
+    if (!contactName || !placeId) return false;
+    const trail = loadLocationTrail(contactName);
+    const last = trail[trail.length - 1];
+    // Collapse consecutive identical entries
+    if (last && last.placeId === placeId) return false;
+    trail.push({ placeId, ts: Date.now(), mesId: mesId ?? null });
+    saveLocationTrail(contactName, trail);
+    return true;
+}
+
+function removeTrailForMesId(mesId) {
+    if (mesId == null) return;
+    try {
+        const chatId = currentChatId();
+        const prefix = `cx-loctrail-${chatId}-`;
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (!key || !key.startsWith(prefix)) continue;
+            try {
+                const trail = JSON.parse(localStorage.getItem(key) || '[]');
+                if (!Array.isArray(trail)) continue;
+                const filtered = trail.filter(e => e && e.mesId !== mesId);
+                if (filtered.length !== trail.length) {
+                    localStorage.setItem(key, JSON.stringify(filtered));
+                }
+            } catch { /* ignore */ }
+        }
+    } catch { /* ignore */ }
+}
+
+function getContactCurrentPlaceId(contactName) {
+    const trail = loadLocationTrail(contactName);
+    return trail.length ? trail[trail.length - 1].placeId : null;
+}
+
+/**
+ * Parse [place] JSON for new place registrations.
+ * Format: [place][{"name":"café","emoji":"☕","near":"apartment","aliases":["the cafe"]}][/place]
+ */
+function extractPlaces(raw) {
+    if (!raw) return null;
+    PLACE_TAG_RE.lastIndex = 0;
+    const m = PLACE_TAG_RE.exec(raw);
+    if (!m) return null;
+    try {
+        const parsed = JSON.parse(m[1].trim());
+        const list = Array.isArray(parsed)
+            ? parsed
+            : Array.isArray(parsed?.places)
+                ? parsed.places
+                : (parsed && typeof parsed === 'object' && parsed.name ? [parsed] : []);
+        return list.filter(p => p && typeof p.name === 'string');
+    } catch (e) {
+        console.warn('[command-x] failed to parse [place] JSON:', e);
+        return null;
+    }
+}
+
+function hidePlaceTagsInDom(mesId) {
+    const el = document.querySelector(`.mes[mesid="${mesId}"] .mes_text`);
+    if (!el) return;
+    PLACE_TAG_RE.lastIndex = 0;
+    if (PLACE_TAG_RE.test(el.innerHTML)) {
+        PLACE_TAG_RE.lastIndex = 0;
+        el.innerHTML = el.innerHTML.replace(PLACE_TAG_RE, '');
+    }
+}
+
+/**
+ * Register incoming LLM-registered places (via [place] tag).
+ * Returns the number of new places actually registered.
+ */
+function registerIncomingPlaces(incoming) {
+    if (!settings.autoRegisterPlaces) return 0;
+    if (!incoming || !incoming.length) return 0;
+    const stored = loadPlaces();
+    let added = 0;
+    for (const raw of incoming) {
+        if (findPlaceByNameOrAlias(raw.name, stored)) continue; // already known
+        const clean = sanitizePlace({ ...raw, userPinned: false }, stored);
+        if (!clean) continue;
+        stored.push(clean);
+        added += 1;
+    }
+    if (added) savePlaces(stored);
+    return added;
+}
+
+/**
+ * Apply per-contact `place` fields from a parsed [status] block: register
+ * the referenced place if new, push the contact onto the trail.
+ */
+function applyContactPlaces(contacts, mesId) {
+    if (!settings.trackLocations) return false;
+    if (!contacts || !contacts.length) return false;
+    let placesChanged = false;
+    let trailChanged = false;
+    const stored = loadPlaces();
+    for (const c of contacts) {
+        if (!c.place) continue;
+        let place = findPlaceByNameOrAlias(c.place, stored);
+        if (!place) {
+            if (!settings.autoRegisterPlaces) continue;
+            const clean = sanitizePlace({ name: c.place, userPinned: false }, stored);
+            if (!clean) continue;
+            stored.push(clean);
+            place = clean;
+            placesChanged = true;
+        }
+        if (pushLocationTrail(c.name, place.id, mesId)) trailChanged = true;
+    }
+    if (placesChanged) savePlaces(stored);
+    return placesChanged || trailChanged;
+}
+
+function describeKnownPlacesForPrompt() {
+    const list = loadPlaces();
+    if (!list.length) return 'No places have been registered yet.';
+    return list.slice(0, 20).map(p => {
+        const aliases = (p.aliases || []).filter(Boolean).slice(0, 3);
+        return `- ${p.name}${aliases.length ? ` (aliases: ${aliases.join(', ')})` : ''}`;
+    }).join('\n');
+}
+
+function injectMapPrompt() {
+    if (!settings.enabled || !settings.trackLocations) {
+        clearMapPrompt();
+        return;
+    }
+    const knownPlaces = describeKnownPlacesForPrompt();
+    const registrationLine = settings.autoRegisterPlaces
+        ? 'If a character moves to a place not yet on the list, you may register it once by adding a separate [place][{"name":"Place Name","emoji":"📍","near":"nearest known place","aliases":["alt name"]}][/place] block. Keep place names short (1–3 words); reuse existing names whenever possible.'
+        : 'Do NOT invent new places. Only reference places that already exist in the known list below; otherwise omit the "place" field.';
+    setExtensionPrompt(
+        INJECT_KEY_MAP,
+        `[Command-X map context. For each character in the [status] block, add an optional "place" field whose value MUST match one of the known place names or aliases below (exact or close match). "place" is a short categorical label (e.g. "apartment", "café") used to pin characters on a map; it is separate from the free-text "location" field which remains narrative. ${registrationLine}\nKnown places:\n${knownPlaces}]`,
+        extension_prompt_types.IN_CHAT,
+        3,
+        false,
+        extension_prompt_roles.SYSTEM,
+    );
+}
+
+function clearMapPrompt() {
+    setExtensionPrompt(INJECT_KEY_MAP, '', extension_prompt_types.NONE, 0);
+}
+
 /* ------------------------------------------------------------------
    Prompt injection throttling (Phase 2). Counted per received message;
    when `contactsInjectEveryN` / `questsInjectEveryN` is > 1 we clear
@@ -1230,6 +1657,7 @@ function applyInjectionThrottle() {
     _turnCounter += 1;
     const contactsN = Math.max(1, Number(settings.contactsInjectEveryN) || 1);
     const questsN = Math.max(1, Number(settings.questsInjectEveryN) || 1);
+    const mapN = Math.max(1, Number(settings.mapInjectEveryN) || 1);
 
     if (!settings.enabled) return;
 
@@ -1239,6 +1667,13 @@ function applyInjectionThrottle() {
     }
     if (_turnCounter % questsN === 0) injectQuestPrompt();
     else if (questsN > 1) clearQuestPrompt();
+
+    if (settings.trackLocations) {
+        if (_turnCounter % mapN === 0) injectMapPrompt();
+        else if (mapN > 1) clearMapPrompt();
+    } else {
+        clearMapPrompt();
+    }
 
     const pollN = Math.floor(Number(settings.autoPrivatePollEveryN) || 0);
     if (pollN > 0 && _turnCounter % pollN === 0) {
@@ -2070,6 +2505,40 @@ function cxConfirm(message, title = 'Are you sure?', { confirmLabel = 'Confirm',
     });
 }
 
+/**
+ * Styled in-phone prompt dialog (replaces native prompt()).
+ * Returns a Promise<string|null> — the submitted value, or null if cancelled.
+ * Esc cancels. Enter submits.
+ */
+function cxPrompt(message, { title = 'Command-X', defaultValue = '', placeholder = '', confirmLabel = 'OK', cancelLabel = 'Cancel', maxLength = 120 } = {}) {
+    return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'cx-modal-overlay';
+        overlay.innerHTML = `
+        <div class="cx-modal-box" role="dialog" aria-modal="true" aria-labelledby="cx-modal-title" aria-describedby="cx-modal-body">
+            <div class="cx-modal-title" id="cx-modal-title">${escHtml(title)}</div>
+            <div class="cx-modal-body" id="cx-modal-body">${escHtml(message)}</div>
+            <input type="text" class="cx-modal-input" id="cx-modal-input" maxlength="${Number(maxLength) || 120}" value="${escAttr(defaultValue)}" placeholder="${escAttr(placeholder)}" />
+            <div class="cx-modal-actions">
+                <button class="cx-modal-btn cx-modal-btn-secondary" id="cx-modal-cancel">${escHtml(cancelLabel)}</button>
+                <button class="cx-modal-btn cx-modal-btn-primary" id="cx-modal-confirm">${escHtml(confirmLabel)}</button>
+            </div>
+        </div>`;
+        const input = overlay.querySelector('#cx-modal-input');
+        const close = (result) => { overlay.remove(); document.removeEventListener('keydown', onKey); resolve(result); };
+        const onKey = (e) => {
+            if (e.key === 'Escape') close(null);
+            else if (e.key === 'Enter' && document.activeElement === input) close(input.value);
+        };
+        overlay.querySelector('#cx-modal-cancel').addEventListener('click', () => close(null));
+        overlay.querySelector('#cx-modal-confirm').addEventListener('click', () => close(input.value));
+        document.addEventListener('keydown', onKey);
+        document.body.appendChild(overlay);
+        input.focus();
+        input.select();
+    });
+}
+
 function markRead(contactName) {
     localStorage.removeItem(unreadKey(contactName));
     updateUnreadBadges();
@@ -2872,6 +3341,126 @@ function contactRowHTML(c, i, app) {
     </div>`;
 }
 
+function buildMapView(contacts) {
+    const meta = loadMapMeta();
+    const places = loadPlaces();
+    const isImage = meta.mode === 'image' && meta.imageDataUrl;
+    const surfaceStyle = isImage
+        ? `background-image:url("${escAttr(meta.imageDataUrl)}");background-size:cover;background-position:center;`
+        : '';
+    const surfaceClass = isImage ? 'cx-map-surface cx-map-surface-image' : 'cx-map-surface cx-map-surface-schematic';
+
+    // Cache all contact trails in a single pass rather than re-reading localStorage
+    // several times per contact during rendering.
+    const trailsByContact = new Map();
+    for (const c of contacts) trailsByContact.set(c.name, loadLocationTrail(c.name));
+    const currentPlaceIdFor = (name) => {
+        const t = trailsByContact.get(name);
+        return t && t.length ? t[t.length - 1].placeId : null;
+    };
+
+    // Build trail SVG paths when enabled
+    const placeById = new Map(places.map(p => [p.id, p]));
+    const trailsSvg = settings.showLocationTrails ? (() => {
+        const paths = [];
+        for (const c of contacts) {
+            const trail = (trailsByContact.get(c.name) || []).slice(-6);
+            if (trail.length < 2) continue;
+            const pts = trail
+                .map(e => placeById.get(e.placeId))
+                .filter(Boolean)
+                .map(p => `${(p.x * 100).toFixed(2)},${(p.y * 100).toFixed(2)}`);
+            if (pts.length < 2) continue;
+            paths.push(`<polyline class="cx-map-trail" points="${pts.join(' ')}" />`);
+        }
+        return paths.length
+            ? `<svg class="cx-map-trails" data-cx-map-decoration="1" viewBox="0 0 100 100" preserveAspectRatio="none">${paths.join('')}</svg>`
+            : '';
+    })() : '';
+
+    // Render contact pins at their current place
+    const contactPins = contacts.map(c => {
+        const placeId = currentPlaceIdFor(c.name);
+        if (!placeId) return '';
+        const place = placeById.get(placeId);
+        if (!place) return '';
+        const x = (place.x * 100).toFixed(2);
+        const y = (place.y * 100).toFixed(2);
+        const avatarInner = c.avatarUrl
+            ? `<img class="cx-avatar-img" data-cx-avatar-fallback="1" src="${escAttr(c.avatarUrl)}" alt="${escAttr(c.name)}"><span class="cx-avatar-emoji-fallback" style="display:none">${escHtml(c.emoji || '🧑')}</span>`
+            : escHtml(c.emoji || '🧑');
+        return `<div class="cx-map-pin cx-map-pin-contact" data-cx-map-contact="${escAttr(c.name)}" role="button" tabindex="0" aria-label="Open chat with ${escAttr(c.name)} at ${escAttr(place.name)}" title="${escAttr(c.name)} — ${escAttr(place.name)}" style="left:${x}%;top:${y}%;background:${escAttr(c.gradient || 'linear-gradient(135deg,#553355,#442244)')}">${avatarInner}</div>`;
+    }).join('');
+
+    // Place pins
+    const placePins = places.map(p => {
+        const x = (p.x * 100).toFixed(2);
+        const y = (p.y * 100).toFixed(2);
+        return `<div class="cx-map-pin cx-map-pin-place${p.userPinned ? ' cx-map-pin-user' : ''}" data-cx-map-place="${escAttr(p.id)}" role="button" tabindex="0" aria-label="Place: ${escAttr(p.name)}" title="${escAttr(p.name)}" style="left:${x}%;top:${y}%">
+            <span class="cx-map-pin-emoji">${escHtml(p.emoji || '📍')}</span>
+            <span class="cx-map-pin-label">${escHtml(p.name)}</span>
+        </div>`;
+    }).join('');
+
+    // User "You" pin
+    const youPinHtml = meta.userPin
+        ? `<div class="cx-map-pin cx-map-pin-you" data-cx-map-you="1" role="button" tabindex="0" aria-label="You are here" title="You" style="left:${(meta.userPin.x * 100).toFixed(2)}%;top:${(meta.userPin.y * 100).toFixed(2)}%">📍</div>`
+        : '';
+
+    const placeList = places.length
+        ? places.map(p => {
+            const assigned = contacts.filter(c => currentPlaceIdFor(c.name) === p.id).map(c => c.name);
+            return `
+            <div class="cx-map-place-row" data-cx-map-place-row="${escAttr(p.id)}">
+                <div class="cx-map-place-main">
+                    <span class="cx-map-place-emoji">${escHtml(p.emoji || '📍')}</span>
+                    <div class="cx-map-place-info">
+                        <div class="cx-map-place-name">${escHtml(p.name)}</div>
+                        <div class="cx-map-place-sub">${assigned.length ? escHtml(assigned.join(', ')) : '<span style="color:#666">empty</span>'}</div>
+                    </div>
+                </div>
+                <button class="cx-profile-action-btn cx-map-place-del" data-cx-map-delete="${escAttr(p.id)}" aria-label="Delete ${escAttr(p.name)}">✕</button>
+            </div>`;
+        }).join('')
+        : '<div class="cx-map-empty">No places registered yet. Tap the map surface to add one, or let the LLM register places automatically.</div>';
+
+    const trackingHint = settings.trackLocations
+        ? `Tracking ${settings.autoRegisterPlaces ? 'on (auto-register)' : 'on (manual-only)'}`
+        : 'Tracking off';
+
+    return `
+        <div class="cx-view" data-view="map">
+            <div class="cx-profiles-header cx-map-header">
+                <div>
+                    <div class="cx-profiles-title">Map</div>
+                    <div class="cx-profiles-sub">${escHtml(trackingHint)} · ${places.length} place${places.length === 1 ? '' : 's'}</div>
+                </div>
+                <div class="cx-profiles-actions">
+                    <button class="cx-settings-btn" id="cx-map-upload">${isImage ? 'Replace Image' : 'Upload Image'}</button>
+                    ${isImage ? '<button class="cx-settings-btn" id="cx-map-clear-image">Use Schematic</button>' : ''}
+                    <button class="cx-settings-btn" id="cx-map-set-you" title="Set your position on the map">📍 You</button>
+                </div>
+            </div>
+            <div class="cx-map-body">
+                <div class="${surfaceClass}" id="cx-map-surface" style="${surfaceStyle}">
+                    ${isImage ? '' : '<div class="cx-map-schematic-grid" data-cx-map-decoration="1" aria-hidden="true"></div>'}
+                    ${trailsSvg}
+                    ${placePins}
+                    ${contactPins}
+                    ${youPinHtml}
+                </div>
+                <div class="cx-map-legend">
+                    <div class="cx-map-legend-title">Places</div>
+                    <div class="cx-map-place-list">${placeList}</div>
+                </div>
+            </div>
+            <div class="cx-navbar">
+                <div class="cx-nav active"><div class="cx-nav-ico">🧭</div><div class="cx-nav-lbl">Map</div></div>
+                <div class="cx-nav" data-goto="home" role="button" tabindex="0" aria-label="Go to home screen"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
+            </div>
+        </div>`;
+}
+
 function buildPhone() {
     const contacts = getKnownContactsForPrivateMessaging();
     const hasContacts = contacts.length > 0;
@@ -2918,6 +3507,10 @@ function buildPhone() {
                 <div class="cx-app-icon" data-app="quests" role="button" tabindex="0" aria-label="Open Quests app">
                     <div class="cx-icon-img cx-icon-quests">🗺️</div>
                     <div class="cx-icon-label">Quests${activeQuestCount ? ` (${activeQuestCount})` : ''}</div>
+                </div>
+                <div class="cx-app-icon" data-app="map" role="button" tabindex="0" aria-label="Open Map app">
+                    <div class="cx-icon-img cx-icon-map">🧭</div>
+                    <div class="cx-icon-label">Map</div>
                 </div>
                 <div class="cx-app-icon" data-app="openclaw" role="button" tabindex="0" aria-label="Open OpenClaw app">
                     <div class="cx-icon-img cx-icon-openclaw">🦞</div>
@@ -3012,6 +3605,8 @@ function buildPhone() {
             </div>
         </div>
 
+        ${buildMapView(contacts)}
+
         <!-- Settings View -->
         <div class="cx-view" data-view="phone-settings">
             <div class="cx-settings-header">
@@ -3043,6 +3638,26 @@ function buildPhone() {
                 <div class="cx-settings-row cx-settings-btn-row">
                     <button class="cx-settings-btn" id="cx-set-add-contact">Add Contact</button>
                     <button class="cx-settings-btn cx-settings-btn-danger" id="cx-set-clear-npcs">Clear All NPC Data</button>
+                </div>
+                <div class="cx-settings-section">MAP</div>
+                <div class="cx-settings-row">
+                    <span class="cx-settings-label">Track Contact Locations</span>
+                    <label class="cx-toggle"><input type="checkbox" id="cx-set-track-locations" ${settings.trackLocations !== false ? 'checked' : ''}><span class="cx-toggle-slider"></span></label>
+                </div>
+                <div class="cx-settings-row">
+                    <span class="cx-settings-label">Let LLM Auto-Register Places</span>
+                    <label class="cx-toggle"><input type="checkbox" id="cx-set-auto-places" ${settings.autoRegisterPlaces !== false ? 'checked' : ''}><span class="cx-toggle-slider"></span></label>
+                </div>
+                <div class="cx-settings-row">
+                    <span class="cx-settings-label">Show Movement Trails</span>
+                    <label class="cx-toggle"><input type="checkbox" id="cx-set-trails" ${settings.showLocationTrails !== false ? 'checked' : ''}><span class="cx-toggle-slider"></span></label>
+                </div>
+                <div class="cx-settings-row">
+                    <span class="cx-settings-label">Inject map context every N turns</span>
+                    <input type="number" id="cx-set-map-every-n" class="cx-settings-number-input" min="1" max="20" step="1" value="${Math.max(1, Number(settings.mapInjectEveryN) || 3)}" />
+                </div>
+                <div class="cx-settings-row cx-settings-btn-row">
+                    <button class="cx-settings-btn cx-settings-btn-danger" id="cx-set-clear-places">Clear All Places</button>
                 </div>
                 <div class="cx-settings-section">DISPLAY</div>
                 <div class="cx-settings-row">
@@ -3329,6 +3944,237 @@ function sendPhoneMessage() {
     }
 }
 
+function clearAllMapDataForCurrentChat() {
+    try {
+        localStorage.removeItem(placeStoreKey());
+        localStorage.removeItem(mapMetaKey());
+        const chatId = currentChatId();
+        const prefix = `cx-loctrail-${chatId}-`;
+        const toRemove = [];
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key && key.startsWith(prefix)) toRemove.push(key);
+        }
+        for (const k of toRemove) localStorage.removeItem(k);
+    } catch (e) { console.warn('[command-x] clear map data', e); }
+}
+
+function triggerMapImagePicker() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.style.display = 'none';
+    document.body.appendChild(input);
+    input.addEventListener('change', async () => {
+        const file = input.files?.[0];
+        if (!file) { input.remove(); return; }
+        try {
+            const dataUrl = await safeDataUrlFromFile(file, MAX_MAP_IMAGE_WIDTH, 0.85);
+            const meta = loadMapMeta();
+            meta.mode = 'image';
+            meta.imageDataUrl = dataUrl;
+            saveMapMeta(meta);
+            rebuildPhone();
+            switchView('map');
+            showToast('Map', 'Map image uploaded.');
+        } catch (error) {
+            await cxAlert(String(error?.message || error), 'Map Upload Error');
+        } finally {
+            input.remove();
+        }
+    }, { once: true });
+    input.click();
+}
+
+async function addPlaceAtCoords(x, y) {
+    const nameInput = await cxPrompt('Name this place:', {
+        title: 'New Place',
+        placeholder: 'e.g. café, apartment, office',
+        maxLength: 60,
+    });
+    if (nameInput == null) return;
+    const name = String(nameInput).trim();
+    if (!name) return;
+    const emojiInput = await cxPrompt('Emoji for this place (optional):', {
+        title: 'New Place',
+        defaultValue: '📍',
+        placeholder: '📍',
+        maxLength: 8,
+    });
+    const emoji = String(emojiInput ?? '📍').trim() || '📍';
+    const stored = loadPlaces();
+    // Guard against duplicate names
+    if (findPlaceByNameOrAlias(name, stored)) {
+        await cxAlert(`A place named "${name}" already exists.`, 'Map');
+        return;
+    }
+    const clean = sanitizePlace({
+        name,
+        emoji,
+        x: clampUnit(x),
+        y: clampUnit(y),
+        userPinned: true,
+    }, stored);
+    if (!clean) return;
+    stored.push(clean);
+    savePlaces(stored);
+    rebuildPhone();
+    switchView('map');
+}
+
+/**
+ * Wire all map-view interactions: tap-to-add place, tap-pin-to-open-chat,
+ * drag-to-reposition, image upload/clear, "set You pin" toggle, delete-place.
+ */
+function wireMapInteractions() {
+    if (!phoneContainer) return;
+    const surface = phoneContainer.querySelector('#cx-map-surface');
+    // Idempotency guard: if this DOM tree has already been wired we skip,
+    // to prevent duplicate handlers if callers invoke us more than once.
+    const wireRoot = surface || phoneContainer.querySelector('[data-view="map"]');
+    if (wireRoot?.dataset.cxMapWired === '1') return;
+    if (wireRoot) wireRoot.dataset.cxMapWired = '1';
+
+    phoneContainer.querySelector('#cx-map-upload')?.addEventListener('click', triggerMapImagePicker);
+    phoneContainer.querySelector('#cx-map-clear-image')?.addEventListener('click', async () => {
+        if (!await cxConfirm('Switch back to the schematic map? The uploaded image will be removed.', 'Map', { confirmLabel: 'Clear' })) return;
+        const meta = loadMapMeta();
+        meta.mode = 'schematic';
+        meta.imageDataUrl = null;
+        saveMapMeta(meta);
+        rebuildPhone();
+        switchView('map');
+    });
+
+    // "Set You pin" — next click on surface places your pin.
+    let armYouPin = false;
+    const youBtn = phoneContainer.querySelector('#cx-map-set-you');
+    youBtn?.addEventListener('click', () => {
+        armYouPin = !armYouPin;
+        youBtn.classList.toggle('cx-settings-btn-active', armYouPin);
+        youBtn.textContent = armYouPin ? 'Tap map…' : '📍 You';
+    });
+
+    // Delete place
+    phoneContainer.querySelectorAll('[data-cx-map-delete]').forEach(btn =>
+        btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const placeId = btn.dataset.cxMapDelete;
+            const place = loadPlaces().find(p => p.id === placeId);
+            if (!place) return;
+            if (!await cxConfirm(`Delete place "${place.name}"? Any contacts currently there will lose their pin.`, 'Map', { confirmLabel: 'Delete', danger: true })) return;
+            deletePlace(placeId);
+            rebuildPhone();
+            switchView('map');
+        })
+    );
+
+    // Contact pin → open chat
+    phoneContainer.querySelectorAll('[data-cx-map-contact]').forEach(pin =>
+        pin.addEventListener('click', (e) => {
+            // Skip if this was the end of a drag
+            if (pin._wasDragged) { pin._wasDragged = false; e.stopPropagation(); return; }
+            const name = pin.dataset.cxMapContact;
+            if (name) openChat(name, 'cmdx');
+        })
+    );
+
+    // Place pin click (no default action beyond preventing surface-click-add)
+    phoneContainer.querySelectorAll('[data-cx-map-place]').forEach(pin =>
+        pin.addEventListener('click', (e) => {
+            if (pin._wasDragged) { pin._wasDragged = false; }
+            e.stopPropagation();
+        })
+    );
+
+    if (!surface) return;
+
+    // Surface click → add new place (only on empty area of the surface itself)
+    surface.addEventListener('click', async (e) => {
+        // Bail if the click landed on a pin (pins stopPropagation, but be defensive).
+        if (e.target.closest('.cx-map-pin')) return;
+        // Allow clicks on the surface or any of its explicit click-through decorations.
+        if (e.target !== surface && !e.target.closest('[data-cx-map-decoration="1"]')) {
+            return;
+        }
+        const rect = surface.getBoundingClientRect();
+        const x = (e.clientX - rect.left) / rect.width;
+        const y = (e.clientY - rect.top) / rect.height;
+        if (armYouPin) {
+            armYouPin = false;
+            if (youBtn) {
+                youBtn.classList.remove('cx-settings-btn-active');
+                youBtn.textContent = '📍 You';
+            }
+            const meta = loadMapMeta();
+            meta.userPin = { x: clampUnit(x), y: clampUnit(y) };
+            saveMapMeta(meta);
+            rebuildPhone();
+            switchView('map');
+            return;
+        }
+        await addPlaceAtCoords(x, y);
+    });
+
+    // Drag pins (places + user "You" pin) — pointer events cover both mouse + touch
+    const makeDraggable = (el, onCommit) => {
+        if (!el) return;
+        el.addEventListener('pointerdown', (ev) => {
+            if (ev.button !== undefined && ev.button !== 0) return;
+            ev.stopPropagation();
+            ev.preventDefault();
+            el.setPointerCapture?.(ev.pointerId);
+            const startX = ev.clientX;
+            const startY = ev.clientY;
+            let moved = false;
+            // Recompute the surface rect on each move/up so a resize or scroll mid-drag
+            // doesn't desync coordinates.
+            const onMove = (mv) => {
+                const rect = surface.getBoundingClientRect();
+                const cx = clampUnit((mv.clientX - rect.left) / rect.width) * 100;
+                const cy = clampUnit((mv.clientY - rect.top) / rect.height) * 100;
+                el.style.left = `${cx.toFixed(2)}%`;
+                el.style.top = `${cy.toFixed(2)}%`;
+                if (Math.abs(mv.clientX - startX) > 3 || Math.abs(mv.clientY - startY) > 3) moved = true;
+            };
+            const onUp = (up) => {
+                el.removeEventListener('pointermove', onMove);
+                el.removeEventListener('pointerup', onUp);
+                el.removeEventListener('pointercancel', onUp);
+                el._wasDragged = moved;
+                if (moved) {
+                    const rect = surface.getBoundingClientRect();
+                    const finalX = clampUnit((up.clientX - rect.left) / rect.width);
+                    const finalY = clampUnit((up.clientY - rect.top) / rect.height);
+                    onCommit(finalX, finalY);
+                }
+            };
+            el.addEventListener('pointermove', onMove);
+            el.addEventListener('pointerup', onUp);
+            el.addEventListener('pointercancel', onUp);
+        });
+    };
+
+    phoneContainer.querySelectorAll('[data-cx-map-place]').forEach(pin => {
+        makeDraggable(pin, (x, y) => {
+            const placeId = pin.dataset.cxMapPlace;
+            const stored = loadPlaces();
+            const idx = stored.findIndex(p => p.id === placeId);
+            if (idx < 0) return;
+            stored[idx] = { ...stored[idx], x, y, userPinned: true };
+            savePlaces(stored);
+        });
+    });
+    const youPin = phoneContainer.querySelector('[data-cx-map-you]');
+    if (youPin) {
+        makeDraggable(youPin, (x, y) => {
+            const meta = loadMapMeta();
+            meta.userPin = { x, y };
+            saveMapMeta(meta);
+        });
+    }
+}
+
 function wirePhone() {
     if (!phoneContainer) return;
     phoneContainer.querySelectorAll('[data-action="unlock"]').forEach(el =>
@@ -3340,7 +4186,7 @@ function wirePhone() {
     phoneContainer.querySelectorAll('.cx-app-icon[data-app]').forEach(icon =>
         icon.addEventListener('click', () => {
             const app = icon.dataset.app;
-            if (app === 'cmdx' || app === 'profiles' || app === 'quests' || app === 'openclaw' || app === 'phone-settings') {
+            if (app === 'cmdx' || app === 'profiles' || app === 'quests' || app === 'openclaw' || app === 'phone-settings' || app === 'map') {
                 currentApp = app;
                 switchView(app);
                 if (app === 'openclaw') {
@@ -3381,6 +4227,38 @@ function wirePhone() {
         settings.showLockscreen = e.target.checked;
         saveSettings();
     });
+    // --- Map settings wiring ---
+    phoneContainer.querySelector('#cx-set-track-locations')?.addEventListener('change', (e) => {
+        settings.trackLocations = e.target.checked;
+        saveSettings();
+        if (!settings.trackLocations) clearMapPrompt();
+        else injectMapPrompt();
+        rebuildPhone();
+    });
+    phoneContainer.querySelector('#cx-set-auto-places')?.addEventListener('change', (e) => {
+        settings.autoRegisterPlaces = e.target.checked;
+        saveSettings();
+        injectMapPrompt();
+    });
+    phoneContainer.querySelector('#cx-set-trails')?.addEventListener('change', (e) => {
+        settings.showLocationTrails = e.target.checked;
+        saveSettings();
+        rebuildPhone();
+    });
+    phoneContainer.querySelector('#cx-set-map-every-n')?.addEventListener('change', (e) => {
+        const val = Math.max(1, Math.floor(Number(e.target.value) || 1));
+        settings.mapInjectEveryN = val;
+        saveSettings();
+    });
+    phoneContainer.querySelector('#cx-set-clear-places')?.addEventListener('click', async () => {
+        if (await cxConfirm('Delete all places and location trails for this chat?', 'Clear Map', { confirmLabel: 'Clear All', danger: true })) {
+            clearAllMapDataForCurrentChat();
+            rebuildPhone();
+            switchView('phone-settings');
+        }
+    });
+    // Wire map view itself (buttons + pin interactions). Safe to call even if view not active.
+    wireMapInteractions();
     phoneContainer.querySelector('#cx-add-contact')?.addEventListener('click', () => { openProfileEditor(); });
     phoneContainer.querySelector('#cx-scan-contacts')?.addEventListener('click', () => { scanContactsNow().catch(error => console.error(`[${EXT}] Manual contact scan click failed`, error)); });
     phoneContainer.querySelector('#cx-set-add-contact')?.addEventListener('click', () => { openProfileEditor(); });
@@ -3779,6 +4657,9 @@ function loadSettings() {
     cb('cx_ext_batch_mode', 'batchMode', false);
     cb('cx_ext_auto_detect_npcs', 'autoDetectNpcs', true);
     cb('cx_set_private_hybrid', 'manualHybridPrivateTexts', true);
+    cb('cx_ext_track_locations', 'trackLocations', true);
+    cb('cx_ext_auto_register_places', 'autoRegisterPlaces', true);
+    cb('cx_ext_show_trails', 'showLocationTrails', true);
     if (!["observe", "assist", "operate"].includes(settings.openclawMode)) settings.openclawMode = 'assist';
     const openclawMode = document.getElementById('cx_ext_openclaw_mode');
     if (openclawMode) openclawMode.value = settings.openclawMode || 'assist';
@@ -3786,6 +4667,8 @@ function loadSettings() {
     if (contactsN) contactsN.value = Math.max(1, Number(settings.contactsInjectEveryN) || 1);
     const questsN = document.getElementById('cx_ext_quests_every_n');
     if (questsN) questsN.value = Math.max(1, Number(settings.questsInjectEveryN) || 1);
+    const mapN = document.getElementById('cx_ext_map_every_n');
+    if (mapN) mapN.value = Math.max(1, Number(settings.mapInjectEveryN) || 3);
     const autoPollN = document.getElementById('cx_ext_auto_private_poll_n');
     if (autoPollN) autoPollN.value = Math.max(0, Number(settings.autoPrivatePollEveryN) || 0);
 }
@@ -3798,10 +4681,15 @@ function saveSettings() {
     settings.autoDetectNpcs = document.getElementById('cx_ext_auto_detect_npcs')?.checked ?? settings.autoDetectNpcs ?? true;
     settings.manualHybridPrivateTexts = document.getElementById('cx_set_private_hybrid')?.checked ?? document.getElementById('cx-set-private-hybrid')?.checked ?? settings.manualHybridPrivateTexts ?? true;
     settings.openclawMode = document.getElementById('cx_ext_openclaw_mode')?.value || settings.openclawMode || 'assist';
+    settings.trackLocations = document.getElementById('cx_ext_track_locations')?.checked ?? document.getElementById('cx-set-track-locations')?.checked ?? settings.trackLocations ?? true;
+    settings.autoRegisterPlaces = document.getElementById('cx_ext_auto_register_places')?.checked ?? document.getElementById('cx-set-auto-places')?.checked ?? settings.autoRegisterPlaces ?? true;
+    settings.showLocationTrails = document.getElementById('cx_ext_show_trails')?.checked ?? document.getElementById('cx-set-trails')?.checked ?? settings.showLocationTrails ?? true;
     const contactsNRaw = Number(document.getElementById('cx_ext_contacts_every_n')?.value);
     settings.contactsInjectEveryN = Number.isFinite(contactsNRaw) && contactsNRaw >= 1 ? Math.floor(contactsNRaw) : (settings.contactsInjectEveryN || 1);
     const questsNRaw = Number(document.getElementById('cx_ext_quests_every_n')?.value);
     settings.questsInjectEveryN = Number.isFinite(questsNRaw) && questsNRaw >= 1 ? Math.floor(questsNRaw) : (settings.questsInjectEveryN || 1);
+    const mapNRaw = Number(document.getElementById('cx_ext_map_every_n')?.value ?? document.getElementById('cx-set-map-every-n')?.value);
+    settings.mapInjectEveryN = Number.isFinite(mapNRaw) && mapNRaw >= 1 ? Math.floor(mapNRaw) : (settings.mapInjectEveryN || 3);
     // cx_ext_auto_private_poll_n = ST settings panel; cx-set-auto-poll-n = in-phone settings view
     const autoPollNRaw = Number(document.getElementById('cx_ext_auto_private_poll_n')?.value ?? document.getElementById('cx-set-auto-poll-n')?.value);
     settings.autoPrivatePollEveryN = Number.isFinite(autoPollNRaw) && autoPollNRaw >= 0 ? Math.floor(autoPollNRaw) : (settings.autoPrivatePollEveryN || 0);
@@ -3825,7 +4713,7 @@ jQuery(async () => {
 
         loadSettings();
         refreshPrivatePhonePrompt();
-        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_openclaw_mode, #cx_ext_contacts_every_n, #cx_ext_quests_every_n, #cx_ext_auto_private_poll_n').on('change', () => {
+        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_openclaw_mode, #cx_ext_contacts_every_n, #cx_ext_quests_every_n, #cx_ext_auto_private_poll_n, #cx_ext_track_locations, #cx_ext_auto_register_places, #cx_ext_show_trails, #cx_ext_map_every_n').on('change', () => {
             saveSettings();
             if (settings.enabled) {
                 createPanel();
@@ -3833,11 +4721,14 @@ jQuery(async () => {
                 else clearContactsPrompt();
                 refreshPrivatePhonePrompt();
                 injectQuestPrompt();
+                if (settings.trackLocations) injectMapPrompt();
+                else clearMapPrompt();
             } else {
                 destroyPanel();
                 clearContactsPrompt();
                 clearSmsPrompt();
                 clearQuestPrompt();
+                clearMapPrompt();
                 refreshPrivatePhonePrompt();
             }
         });
@@ -3851,6 +4742,7 @@ jQuery(async () => {
             hideSmsTagsInDom(mesId);
             hideContactsTagsInDom(mesId);
             hideQuestTagsInDom(mesId);
+            hidePlaceTagsInDom(mesId);
         });
         eventSource.on(event_types.USER_MESSAGE_RENDERED, (mesId) => {
             if (!settings.enabled) return;
@@ -3971,6 +4863,18 @@ jQuery(async () => {
                 shouldRebuild = true;
             }
 
+            // ── [place] and contact place tracking (map) ──
+            if (settings.trackLocations) {
+                const parsedPlaces = extractPlaces(msg.mes);
+                if (parsedPlaces?.length) {
+                    const added = registerIncomingPlaces(parsedPlaces);
+                    if (added) shouldRebuild = true;
+                }
+                if (parsedContacts?.length) {
+                    if (applyContactPlaces(parsedContacts, mesId)) shouldRebuild = true;
+                }
+            }
+
             // ── [quests] THIRD — persistent quest tracker state ──
             const parsedQuests = extractQuests(msg.mes);
             if (parsedQuests?.length) {
@@ -3990,6 +4894,7 @@ jQuery(async () => {
             if (!settings.enabled) return;
             removeMessagesForMesId(mesId);
             removePrivatePhoneEventsForMesId(mesId);
+            removeTrailForMesId(mesId);
             // Re-render current chat if open
             const area = phoneContainer?.querySelector('#cx-msg-area');
             if (area && currentContactName) {
@@ -4006,6 +4911,7 @@ jQuery(async () => {
                 : (freshCtx.chat || []).length;
             removeMessagesForMesId(deletedId);
             removePrivatePhoneEventsForMesId(deletedId);
+            removeTrailForMesId(deletedId);
             const area = phoneContainer?.querySelector('#cx-msg-area');
             if (area && currentContactName) {
                 renderAllBubbles(area, currentContactName, false);
@@ -4028,6 +4934,8 @@ jQuery(async () => {
             else clearContactsPrompt();
             if (settings.enabled) injectQuestPrompt();
             else clearQuestPrompt();
+            if (settings.enabled && settings.trackLocations) injectMapPrompt();
+            else clearMapPrompt();
             refreshPrivatePhonePrompt();
             if (phoneContainer) rebuildPhone();
         });
@@ -4036,6 +4944,7 @@ jQuery(async () => {
             createPanel();
             if (settings.autoDetectNpcs !== false) injectContactsPrompt();
             injectQuestPrompt();
+            if (settings.trackLocations) injectMapPrompt();
         }
         console.log(`[${EXT}] v${VERSION} Loaded OK`);
     } catch (err) {
