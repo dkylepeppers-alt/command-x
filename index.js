@@ -39,10 +39,12 @@ const DEFAULTS = {
     batchMode: false,
     autoDetectNpcs: true,
     manualHybridPrivateTexts: true,
-    // Overseer (renamed from OpenClaw): mode + its own Connection Profile + tool gate
+    // Overseer (renamed from OpenClaw): mode + its own Connection Profile + tool gate.
+    // Tools are disabled by default — function-calling lets the model execute local
+    // slash commands (potentially destructive), so opt-in is the safer posture.
     overseerMode: 'assist',
     overseerConnectionProfile: '',
-    overseerToolsEnabled: true,
+    overseerToolsEnabled: false,
     // Deprecated — kept in DEFAULTS for backwards-compat read of older saved settings
     openclawMode: 'assist',
     contactsInjectEveryN: 1,
@@ -372,14 +374,19 @@ function syncOverseerView() {
 
 // ---- Per-turn Connection Profile switch --------------------------------
 //
-// Mirrors withUtilityProfile() lower in the file. Kept as a separate helper
-// (and its own serialization queue) so Overseer turns never interleave with
-// quest enrichment / private poll / contact scan profile switches.
+// Both Overseer and Utility generations temporarily swap SillyTavern's
+// *global* Connection Profile, so they share a single serialization queue
+// (`connectionProfileQueue`) — otherwise an Overseer turn and a Utility
+// generation could race and restore each other's "previous" profile,
+// leaving the user on the wrong model.
+//
+// `withOverseerProfile()` and `withUtilityProfile()` both delegate to
+// `runWithConnectionProfile()` so every switch/run/restore cycle is
+// atomic across the whole extension.
 
-let overseerProfileQueue = Promise.resolve();
+let connectionProfileQueue = Promise.resolve();
 
-async function withOverseerProfile(fn) {
-    const profileId = getOverseerConnectionProfileId();
+async function runWithConnectionProfile(profileId, fn, label = 'connection-profile') {
     if (!profileId) return fn();
 
     const run = async () => {
@@ -399,7 +406,7 @@ async function withOverseerProfile(fn) {
                 await new Promise(r => setTimeout(r, 500));
             }
         } catch (e) {
-            console.warn(`[${EXT}] withOverseerProfile: profile switch failed`, e);
+            console.warn(`[${EXT}] ${label}: profile switch failed`, e);
         }
 
         try {
@@ -416,15 +423,19 @@ async function withOverseerProfile(fn) {
                         profileSelect.dispatchEvent(new Event('change'));
                     }
                 } catch (e) {
-                    console.warn(`[${EXT}] withOverseerProfile: profile restore failed`, e);
+                    console.warn(`[${EXT}] ${label}: profile restore failed`, e);
                 }
             }
         }
     };
 
-    const next = overseerProfileQueue.then(run, run);
-    overseerProfileQueue = next.catch(() => {});
+    const next = connectionProfileQueue.then(run, run);
+    connectionProfileQueue = next.catch(() => {});
     return next;
+}
+
+async function withOverseerProfile(fn) {
+    return runWithConnectionProfile(getOverseerConnectionProfileId(), fn, 'withOverseerProfile');
 }
 
 // ---- Agent turn (native generation via generateQuietPrompt) -----------
@@ -658,7 +669,7 @@ function overseerToolsShouldRegister() {
     // away mid-turn the current generation still completes normally — ST
     // evaluates shouldRegister when it builds each request, not mid-stream.
     return !!(settings?.enabled
-        && settings?.overseerToolsEnabled !== false
+        && settings?.overseerToolsEnabled === true
         && currentApp === 'overseer');
 }
 
@@ -2201,72 +2212,20 @@ function parseQuestEnrichmentResponse(raw) {
     }
 }
 
-let utilityProfileQueue = Promise.resolve();
-
 /**
  * Switch to the user-configured utility Connection Profile (if any), run fn(),
  * then restore the original profile.  Mirrors the approach used by ScenePulse.
  * If no utility profile is configured, fn() runs on the current profile.
  *
- * Calls are serialized via a shared promise queue so that concurrent utility
- * generations (quest enrichment, auto-poll, contact scan) never interleave
- * their profile switches/restores.
+ * Delegates to the shared `runWithConnectionProfile()` helper so utility and
+ * Overseer generations share a single serialization queue — they both swap
+ * the same global profile, so they must never overlap.
  *
  * @param {Function} fn  Async callback to execute under the utility profile.
  * @returns {*} Whatever fn() returns.
  */
 async function withUtilityProfile(fn) {
-    const profileId = settings.utilityConnectionProfile || '';
-    if (!profileId) return fn();
-
-    const run = async () => {
-        const ctx = getContext();
-        let previousProfileId = null;
-
-        // ── Capture current profile ──────────────────────────────────────────
-        const profileSelect = document.querySelector('#connection_profiles, #connection_profile');
-        if (profileSelect) previousProfileId = profileSelect.value;
-
-        // ── Switch to utility profile ────────────────────────────────────────
-        try {
-            if (typeof ctx.setConnectionProfile === 'function') {
-                await ctx.setConnectionProfile(profileId);
-                await new Promise(r => setTimeout(r, 500));
-            } else if (profileSelect) {
-                profileSelect.value = profileId;
-                profileSelect.dispatchEvent(new Event('change'));
-                await new Promise(r => setTimeout(r, 500));
-            }
-        } catch (e) {
-            console.warn(`[${EXT}] withUtilityProfile: profile switch failed`, e);
-        }
-
-        // ── Run the utility generation ───────────────────────────────────────
-        try {
-            return await fn();
-        } finally {
-            // Restore original profile after a short delay so ST event handlers
-            // triggered by the profile switch have time to settle.
-            await new Promise(r => setTimeout(r, 500));
-            if (previousProfileId) {
-                try {
-                    if (typeof ctx.setConnectionProfile === 'function') {
-                        await ctx.setConnectionProfile(previousProfileId);
-                        await new Promise(r => setTimeout(r, 500));
-                    } else if (profileSelect) {
-                        profileSelect.value = previousProfileId;
-                        profileSelect.dispatchEvent(new Event('change'));
-                    }
-                } catch (e) {
-                    console.warn(`[${EXT}] withUtilityProfile: profile restore failed`, e);
-                }
-            }
-        }
-    };
-
-    const task = utilityProfileQueue.then(run, run);
-    utilityProfileQueue = task.catch(() => {});
-    return task;
+    return runWithConnectionProfile(settings.utilityConnectionProfile || '', fn, 'withUtilityProfile');
 }
 
 async function enrichQuestDraftIfNeeded(draft) {
@@ -5320,7 +5279,7 @@ function loadSettings() {
     cb('cx_ext_track_locations', 'trackLocations', true);
     cb('cx_ext_auto_register_places', 'autoRegisterPlaces', true);
     cb('cx_ext_show_trails', 'showLocationTrails', true);
-    cb('cx_ext_overseer_tools_enabled', 'overseerToolsEnabled', true);
+    cb('cx_ext_overseer_tools_enabled', 'overseerToolsEnabled', false);
     // ── Overseer mode (new key). Back-compat: migrate from legacy `openclawMode` on first load. ──
     if (!settings.overseerMode && settings.openclawMode) settings.overseerMode = settings.openclawMode;
     if (!["observe", "assist", "operate"].includes(settings.overseerMode)) settings.overseerMode = 'assist';
@@ -5376,7 +5335,7 @@ function saveSettings() {
     settings.manualHybridPrivateTexts = document.getElementById('cx_set_private_hybrid')?.checked ?? document.getElementById('cx-set-private-hybrid')?.checked ?? settings.manualHybridPrivateTexts ?? true;
     settings.overseerMode = document.getElementById('cx_ext_overseer_mode')?.value || settings.overseerMode || 'assist';
     settings.openclawMode = settings.overseerMode; // legacy mirror
-    settings.overseerToolsEnabled = document.getElementById('cx_ext_overseer_tools_enabled')?.checked ?? settings.overseerToolsEnabled ?? true;
+    settings.overseerToolsEnabled = document.getElementById('cx_ext_overseer_tools_enabled')?.checked ?? settings.overseerToolsEnabled ?? false;
     settings.trackLocations = document.getElementById('cx_ext_track_locations')?.checked ?? document.getElementById('cx-set-track-locations')?.checked ?? settings.trackLocations ?? true;
     settings.autoRegisterPlaces = document.getElementById('cx_ext_auto_register_places')?.checked ?? document.getElementById('cx-set-auto-places')?.checked ?? settings.autoRegisterPlaces ?? true;
     settings.showLocationTrails = document.getElementById('cx_ext_show_trails')?.checked ?? document.getElementById('cx-set-trails')?.checked ?? settings.showLocationTrails ?? true;

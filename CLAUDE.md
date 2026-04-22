@@ -144,7 +144,7 @@ Requires ST build that exposes `generateQuietPrompt`. Gated by `settings.manualH
 
 ## Overseer Agent (v0.13+, replaces OpenClaw)
 
-Overseer is an in-phone interactive agent with **its own Connection Profile** and **native function-calling tools**. It talks to the LLM via `ctx.generateQuietPrompt()` under `withOverseerProfile()` (serialized profile switch/restore, mirroring `withUtilityProfile()`), then parses the reply and renders it as a chat bubble in the Overseer view.
+Overseer is an in-phone interactive agent with **its own Connection Profile** and **native function-calling tools**. It talks to the LLM via `ctx.generateQuietPrompt()` under `withOverseerProfile()`, which delegates to the shared `runWithConnectionProfile()` helper (a single module-wide serialization queue shared with `withUtilityProfile()`, so the two cannot race each other on the global ST profile). The reply is parsed and rendered as a chat bubble in the Overseer view.
 
 Three modes:
 - **observe** — Read-only context inspection

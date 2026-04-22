@@ -9,7 +9,7 @@ Messages flow through the RP naturally. The extension uses prompt injection so t
 ### 📱 Phone UI
 - **Realistic phone shell** — Notch, bezel, status bar, home indicator
 - **Lock screen → Home screen → Apps** — Navigate like a real phone
-- **Five apps:** Command-X (neural messaging), Profiles (contact intel), Quests (persistent story goals), Overseer (in-phone agent with its own Connection Profile + tool calling), Map, Settings
+- **Six apps:** Command-X (neural messaging), Profiles (contact intel), Quests (persistent story goals), Overseer (in-phone agent with its own Connection Profile + tool calling), Map, Settings
 
 ### 💬 Messaging
 - **iMessage-style chat bubbles** — Sent (blue), received (dark gray), neural commands (pink/purple glow)
@@ -61,7 +61,7 @@ Messages flow through the RP naturally. The extension uses prompt injection so t
 ### 👁️ Overseer App (v0.13+)
 The Overseer app replaces the former `OpenClaw` bridge console. It is a first-class **interactive agent** embedded in the phone UI, with no external server-plugin dependency.
 
-- **Its own Connection Profile** — Set a dedicated SillyTavern Connection Profile for Overseer in either the ST side panel or the in-phone Overseer view. Every Overseer turn is generated under that profile (via `generateQuietPrompt`), then restored to your chat model; switches are serialized through an internal queue so they never interleave with the Utility profile.
+- **Its own Connection Profile** — Set a dedicated SillyTavern Connection Profile for Overseer in either the ST side panel or the in-phone Overseer view. Every Overseer turn is generated under that profile (via `generateQuietPrompt`), then restored to your chat model. Overseer and Utility profile switches share a single serialization queue so they cannot race each other on the global ST profile.
 - **Native function-calling tools** — When used with a tool-capable model (OpenAI, Anthropic, Gemini, OpenRouter tool profiles, or local models with tool grammars) and with "Enable function calling" on in your sampler settings, the agent can call these ST-registered tools directly:
   - `overseer_get_recent_messages` — read the last ~12 chat messages
   - `overseer_list_contacts` — read the phone's contact intel
