@@ -76,6 +76,7 @@ LLM RESPONDS:
 settings            // {enabled, styleCommands, showLockscreen, panelOpen, batchMode,
                     //  autoDetectNpcs, manualHybridPrivateTexts, overseerMode,
                     //  overseerConnectionProfile, overseerToolsEnabled,
+                    //  overseerMcpEnabled, overseerMcpServerName, overseerFsMaxReadBytes,
                     //  contactsInjectEveryN, questsInjectEveryN,
                     //  utilityConnectionProfile, ...legacy openclawMode mirror}
 phoneContainer      // HTMLElement | null — wrapper div injected into body
@@ -101,7 +102,7 @@ typingTimeout       // setTimeout ID for the 30s awaitingReply cleanup
 ### Named Constants
 
 ```javascript
-VERSION              // '0.10.0' — single-sourced
+VERSION              // '0.14.0' — single-sourced
 AWAIT_TIMEOUT_MS     // 30_000 — awaitingReply auto-clear timeout
 CLOCK_INTERVAL_MS    // 30_000 — clock display refresh interval
 MESSAGE_HISTORY_CAP  // 200 — max messages stored per contact
@@ -165,11 +166,22 @@ Function tools registered via `ctx.registerFunctionTool` (gated by `overseerTool
 - `overseer_list_characters` — ST character-card names
 - `overseer_run_slash` — executes a slash command (string starting with `/`) and returns the receipt
 
+**MCP filesystem tools (v0.14.0, opt-in).** Registered under the stricter gate `overseerMcpFsShouldRegister`, which AND's `settings.overseerMcpEnabled` onto `overseerToolsShouldRegister`. Call into the user-installed `bmen25124/SillyTavern-MCP-Server` plugin via `POST /api/plugins/mcp/servers/{name}/call-tool`:
+- `overseer_fs_read_file({ path })` — default policy `auto`; response capped at `overseerFsMaxReadBytes`
+- `overseer_fs_list_directory({ path })` — default policy `auto`
+- `overseer_fs_write_file({ path, content })` — default policy `confirm`; approval card includes a **unified diff preview** (from `computeUnifiedDiff`)
+- `overseer_fs_delete_file({ path })` — policy always `confirm` (the `auto` setting is coerced by `policyFor`)
+
+Each FS tool invokes `fsPrecheck(kind, rawPath)` → `normalizeAbsolutePath` → `pathAllowed(path, state.fsAllowList)` → `policyFor(kind, state.fsPolicy)` before touching HTTP. `confirm`-policy operations land in `overseerFsPending` (in-memory map) + the existing `lastOperateEnvelope.actions[]` array, rendered as the same `.cx-overseer-action-card` used by slash proposals.
+
 Per-chat state lives in `chatMetadata[EXT].overseer`:
 - `conversation: []` — array of `{role, text, timestamp, toolName?}` turns (capped at 200)
 - `lastReply: string`
 - `lastOperateEnvelope: {kind, summary, actions[]} | null`
 - `resetNonce: number` — bumped by **Reset conversation**
+- `fsAllowList: string[]` — per-chat list of absolute paths Overseer is permitted to touch (fail-closed when empty)
+- `fsPolicy: { read, list, write, delete }` — each value `auto` | `confirm` | `deny` (`delete`+`auto` coerced to `confirm`)
+- `mcpAuditLog: [{ ts, tool, path, decision, bytes?, error? }]` — capped at 50, mirrored into `#cx-ovr-log`
 
 Legacy: on first read, `chatMetadata[EXT].openclaw` is migrated into `.overseer`. Settings field `openclawMode` is kept as a mirror of `overseerMode` for backwards compat but is otherwise unused. The old `/api/plugins/openclaw-bridge` server plugin is **no longer required or called**.
 
@@ -267,3 +279,4 @@ Manual integration testing (no automated browser tests):
 - **v0.10.0** — Quests app, OpenClaw app, `[quests]` tag, private polling, quest enrichment via `generateQuietPrompt`, per-chat metadata persistence, comprehensive code review (security escaping, CSP-safe avatar fallback, clock-leak fix, event-gate on `settings.enabled`, `MESSAGE_DELETED` mesId fix, `[sms]` routing tightened, caches, upload size cap, throttled injections, unit tests, accessibility, `cxAlert`/`cxConfirm`, toast improvements, send-button guard)
 - **v0.11.0 / v0.12.0** — Map app + `[place]` tag, utility Connection Profile for background utility generations
 - **v0.13.0** — **Overseer agent** replaces the OpenClaw bridge console. Overseer talks to its own Connection Profile via `generateQuietPrompt` and registers native ST function-calling tools (slash_run, recent messages, phone-state readers) through `ctx.registerFunctionTool`. Removed the `/api/plugins/openclaw-bridge` HTTP dependency. Persisted `chatMetadata[EXT].openclaw` auto-migrates to `.overseer`. Filesystem (read/write/list) tools via an MCP client integration are slated for the next release.
+- **v0.14.0** — **Overseer MCP filesystem integration** (opt-in). Adds `overseer_fs_read_file`, `overseer_fs_list_directory`, `overseer_fs_write_file`, `overseer_fs_delete_file` under a stricter gate (`overseerMcpFsShouldRegister`) that requires the user to have installed `bmen25124/SillyTavern-MCP-Server` + `SillyTavern-MCP-Client` + a filesystem MCP server. Calls go through the stable `/api/plugins/mcp/servers/{name}/call-tool` HTTP endpoint. Adds per-chat `fsAllowList` + per-tool `fsPolicy` (`auto`/`confirm`/`deny`) + an approval UI with unified-diff preview for writes + a capped audit log under `chatMetadata[EXT].overseer.mcpAuditLog`. No new HTTP plugin is introduced or bundled. Pure helpers (`normalizeAbsolutePath`, `pathAllowed`, `policyFor`, `computeUnifiedDiff`) are unit-tested (108/108 pass).

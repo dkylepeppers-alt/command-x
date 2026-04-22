@@ -452,3 +452,289 @@ describe('parseOverseerOperateEnvelope', () => {
         assert.equal(parseOverseerOperateEnvelope('[command-x-operate]not json[/command-x-operate]'), null);
     });
 });
+
+/* ===== MCP FS helpers (v0.14.0) — pure trust-boundary tests ===== */
+
+function normalizeAbsolutePath(input) {
+    if (typeof input !== 'string') return null;
+    if (input.length === 0) return null;
+    if (input.includes('\0')) return null;
+    if (/%2e%2e|%2f%2e%2e|%5c%2e%2e/i.test(input)) return null;
+    let p = input.replace(/\\/g, '/').trim();
+    if (p.length === 0) return null;
+    let prefix = '';
+    const driveMatch = /^([a-zA-Z]):(\/?)/.exec(p);
+    if (driveMatch) {
+        prefix = driveMatch[1].toLowerCase() + ':';
+        p = p.slice(driveMatch[0].length);
+        if (driveMatch[2] !== '/') return null;
+        p = '/' + p;
+    } else if (p.startsWith('//')) {
+        const parts = p.slice(2).split('/');
+        if (parts.length < 2 || !parts[0] || !parts[1]) return null;
+        prefix = '//' + parts[0] + '/' + parts[1];
+        p = '/' + parts.slice(2).join('/');
+    } else if (!p.startsWith('/')) {
+        return null;
+    }
+    const segments = p.split('/').filter(Boolean);
+    const out = [];
+    for (const seg of segments) {
+        if (seg === '.') continue;
+        if (seg === '..') return null;
+        if (seg.includes(':')) return null;
+        if (/[ .]$/.test(seg) && seg.length > 1) return null;
+        out.push(seg);
+    }
+    const normalized = prefix + '/' + out.join('/');
+    const isDriveOrUncRoot = out.length === 0 && prefix.length > 0;
+    if (normalized.length > 1 && normalized.endsWith('/') && !isDriveOrUncRoot) {
+        return normalized.slice(0, -1);
+    }
+    return normalized;
+}
+
+function pathAllowed(normalizedPath, allowList) {
+    if (typeof normalizedPath !== 'string' || !normalizedPath) return false;
+    if (!Array.isArray(allowList) || allowList.length === 0) return false;
+    const isWindows = /^[a-z]:\//.test(normalizedPath) || normalizedPath.startsWith('//');
+    const target = isWindows ? normalizedPath.toLowerCase() : normalizedPath;
+    for (const raw of allowList) {
+        const entry = normalizeAbsolutePath(raw);
+        if (!entry) continue;
+        const candidate = isWindows ? entry.toLowerCase() : entry;
+        if (target === candidate) return true;
+        if (target.startsWith(candidate === '/' ? '/' : candidate + '/')) return true;
+    }
+    return false;
+}
+
+function policyFor(toolKind, fsPolicy = {}) {
+    const kind = String(toolKind || '').toLowerCase();
+    const defaults = { read: 'auto', list: 'auto', write: 'confirm', delete: 'confirm' };
+    const allowedValues = new Set(['auto', 'confirm', 'deny']);
+    const raw = fsPolicy && allowedValues.has(fsPolicy[kind]) ? fsPolicy[kind] : defaults[kind];
+    if (!raw) return 'deny';
+    if (kind === 'delete' && raw === 'auto') return 'confirm';
+    return raw;
+}
+
+function computeUnifiedDiff(before, after, { maxLines = 200 } = {}) {
+    const a = String(before ?? '').split('\n');
+    const b = String(after ?? '').split('\n');
+    const rows = [];
+    let i = 0, j = 0;
+    while (i < a.length || j < b.length) {
+        if (i < a.length && j < b.length && a[i] === b[j]) {
+            rows.push({ kind: 'ctx', line: a[i], oldNo: i + 1, newNo: j + 1 });
+            i++; j++;
+            continue;
+        }
+        let sync = 0;
+        for (let k = 1; k <= 20 && (i + k <= a.length || j + k <= b.length); k++) {
+            if (i + k < a.length && a[i + k] === b[j]) { sync = k; break; }
+            if (j + k < b.length && a[i] === b[j + k]) { sync = -k; break; }
+        }
+        if (sync > 0) {
+            for (let k = 0; k < sync; k++) rows.push({ kind: 'del', line: a[i + k], oldNo: i + k + 1 });
+            i += sync;
+        } else if (sync < 0) {
+            for (let k = 0; k < -sync; k++) rows.push({ kind: 'add', line: b[j + k], newNo: j + k + 1 });
+            j += -sync;
+        } else if (i < a.length && j < b.length) {
+            rows.push({ kind: 'del', line: a[i], oldNo: i + 1 });
+            rows.push({ kind: 'add', line: b[j], newNo: j + 1 });
+            i++; j++;
+        } else if (i < a.length) {
+            rows.push({ kind: 'del', line: a[i], oldNo: i + 1 });
+            i++;
+        } else {
+            rows.push({ kind: 'add', line: b[j], newNo: j + 1 });
+            j++;
+        }
+    }
+    if (rows.length > maxLines) {
+        const head = rows.slice(0, Math.floor(maxLines / 2));
+        const tail = rows.slice(rows.length - Math.floor(maxLines / 2));
+        return [...head, { kind: 'ctx', line: `... (${rows.length - head.length - tail.length} lines elided) ...` }, ...tail];
+    }
+    return rows;
+}
+
+describe('normalizeAbsolutePath (security trust boundary)', () => {
+    it('accepts simple POSIX absolute paths', () => {
+        assert.equal(normalizeAbsolutePath('/home/user/x'), '/home/user/x');
+        assert.equal(normalizeAbsolutePath('/'), '/');
+    });
+    it('collapses redundant slashes and resolves "." segments', () => {
+        assert.equal(normalizeAbsolutePath('/home//user/./x/'), '/home/user/x');
+        assert.equal(normalizeAbsolutePath('/a/./b/./c'), '/a/b/c');
+    });
+    it('rejects relative paths', () => {
+        assert.equal(normalizeAbsolutePath('home/user'), null);
+        assert.equal(normalizeAbsolutePath('./x'), null);
+        assert.equal(normalizeAbsolutePath('../x'), null);
+        assert.equal(normalizeAbsolutePath(''), null);
+    });
+    it('rejects any ".." segments, anywhere', () => {
+        assert.equal(normalizeAbsolutePath('/a/../b'), null);
+        assert.equal(normalizeAbsolutePath('/..'), null);
+        assert.equal(normalizeAbsolutePath('/a/b/../../c'), null);
+        assert.equal(normalizeAbsolutePath('/a/b/..'), null);
+    });
+    it('rejects percent-encoded traversal sequences', () => {
+        assert.equal(normalizeAbsolutePath('/a/%2e%2e/b'), null);
+        assert.equal(normalizeAbsolutePath('/a/%2f%2e%2e/b'), null);
+    });
+    it('rejects NUL bytes', () => {
+        assert.equal(normalizeAbsolutePath('/a/\0/b'), null);
+    });
+    it('rejects non-string input', () => {
+        assert.equal(normalizeAbsolutePath(null), null);
+        assert.equal(normalizeAbsolutePath(undefined), null);
+        assert.equal(normalizeAbsolutePath(42), null);
+        assert.equal(normalizeAbsolutePath({}), null);
+    });
+    it('normalizes Windows drive letters to lowercase and forward slashes', () => {
+        assert.equal(normalizeAbsolutePath('C:\\Users\\Alice\\scratch'), 'c:/Users/Alice/scratch');
+        assert.equal(normalizeAbsolutePath('C:/Users/Alice'), 'c:/Users/Alice');
+    });
+    it('rejects drive-relative Windows paths (no slash after drive)', () => {
+        assert.equal(normalizeAbsolutePath('C:foo'), null);
+    });
+    it('rejects segments containing ":" (ADS / drive-confusion)', () => {
+        assert.equal(normalizeAbsolutePath('/a/b:foo/c'), null);
+    });
+    it('rejects trailing dot/space on segments (Windows name-stripping tricks)', () => {
+        assert.equal(normalizeAbsolutePath('/a/foo./b'), null);
+        assert.equal(normalizeAbsolutePath('/a/foo /b'), null);
+    });
+    it('accepts UNC paths with host + share and normalizes the tail', () => {
+        assert.equal(normalizeAbsolutePath('//host/share/dir'), '//host/share/dir');
+        // Bare "//host/share" / "//host/share/" is the UNC root — trailing
+        // slash is preserved so the result remains a valid absolute path.
+        assert.equal(normalizeAbsolutePath('//host/share/'), '//host/share/');
+        assert.equal(normalizeAbsolutePath('//host/share'), '//host/share/');
+    });
+    it('rejects UNC paths missing host or share', () => {
+        assert.equal(normalizeAbsolutePath('//host/'), null);
+        assert.equal(normalizeAbsolutePath('//'), null);
+    });
+    it('strips trailing slashes from non-root paths', () => {
+        assert.equal(normalizeAbsolutePath('/home/user/'), '/home/user');
+    });
+    it('preserves the trailing slash for drive roots and POSIX root', () => {
+        // Drive roots without the slash are not valid absolute paths on
+        // Windows ("c:" is drive-relative), so we must keep it.
+        assert.equal(normalizeAbsolutePath('C:/'), 'c:/');
+        assert.equal(normalizeAbsolutePath('C:\\'), 'c:/');
+        assert.equal(normalizeAbsolutePath('/'), '/');
+    });
+});
+
+describe('pathAllowed (allow-list matcher)', () => {
+    const allow = ['/home/alice/scratch', '/tmp'];
+    it('denies everything when allow-list is empty or missing', () => {
+        assert.equal(pathAllowed('/home/alice/scratch/x', []), false);
+        assert.equal(pathAllowed('/home/alice/scratch/x', null), false);
+        assert.equal(pathAllowed('/home/alice/scratch/x', undefined), false);
+    });
+    it('allows exact match', () => {
+        assert.equal(pathAllowed('/home/alice/scratch', allow), true);
+        assert.equal(pathAllowed('/tmp', allow), true);
+    });
+    it('allows descendants of an allow-list entry', () => {
+        assert.equal(pathAllowed('/home/alice/scratch/nested/file.txt', allow), true);
+        assert.equal(pathAllowed('/tmp/foo.log', allow), true);
+    });
+    it('denies sibling paths with a shared prefix (no partial matches)', () => {
+        assert.equal(pathAllowed('/home/alice/scratchpad', allow), false);
+        assert.equal(pathAllowed('/tmpfoo', allow), false);
+    });
+    it('denies anything outside the list', () => {
+        assert.equal(pathAllowed('/etc/passwd', allow), false);
+        assert.equal(pathAllowed('/home/bob/x', allow), false);
+    });
+    it('is case-insensitive on Windows paths', () => {
+        assert.equal(pathAllowed('c:/Users/Alice/scratch/x', ['C:/Users/Alice/Scratch']), true);
+    });
+    it('is case-sensitive on POSIX paths', () => {
+        assert.equal(pathAllowed('/Home/Alice', ['/home/alice']), false);
+    });
+    it('silently ignores malformed allow-list entries', () => {
+        assert.equal(pathAllowed('/tmp/x', ['not-absolute', '/tmp']), true);
+    });
+    it('rejects the malformed target itself', () => {
+        assert.equal(pathAllowed('', allow), false);
+        assert.equal(pathAllowed(null, allow), false);
+    });
+});
+
+describe('policyFor (per-tool policy resolver)', () => {
+    it('returns sensible defaults for unknown policy objects', () => {
+        assert.equal(policyFor('read'), 'auto');
+        assert.equal(policyFor('list'), 'auto');
+        assert.equal(policyFor('write'), 'confirm');
+        assert.equal(policyFor('delete'), 'confirm');
+    });
+    it('honors user-configured values when valid', () => {
+        assert.equal(policyFor('read', { read: 'deny' }), 'deny');
+        assert.equal(policyFor('write', { write: 'auto' }), 'auto');
+    });
+    it('ignores invalid values and falls back to defaults', () => {
+        assert.equal(policyFor('read', { read: 'yolo' }), 'auto');
+        assert.equal(policyFor('write', { write: null }), 'confirm');
+    });
+    it('NEVER allows delete to be auto (safety invariant)', () => {
+        assert.equal(policyFor('delete', { delete: 'auto' }), 'confirm');
+    });
+    it('accepts deny for delete', () => {
+        assert.equal(policyFor('delete', { delete: 'deny' }), 'deny');
+    });
+    it('normalizes case of the tool name', () => {
+        assert.equal(policyFor('READ'), 'auto');
+        assert.equal(policyFor('Delete', { delete: 'auto' }), 'confirm');
+    });
+});
+
+describe('computeUnifiedDiff', () => {
+    it('returns all context rows for identical inputs', () => {
+        const rows = computeUnifiedDiff('a\nb\nc', 'a\nb\nc');
+        assert.equal(rows.every(r => r.kind === 'ctx'), true);
+        assert.equal(rows.length, 3);
+    });
+    it('marks added lines at the end', () => {
+        const rows = computeUnifiedDiff('a\nb', 'a\nb\nc');
+        const kinds = rows.map(r => r.kind).join(',');
+        assert.ok(kinds.includes('add'));
+    });
+    it('marks deleted lines at the end', () => {
+        const rows = computeUnifiedDiff('a\nb\nc', 'a\nb');
+        const kinds = rows.map(r => r.kind).join(',');
+        assert.ok(kinds.includes('del'));
+    });
+    it('marks a line replacement as del+add pair', () => {
+        const rows = computeUnifiedDiff('a\nOLD\nc', 'a\nNEW\nc');
+        const kinds = rows.map(r => r.kind);
+        assert.ok(kinds.includes('del') && kinds.includes('add'));
+    });
+    it('truncates very large diffs with an elision marker', () => {
+        const before = Array.from({ length: 300 }, (_, i) => `old-${i}`).join('\n');
+        const after = Array.from({ length: 300 }, (_, i) => `new-${i}`).join('\n');
+        const rows = computeUnifiedDiff(before, after, { maxLines: 50 });
+        assert.ok(rows.length <= 51); // 50 rows + 1 marker
+        assert.ok(rows.some(r => typeof r.line === 'string' && r.line.includes('elided')));
+    });
+    it('handles empty before (new file write)', () => {
+        const rows = computeUnifiedDiff('', 'hello\nworld');
+        // Empty string splits to [''] — one empty line — so the result includes
+        // one del of that empty line and adds for the new content. Every line
+        // from `after` must appear as an add.
+        assert.ok(rows.filter(r => r.kind === 'add').length >= 2);
+        assert.ok(rows.every(r => r.kind === 'add' || r.kind === 'del' || r.kind === 'ctx'));
+    });
+    it('handles empty after (full delete)', () => {
+        const rows = computeUnifiedDiff('hello\nworld', '');
+        assert.ok(rows.some(r => r.kind === 'del'));
+    });
+});

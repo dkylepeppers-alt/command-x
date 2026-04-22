@@ -4,7 +4,7 @@
 
 ## Summary
 
-SillyTavern third-party extension (v0.13.0, ~240KB / ~5500 lines of JS) that adds a floating smartphone UI overlay with multiple apps: **Command-X** (neural command messaging + unified iMessage-style texting), **Profiles** (NPC intel cards), **Quests** (persistent story tracker), **Overseer** (in-phone agent with its own Connection Profile + registered function-calling tools — replaces the v0.10–0.12 OpenClaw bridge console), **Map** (contact locations), and **Settings**. Pure browser JavaScript + CSS — no build system, no bundler, no runtime dependencies beyond SillyTavern's frontend.
+SillyTavern third-party extension (v0.14.0, ~250KB / ~5700 lines of JS) that adds a floating smartphone UI overlay with multiple apps: **Command-X** (neural command messaging + unified iMessage-style texting), **Profiles** (NPC intel cards), **Quests** (persistent story tracker), **Overseer** (in-phone agent with its own Connection Profile + registered function-calling tools, plus optional MCP-backed filesystem read/write/list/delete behind an approval UI — replaces the v0.10–0.12 OpenClaw bridge console), **Map** (contact locations), and **Settings**. Pure browser JavaScript + CSS — no build system, no bundler, no runtime dependencies beyond SillyTavern's frontend.
 
 **Languages/Runtime:** Vanilla ES module JavaScript, CSS3, HTML. Runs inside SillyTavern's browser frontend (Chromium-based). jQuery is available globally via ST.
 

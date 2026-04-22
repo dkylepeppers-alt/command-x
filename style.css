@@ -1434,3 +1434,84 @@
     border-color: rgba(16,185,129,.6);
     box-shadow: 0 0 0 2px rgba(16,185,129,.2);
 }
+
+/* ---- Overseer · Filesystem (MCP) panel (v0.14.0) ---- */
+.cx-overseer-fs {
+    margin: 8px 0;
+    padding: 6px 8px;
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: 8px;
+    background: rgba(0,0,0,.2);
+}
+.cx-overseer-fs > summary {
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    color: #bbb;
+    user-select: none;
+}
+.cx-overseer-fs-body {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 6px;
+}
+.cx-overseer-fs-hint {
+    font-size: 11px;
+    color: #888;
+    line-height: 1.4;
+}
+.cx-overseer-fs-policies {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+}
+.cx-overseer-field-inline {
+    flex-direction: row !important;
+    align-items: center;
+    gap: 6px;
+}
+#cx-ovr-fs-allowlist {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 11px;
+    background: rgba(0,0,0,.4);
+    color: #ddd;
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 6px;
+    padding: 6px 8px;
+}
+#cx-ovr-fs-server {
+    background: rgba(0,0,0,.4);
+    color: #ddd;
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 6px;
+    padding: 4px 8px;
+}
+
+/* ---- Overseer action diff preview (v0.14.0) ---- */
+.cx-overseer-action-diff-label {
+    font-size: 11px;
+    color: #888;
+    margin: 6px 0 2px;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+}
+.cx-overseer-action-diff {
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 240px;
+    overflow: auto;
+    background: rgba(0,0,0,.35);
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: 6px;
+    padding: 6px 8px;
+    margin: 0 0 6px;
+}
+.cx-overseer-action-diff .cx-diff-add { display: block; color: #6ee7b7; background: rgba(16,185,129,.08); }
+.cx-overseer-action-diff .cx-diff-del { display: block; color: #fca5a5; background: rgba(239,68,68,.08); }
+.cx-overseer-action-diff .cx-diff-ctx { display: block; color: #bbb; }

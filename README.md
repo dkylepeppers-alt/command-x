@@ -111,8 +111,73 @@ git clone https://github.com/dkylepeppers-alt/command-x.git
 ```
 Refresh SillyTavern.
 
-### Overseer app (no external dependencies)
-The in-phone **Overseer** app is self-contained — it uses SillyTavern's built-in `generateQuietPrompt` and `registerFunctionTool` APIs. The old `openclaw-bridge` server plugin is **no longer required or used**; if you have it installed you can safely disable or remove it.
+### Overseer app (no external dependencies for core features)
+The in-phone **Overseer** app is self-contained for its core observe/assist/operate modes — it uses SillyTavern's built-in `generateQuietPrompt` and `registerFunctionTool` APIs. The old `openclaw-bridge` server plugin is **no longer required or used**; if you have it installed you can safely disable or remove it.
+
+### Overseer filesystem tools (optional, v0.14.0+)
+
+Overseer can optionally read, list, write, and delete files on the SillyTavern host machine via the **Model Context Protocol (MCP)**. This is **off by default** and requires three separate components installed by you:
+
+1. **SillyTavern MCP server plugin** — adds an HTTP API that proxies MCP calls to configured MCP servers:
+   ```
+   https://github.com/bmen25124/SillyTavern-MCP-Server
+   ```
+   Install as a SillyTavern server plugin (instructions in that repo), then **restart SillyTavern**.
+
+2. **SillyTavern MCP client extension** — manages the list of MCP servers and registers their tools with SillyTavern's function-calling system:
+   ```
+   https://github.com/bmen25124/SillyTavern-MCP-Client
+   ```
+   Install via ST's extension installer using the URL above.
+
+3. **A filesystem MCP server** — Anthropic's reference implementation works well:
+   ```
+   npx -y @modelcontextprotocol/server-filesystem /absolute/path/to/allowed-root
+   ```
+   Register it through the MCP Client extension by opening its settings and adding an entry to `mcp_settings.json`:
+   ```json
+   {
+     "mcpServers": {
+       "filesystem": {
+         "type": "stdio",
+         "command": "npx",
+         "args": ["-y", "@modelcontextprotocol/server-filesystem", "/absolute/path/to/allowed-root"]
+       }
+     }
+   }
+   ```
+   The path(s) passed to `server-filesystem` are a **server-level allow-list** — the MCP server itself will refuse any read/write outside those roots. Pass **only** paths you want Overseer to be able to touch.
+
+**Then, in Command-X:**
+1. Open **Settings → Command-X Phone** (in ST's Extensions panel) or the phone's **Overseer → Filesystem** panel.
+2. Tick **Enable Overseer filesystem tools via MCP**.
+3. Set the **MCP filesystem server name** to the key you used in `mcp_settings.json` (e.g. `filesystem`).
+4. In the phone's **Overseer → Filesystem** panel, add one absolute path per line to the **Per-chat allow-list** — this is layered *on top of* the MCP server's own allow-list.
+5. Click **Check MCP availability** to verify the plugin is reachable.
+6. Choose a **policy** for each operation:
+   - `auto` — execute immediately when the model invokes the tool (only safe for `read`/`list`)
+   - `confirm` — surface as an **Approve / Reject** card (default for `write`; **forced for `delete`** regardless of your setting)
+   - `deny` — refuse outright
+
+When enabled, the following tools are registered under the combined gate (extension enabled + Overseer app open + tools enabled + MCP enabled):
+
+| Tool | Default policy | Notes |
+|------|----------------|-------|
+| `overseer_fs_read_file` | auto | Response capped at `overseerFsMaxReadBytes` (default 512 KB) |
+| `overseer_fs_list_directory` | auto | — |
+| `overseer_fs_write_file` | confirm | Approval card shows a **unified diff preview** |
+| `overseer_fs_delete_file` | confirm (forced) | `auto` is coerced to `confirm` as a safety invariant |
+
+**Security model (defence in depth):**
+
+1. **MCP server CLI allow-list** — `@modelcontextprotocol/server-filesystem /some/root` refuses anything outside that root, enforced by the server process itself.
+2. **Per-chat `fsAllowList`** in Command-X — enforced *before* any HTTP call; empty list = deny all (fail-closed).
+3. **Per-tool `fsPolicy`** — `auto | confirm | deny` per operation. `delete` can never be `auto`.
+4. **Path normalisation** — `..`, encoded traversal, NUL bytes, Windows ADS markers, and trailing-dot tricks are all rejected before comparison.
+5. **Approval UI** — `confirm`-policy operations require explicit user click; write proposals include a diff preview.
+6. **Audit log** — every attempt (allowed, rejected, approved, errored) is recorded per-chat in `chatMetadata[EXT].overseer.mcpAuditLog`, capped at 50 entries. A human-readable mirror appears in the Overseer log pane.
+
+All network traffic stays between your SillyTavern instance and the MCP server(s) you configure. Command-X calls **no** external endpoints.
 
 ## Usage
 
