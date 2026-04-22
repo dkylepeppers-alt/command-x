@@ -124,9 +124,11 @@ let questEnrichmentInFlight = false;
 function getOverseerChatState() {
     const ctx = getContext();
     ctx.chatMetadata[EXT] = ctx.chatMetadata[EXT] || {};
-    // One-time migration of the legacy key.
+    // One-time migration of the legacy `openclaw` key.
     if (!ctx.chatMetadata[EXT].overseer && ctx.chatMetadata[EXT].openclaw) {
         ctx.chatMetadata[EXT].overseer = { ...ctx.chatMetadata[EXT].openclaw };
+        // Drop the old key so it doesn't linger as stale state or cause confusion.
+        delete ctx.chatMetadata[EXT].openclaw;
     }
     ctx.chatMetadata[EXT].overseer = ctx.chatMetadata[EXT].overseer || {};
     const state = ctx.chatMetadata[EXT].overseer;
@@ -648,6 +650,13 @@ async function resetOverseerSession() {
 let overseerToolsRegistered = false;
 
 function overseerToolsShouldRegister() {
+    // Intentional scoping: Overseer's tools only surface to the model while
+    // the user is actively on the Overseer app. This keeps the tools out of
+    // normal RP generations (where they'd be noise / context cost) and
+    // matches the mental model that Overseer is a discrete "open the app,
+    // have a conversation, close the app" session. If the user navigates
+    // away mid-turn the current generation still completes normally — ST
+    // evaluates shouldRegister when it builds each request, not mid-stream.
     return !!(settings?.enabled
         && settings?.overseerToolsEnabled !== false
         && currentApp === 'overseer');
