@@ -4428,10 +4428,18 @@ function styleCommandsInMessage(mesId) {
 function loadSettings() {
     const ctx = getContext();
     if (ctx.extensionSettings[EXT]) Object.assign(settings, ctx.extensionSettings[EXT]);
-    // Migration: drop legacy OpenClaw settings (removed in v0.13.0)
-    if ('openclawMode' in settings) {
-        delete settings.openclawMode;
+    // Migration: strip any legacy settings that have been retired so existing
+    // installs roll forward without a manual edit.
+    const LEGACY_KEYS = ['openclawMode'];
+    let migrated = false;
+    for (const key of LEGACY_KEYS) {
+        if (key in settings) { delete settings[key]; migrated = true; }
+        if (ctx.extensionSettings[EXT] && key in ctx.extensionSettings[EXT]) {
+            delete ctx.extensionSettings[EXT][key];
+            migrated = true;
+        }
     }
+    if (migrated) ctx.saveSettingsDebounced();
     const cb = (id, key, fallback = false) => {
         const el = document.getElementById(id);
         if (el) el.checked = settings[key] ?? fallback;

@@ -108,7 +108,7 @@ Refresh SillyTavern.
 8. **Map app** — Track contact locations
 9. **Settings app** — Configure everything in-phone
 
-> **Note:** The OpenClaw bridge app has been removed in v0.13.0 and is being replaced by **Nova** — a tool-calling agent with a companion server plugin that can read and write the SillyTavern install directory. See `docs/nova-agent-plan.md` for status.
+> **Note:** A previous bridge-console app has been retired and is being replaced by **Nova** — a tool-calling agent with a companion server plugin that can read and write the SillyTavern install directory. See `docs/nova-agent-plan.md` for status.
 
 ### How It Works
 
