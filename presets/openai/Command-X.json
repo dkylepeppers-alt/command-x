@@ -1,0 +1,133 @@
+{
+    "chat_completion_source": "openai",
+    "openai_model": "gpt-4o-mini",
+    "claude_model": "claude-3-5-sonnet-latest",
+    "google_model": "gemini-1.5-pro-latest",
+    "openrouter_model": "openrouter/auto",
+    "temperature": 0.85,
+    "frequency_penalty": 0.1,
+    "presence_penalty": 0.1,
+    "top_p": 1,
+    "top_k": 0,
+    "top_a": 1,
+    "min_p": 0,
+    "repetition_penalty": 1,
+    "openai_max_context": 32768,
+    "openai_max_tokens": 800,
+    "stream_openai": true,
+    "websearch_cohere": false,
+    "wrap_in_quotes": false,
+    "names_behavior": 2,
+    "send_if_empty": "",
+    "jailbreak_system": false,
+    "impersonation_prompt": "[Write your next reply from the point of view of {{user}}. Match the style and tone of the conversation so far. Stay in character.]",
+    "new_chat_prompt": "[Start a new chat]",
+    "new_group_chat_prompt": "[Start a new group chat. Group members: {{group}}]",
+    "new_example_chat_prompt": "[Example Chat]",
+    "continue_nudge_prompt": "[Continue the last message. Maintain consistency of voice, style, and pacing.]",
+    "bias_preset_selected": "Default (none)",
+    "max_context_unlocked": false,
+    "wi_format": "{0}",
+    "scenario_format": "[Circumstances and context of the dialogue: {{scenario}}]",
+    "personality_format": "[{{char}}'s personality: {{personality}}]",
+    "group_nudge_prompt": "[Write the next reply only as {{char}}.]",
+    "stream_openai_sse": true,
+    "prompts": [
+        {
+            "name": "Main Prompt",
+            "system_prompt": true,
+            "role": "system",
+            "content": "You are {{char}} in a live roleplay with {{user}}. Stay in character, write in present tense, and keep replies tight and vivid. Narration and spoken dialogue go in the normal reply. When the scene or the user's action would plausibly trigger a phone text, a contact status update, a quest tick, or a location change, emit those as side-channel tags on their own lines at the END of your reply, never narrated:\n\n- Phone texts:  [sms from=\"<ContactName>\" to=\"user\"]<short text message>[/sms]\n- Contact state: [status][{\"name\":\"<Name>\",\"emoji\":\"<emoji>\",\"status\":\"<online|away|offline>\",\"mood\":\"<emoji + word>\",\"location\":\"<place>\",\"relationship\":\"<label>\",\"thoughts\":\"<one line>\"}][/status]\n- Quests:       [quests][{\"id\":\"<slug>\",\"title\":\"<title>\",\"status\":\"<active|done|failed>\",\"priority\":\"<low|med|high>\",\"objective\":\"<one line>\"}][/quests]\n- Place:        [place]<current location name>[/place]\n\nRules for tags:\n- Only emit a tag when the scene actually warrants it. Don't force them.\n- Never write the tag text as dialogue or narration; they are machine data.\n- Phone texts should sound like real SMS: contractions, lowercase is fine, short.\n- Multiple [sms] blocks are allowed per reply (different senders / beats).\n- Do not explain, label, or markdown-fence the tags.",
+            "identifier": "main"
+        },
+        {
+            "name": "Auxiliary Prompt",
+            "system_prompt": true,
+            "role": "system",
+            "content": "",
+            "identifier": "nsfw"
+        },
+        {
+            "name": "Post-History Instructions",
+            "system_prompt": true,
+            "role": "system",
+            "content": "",
+            "identifier": "jailbreak"
+        },
+        {
+            "identifier": "chatHistory",
+            "name": "Chat History",
+            "system_prompt": true,
+            "marker": true
+        },
+        {
+            "identifier": "dialogueExamples",
+            "name": "Chat Examples",
+            "system_prompt": true,
+            "marker": true
+        },
+        {
+            "identifier": "worldInfoAfter",
+            "name": "World Info (after)",
+            "system_prompt": true,
+            "marker": true
+        },
+        {
+            "identifier": "worldInfoBefore",
+            "name": "World Info (before)",
+            "system_prompt": true,
+            "marker": true
+        },
+        {
+            "identifier": "enhanceDefinitions",
+            "role": "system",
+            "name": "Enhance Definitions",
+            "content": "If you have more than one passage of character definition, you must pay attention to all of them while writing. Do not narrate actions that contradict them.",
+            "system_prompt": true
+        },
+        {
+            "identifier": "charDescription",
+            "name": "Char Description",
+            "system_prompt": true,
+            "marker": true
+        },
+        {
+            "identifier": "charPersonality",
+            "name": "Char Personality",
+            "system_prompt": true,
+            "marker": true
+        },
+        {
+            "identifier": "scenario",
+            "name": "Scenario",
+            "system_prompt": true,
+            "marker": true
+        },
+        {
+            "identifier": "personaDescription",
+            "name": "Persona Description",
+            "system_prompt": true,
+            "marker": true
+        }
+    ],
+    "prompt_order": [
+        {
+            "character_id": 100001,
+            "order": [
+                { "identifier": "main", "enabled": true },
+                { "identifier": "worldInfoBefore", "enabled": true },
+                { "identifier": "personaDescription", "enabled": true },
+                { "identifier": "charDescription", "enabled": true },
+                { "identifier": "charPersonality", "enabled": true },
+                { "identifier": "scenario", "enabled": true },
+                { "identifier": "enhanceDefinitions", "enabled": false },
+                { "identifier": "nsfw", "enabled": true },
+                { "identifier": "worldInfoAfter", "enabled": true },
+                { "identifier": "dialogueExamples", "enabled": true },
+                { "identifier": "chatHistory", "enabled": true },
+                { "identifier": "jailbreak", "enabled": true }
+            ]
+        }
+    ],
+    "name": "Command-X"
+}

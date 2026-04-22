@@ -77,4 +77,49 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-22 — Nova migration Phase 1 + preset/soul/memory seeds (PR #16)
+
+**Context:** Removed OpenClaw end-to-end; landed `docs/nova-agent-plan.md`;
+shipped the `presets/openai/Command-X.json` Chat Completion preset + README;
+seeded `nova/soul.md` + `nova/memory.md`; added `nova: {...}` to `DEFAULTS` so
+future Nova code has a stable settings shape; added `test/nova-preset.test.mjs`.
+
+**Notes for future agents:**
+- **`loadSettings()` has a `LEGACY_KEYS` list** (currently `['openclawMode']`).
+  It strips legacy keys from both in-memory `settings` AND
+  `ctx.extensionSettings[EXT]`, then calls `saveSettingsDebounced()`. Add to
+  the list when retiring any future setting — don't hand-roll a one-off.
+- **Do NOT bump `manifest.json` to `0.13.0` yet.** The plan explicitly defers
+  the version bump until Nova actually ships, so we don't release a regressed
+  intermediate version. Reviewer will flag comments/docs that hard-code
+  `v0.13.0` — use version-agnostic wording until Nova lands.
+- **Preset schema source of truth**: the upstream ST
+  `default/content/presets/openai/Default.json`. The nine marker prompts
+  (`chatHistory`, `dialogueExamples`, `worldInfoBefore`, `worldInfoAfter`,
+  `charDescription`, `charPersonality`, `scenario`, `personaDescription`,
+  `enhanceDefinitions`) **must** all carry `marker: true`. `main`, `nsfw`,
+  `jailbreak` are `system_prompt: true` instead. `prompt_order[].order[]`
+  entries' identifiers **must** all exist in `prompts[]` — `nova-preset.test.mjs`
+  enforces this.
+- **Preset Main Prompt teaches the four Command-X tag grammars** (`[sms from=…
+  to=…]`, `[status]`, `[quests]`, `[place]`). A dedicated test asserts all
+  four grammars appear in the Main Prompt content — if you ever reword the
+  prompt, keep every grammar intact or the test fails.
+- **`nova/` and `presets/openai/` are new top-level dirs.** They are served
+  by ST's static handler (extension folder = `SillyTavern/public/scripts/
+  extensions/third-party/command-x/`), so `fetch('./nova/soul.md')` works
+  with no plugin — that's the path Nova will use in Phase 6.
+- **Running tests**: `node --test test/helpers.test.mjs test/nova-preset.test.mjs`
+  works reliably. `node --test 'test/*.test.mjs'` (with the glob quoted) works
+  as a one-liner. Bare `node --test test/` does something weird — avoid.
+- **`DEFAULTS.nova` shape** is stable and documented in the plan §7b: `{
+  profileName, defaultTier, maxToolCalls, turnTimeoutMs, pluginBaseUrl,
+  rememberApprovalsSession, activeSkill }`. Phase 2+ code should read from
+  `settings.nova.*`; don't spread it flat into `settings`.
+
+**Follow-ups / open questions:**
+- Phase 2 (Nova UI tile + view + composer) is the natural next chunk.
+- Phase 8 (`nova-agent-bridge` server plugin) is fully independent and can
+  land in parallel — nothing in the extension depends on it at init time.
+
 <!-- Add new entries above this line using the template in "How to Use This File". -->
