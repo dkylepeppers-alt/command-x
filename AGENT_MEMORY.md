@@ -77,6 +77,41 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-22 — Nova Phase 2 UI scaffolding (PR #16, later commit)
+
+**Context:** Landed the Nova app shell — home-screen tile, `data-view="nova"`
+view with header + three inert pills (profile / skill / tier), empty-state
+transcript, disabled composer, nav footer — plus `cx-nova-*` CSS contract
+(including `.cx-nova-toolcard` reserved for Phase 3). Added
+`test/nova-ui-scaffolding.test.mjs` with static source-text assertions (80/80
+total tests green).
+
+**Notes for future agents:**
+- **UI tests are static source-text greps, not DOM renders.** `buildPhone()`
+  references `document`, jQuery, and st-context imports that Node can't load,
+  so the tests read `index.js` / `style.css` as strings and regex-match the
+  scaffolding contract. Phase 3+ should keep this pattern — it's cheap and
+  catches the "someone moved the hook" class of regression without needing a
+  headless browser.
+- **Pills are real `<button>` elements, disabled.** If you add click handlers
+  in Phase 3, flip `disabled` to `false` — don't recreate the DOM. The test
+  asserts `disabled` is present precisely so we don't accidentally ship a
+  live-looking-but-dead UI mid-migration.
+- **`cx-nova-cancel` has `cx-hidden` from the start**, not `display:none`
+  inline. Toggle by adding/removing the class (matches the wrapper-close
+  pattern at `rebuildPhone` → `#cx-panel-wrapper`).
+- **Accent color is cyan-violet (`#06b6d4` → `#7c3aed`)**, deliberately
+  distinct from Command-X pink. Don't unify them later — the plan calls for a
+  visual separation between "your phone comms" (Command-X) and "your agent"
+  (Nova).
+- **Nova tile ordering on home grid:** Command-X → Profiles → Quests → Map →
+  **Nova** → Settings. Placed after Map (utilities) and before Settings
+  (always-last). If you reorder, update the test's structural expectations if
+  any assert positional ordering (currently none do).
+- **Toolcard CSS is reserved, not populated.** Phase 3 renders `.cx-nova-toolcard`
+  elements inside `#cx-nova-transcript`. The `-pending` / `-error` variant
+  classes already have border-color overrides; just add them to the card div.
+
 ### 2026-04-22 — Nova migration Phase 1 + preset/soul/memory seeds (PR #16)
 
 **Context:** Removed OpenClaw end-to-end; landed `docs/nova-agent-plan.md`;

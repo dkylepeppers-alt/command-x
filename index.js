@@ -3152,6 +3152,10 @@ function buildPhone() {
                     <div class="cx-icon-img cx-icon-map">🧭</div>
                     <div class="cx-icon-label">Map</div>
                 </div>
+                <div class="cx-app-icon" data-app="nova" role="button" tabindex="0" aria-label="Open Nova agent">
+                    <div class="cx-icon-img cx-icon-nova">✴︎</div>
+                    <div class="cx-icon-label">Nova</div>
+                </div>
                 <div class="cx-app-icon" data-app="phone-settings" role="button" tabindex="0" aria-label="Open Settings">
                     <div class="cx-icon-img cx-icon-settings">⚙️</div>
                     <div class="cx-icon-label">Settings</div>
@@ -3242,6 +3246,39 @@ function buildPhone() {
         </div>
 
         ${buildMapView(contacts)}
+
+        <!-- Nova Agent View (scaffolding — agent loop wired in later sprint) -->
+        <div class="cx-view" data-view="nova">
+            <div class="cx-nova-header">
+                <div class="cx-nova-title-col">
+                    <div class="cx-nova-title">Nova</div>
+                    <div class="cx-nova-sub">Agentic Assistant</div>
+                </div>
+                <div class="cx-nova-pills">
+                    <button type="button" class="cx-nova-pill" id="cx-nova-pill-profile" aria-label="Choose connection profile" disabled title="Coming soon">Profile: —</button>
+                    <button type="button" class="cx-nova-pill" id="cx-nova-pill-skill" aria-label="Choose skill" disabled title="Coming soon">Skill: Free-form</button>
+                    <button type="button" class="cx-nova-pill" id="cx-nova-pill-tier" aria-label="Choose permission tier" disabled title="Coming soon">Tier: Read</button>
+                </div>
+            </div>
+            <div class="cx-nova-transcript" id="cx-nova-transcript" role="log" aria-live="polite" aria-label="Nova conversation transcript">
+                <div class="cx-nova-empty">
+                    <div class="cx-nova-empty-glyph">✴︎</div>
+                    <div class="cx-nova-empty-title">Nova is offline</div>
+                    <div class="cx-nova-empty-body">The agent loop, skills, and tool bridge ship in a later sprint. This shell verifies the scaffolding renders cleanly on your setup.</div>
+                </div>
+            </div>
+            <div class="cx-nova-composer">
+                <textarea class="cx-nova-input" id="cx-nova-input" rows="2" placeholder="Ask Nova…" aria-label="Message Nova" disabled></textarea>
+                <div class="cx-nova-composer-actions">
+                    <button type="button" class="cx-settings-btn cx-nova-send" id="cx-nova-send" aria-label="Send to Nova" disabled>Send</button>
+                    <button type="button" class="cx-settings-btn cx-nova-cancel cx-hidden" id="cx-nova-cancel" aria-label="Cancel Nova turn">Cancel</button>
+                </div>
+            </div>
+            <div class="cx-navbar">
+                <div class="cx-nav active"><div class="cx-nav-ico">✴︎</div><div class="cx-nav-lbl">Nova</div></div>
+                <div class="cx-nav" data-goto="home" role="button" tabindex="0" aria-label="Go to home screen"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
+            </div>
+        </div>
 
         <!-- Settings View -->
         <div class="cx-view" data-view="phone-settings">
@@ -4010,7 +4047,7 @@ function wirePhone() {
     phoneContainer.querySelectorAll('.cx-app-icon[data-app]').forEach(icon =>
         icon.addEventListener('click', () => {
             const app = icon.dataset.app;
-            if (app === 'cmdx' || app === 'profiles' || app === 'quests' || app === 'phone-settings' || app === 'map') {
+            if (app === 'cmdx' || app === 'profiles' || app === 'quests' || app === 'phone-settings' || app === 'map' || app === 'nova') {
                 currentApp = app;
                 switchView(app);
             }

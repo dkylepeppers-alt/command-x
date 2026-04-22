@@ -81,24 +81,31 @@ Out of scope / explicitly rejected by user:
 ## 2. Nova App — UI Layer
 
 ### 2a. Home-screen tile
-- [ ] Add Nova tile in `buildPhone()` with `data-app="nova"` and new
+- [x] Add Nova tile in `buildPhone()` with `data-app="nova"` and new
   emoji/icon.
-- [ ] Add `'nova'` to every app-list guard (switchView, saved-app restore,
+- [x] Add `'nova'` to every app-list guard (switchView, saved-app restore,
   nav footer label).
 
 ### 2b. Nova view DOM
 Chat-style agent transcript. Layout (top → bottom):
-- [ ] **Header bar** — title "Nova"; right pills: profile, skill,
+- [x] **Header bar** — title "Nova"; right pills: profile, skill,
   permission-tier (Read / Write / Full). Each pill opens a chooser modal.
-- [ ] **Transcript pane** `#cx-nova-transcript` — user bubbles, assistant text
+  *(Scaffolding: pills ship as inert `disabled` buttons with stable IDs;
+  modal wiring deferred to 2c.)*
+- [x] **Transcript pane** `#cx-nova-transcript` — user bubbles, assistant text
   chunks (Markdown), and **tool-call cards** (name, arg summary, full JSON,
   status, duration, result preview, Approve/Reject when pending).
-- [ ] **Composer** — textarea, Send, Cancel (while in flight), "+" sheet with
+  *(Scaffolding: empty-state panel + `aria-live="polite"` region. Bubble /
+  tool-card rendering ships in Phase 3.)*
+- [x] **Composer** — textarea, Send, Cancel (while in flight), "+" sheet with
   skill picker, tier selector, "Attach current chat context" toggle,
   "Clear transcript"/"New session".
+  *(Scaffolding: textarea + Send (disabled) + Cancel (hidden) only. "+" sheet
+  deferred.)*
 - [ ] **Audit-log drawer** (via 📜 icon) — tailing view of persisted tool
   calls.
-- [ ] Back button exits Nova; transcript is persisted.
+- [x] Back button exits Nova; transcript is persisted.
+  *(Nav footer returns to home. Transcript persistence is Phase 3.)*
 
 ### 2c. Modals / sheets
 - [ ] `cxConfirm`-based approval modal for any Write/Full tool call, with
@@ -107,10 +114,14 @@ Chat-style agent transcript. Layout (top → bottom):
 - [ ] Skill picker modal, static list.
 
 ### 2d. Rendering rules
-- [ ] Use `escapeHtml` helper for all text; no `innerHTML` with untrusted data.
-- [ ] `role="button"` / `tabindex="0"` / `aria-label` on interactive divs.
+- [x] Use `escapeHtml` helper for all text; no `innerHTML` with untrusted data.
+  *(Scaffolding renders only static literals — no untrusted data yet. Contract
+  established for Phase 3.)*
+- [x] `role="button"` / `tabindex="0"` / `aria-label` on interactive divs.
+  *(Tile + nav footer comply. Pills are real `<button>` elements.)*
 - [ ] Use `cxAlert` / `cxConfirm`, never native `alert` / `confirm`.
-- [ ] New `.cx-nova-toolcard` class in `style.css`.
+- [x] New `.cx-nova-toolcard` class in `style.css`.
+  *(Reserved shell + `-pending` / `-error` variants — Phase 3 populates.)*
 
 ---
 
