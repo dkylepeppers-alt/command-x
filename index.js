@@ -1113,9 +1113,24 @@ async function executeFsPending(actionId) {
             result = await mcpCallTool(serverName, 'write_file', { path, content: String(content ?? '') });
             appendMcpAuditEntry({ tool: 'fs.write', path, decision: 'approved', bytes: String(content ?? '').length });
         } else if (kind === 'delete') {
-            // MCP filesystem server's tool name varies by version; try the common ones.
-            try { result = await mcpCallTool(serverName, 'delete_file', { path }); }
-            catch { result = await mcpCallTool(serverName, 'move_file', { source: path, destination: path + '.deleted' }); }
+            // MCP filesystem server's tool name varies by version: some builds
+            // expose `delete_file`, older ones only `move_file`. Try the
+            // canonical name first; on failure, attempt a soft-delete via
+            // rename and surface BOTH errors if that also fails, so the user
+            // can tell whether the server doesn't support delete at all or
+            // only rejected our specific request.
+            try {
+                result = await mcpCallTool(serverName, 'delete_file', { path });
+            } catch (primaryErr) {
+                try {
+                    result = await mcpCallTool(serverName, 'move_file', { source: path, destination: path + '.deleted' });
+                } catch (fallbackErr) {
+                    throw new Error(
+                        `Failed to delete ${path}: ${primaryErr?.message || primaryErr}. ` +
+                        `Fallback rename also failed: ${fallbackErr?.message || fallbackErr}.`,
+                    );
+                }
+            }
             appendMcpAuditEntry({ tool: 'fs.delete', path, decision: 'approved' });
         } else {
             throw new Error(`Unsupported pending kind: ${kind}`);
@@ -1270,7 +1285,7 @@ function registerOverseerTools() {
                     const serverName = settings.overseerMcpServerName || 'filesystem';
                     const result = await mcpCallTool(serverName, 'read_file', { path: pre.path });
                     const text = mcpResultToText(result);
-                    const cap = Number(settings.overseerFsMaxReadBytes) || 524288;
+                    const cap = Number(settings.overseerFsMaxReadBytes) || DEFAULTS.overseerFsMaxReadBytes;
                     const truncated = text.length > cap;
                     const body = truncated ? text.slice(0, cap) : text;
                     appendMcpAuditEntry({ tool: 'fs.read', path: pre.path, decision: truncated ? 'auto-truncated' : 'auto', bytes: body.length });

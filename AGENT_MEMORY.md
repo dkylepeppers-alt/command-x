@@ -79,6 +79,50 @@ _Newest entries first. Append a new entry here at the end of every PR._
 
 <!-- Add new entries above this line using the template in "How to Use This File". -->
 
+### 2026-04-22 — `copilot/pr2-task-progress` · Overseer MCP filesystem integration (v0.14.0)
+
+**What changed:**
+- Added optional filesystem tools to Overseer via the Model Context Protocol (MCP). **Off by default.** Depends on user-installed components only — **no new HTTP plugin is introduced or bundled**:
+  1. `bmen25124/SillyTavern-MCP-Server` (server plugin exposing `/api/plugins/mcp/*`)
+  2. `bmen25124/SillyTavern-MCP-Client` (extension managing MCP server registration)
+  3. Any filesystem MCP server (recommended: `@modelcontextprotocol/server-filesystem`)
+- New settings keys (all in `DEFAULTS`): `overseerMcpEnabled`, `overseerMcpServerName` (default `"filesystem"`), `overseerFsMaxReadBytes` (default 512 KiB).
+- New per-chat state under `chatMetadata[EXT].overseer`: `fsAllowList: string[]`, `fsPolicy: { read, list, write, delete }`, `mcpAuditLog: [{ ts, tool, path, decision, bytes?, error? }]` (capped at 50).
+- New pure helpers (in `index.js`, mirrored in `test/helpers.test.mjs`): `normalizeAbsolutePath`, `pathAllowed`, `policyFor`, `computeUnifiedDiff`. 45 new unit tests. **All 108 tests pass.**
+- New MCP wrapper helpers: `mcpClientAvailable()` (cached 60s HTTP probe of `/api/plugins/mcp/servers`), `mcpCallTool(serverName, toolName, args)` (POSTs to `/servers/{name}/call-tool`), `mcpResultToText(result)` (flattens MCP `content[]` arrays).
+- Four new Overseer function tools registered under stricter gate `overseerMcpFsShouldRegister` (which AND's `overseerMcpEnabled` onto the regular overseer-tools gate): `overseer_fs_read_file`, `overseer_fs_list_directory`, `overseer_fs_write_file`, `overseer_fs_delete_file`.
+- Extended `renderOverseerActions()` to render `diff` payload rows with `cx-diff-add`/`del`/`ctx` CSS classes inside the existing approval-card DOM. All interpolation goes through `escapeHtml()`.
+- Extended `approveOverseerAction()` / `rejectOverseerAction()` to route `fs.*` action types through the MCP executor (`executeFsPending`) and append audit entries on both paths.
+- New in-phone Overseer FS panel (`<details id="cx-ovr-fs-panel">`): enable toggle, server name, allow-list textarea, four policy selects, Save button, Check-availability button.
+- New ST settings-panel controls: `#cx_ext_overseer_mcp_enabled` checkbox, `#cx_ext_overseer_mcp_server_name` text input. Wired into `loadSettings`/`saveSettings` and the change-listener selector string.
+- Version bump to 0.14.0.
+
+**Why (architectural decisions):**
+- **Why depend on `bmen25124/SillyTavern-MCP-*` rather than vendoring an MCP client?** The `@modelcontextprotocol/sdk` is Node-first and requires a build pipeline Command-X intentionally doesn't have. The bmen25124 server plugin already handles the Node-side process management, stdio/SSE multiplexing, and tool discovery. We talk to it via a stable HTTP API (`/api/plugins/mcp/servers/{name}/call-tool`) that closely mirrors the MCP protocol itself.
+- **Why call MCP tools directly instead of letting the MCP-Client auto-register them?** The MCP-Client extension already registers every enabled MCP tool via `ctx.registerFunctionTool()` with IDs like `mcp_filesystem_read_file`. We don't use those because our Overseer UX requires extra layers — per-chat allow-list, per-tool policy (auto/confirm/deny), approval UI with **diff preview**, and an audit log — that ST's generic tool-call UX can't provide. Our wrappers (`overseer_fs_*`) implement those layers and then delegate to `mcpCallTool`. Users can still invoke the generic `mcp_*` tools manually if they want raw access.
+- **Defence in depth** is intentional: the MCP filesystem server's CLI allow-list + our per-chat `fsAllowList` + per-tool `fsPolicy` + path normalization + approval UI + audit log. Each layer is independent so a bug in one doesn't defeat the system.
+
+**Gotchas / pitfalls discovered:**
+- **`computeUnifiedDiff` bug: sentinel value must be `0`, not `-1`.** My first draft used `let sync = -1;` as "no sync found". But `-1` is also a *meaningful* value in the algorithm (sync b by 1). When no sync point is found within the 20-line window on heterogeneous input (e.g. 300 `old-N` lines vs 300 `new-N` lines), the `else if (sync < 0)` branch fired, advanced only `j`, and looped — OOMing the Node test runner after ~33 s. Fix: use `let sync = 0;` as the sentinel. Regression test: `'handles large diffs with elision marker'`.
+- **`normalizeAbsolutePath` must reject `..` rather than resolve it.** The MCP server does its own canonicalization, so resolving traversal here would only make our textual allow-list match a *different* path than what the server ultimately touches. Rejecting up front keeps the two layers consistent and makes test coverage simpler.
+- **`shouldRegister` is polled synchronously and frequently by ST.** Do *not* do HTTP probes inside it — `overseerMcpFsShouldRegister` checks only cached settings. The actual MCP availability check runs inside each tool's `action()`.
+- **Tool name variance for delete.** The official `@modelcontextprotocol/server-filesystem` exposes `delete_file` in some versions and only `move_file` (for renames and "soft-delete" via rename) in others. `executeFsPending` for the `delete` kind tries `delete_file` first and falls back to `move_file` with a `.deleted` suffix. If future filesystem servers diverge further, add more fallbacks here.
+- **Diff preview performance cap.** `computeUnifiedDiff` takes a `maxLines` option (default 200) and elides the middle when the raw diff exceeds it. A large overwrite of a 10k-line file won't try to render 10k `<span>` elements into the card.
+- **Empty string diff edge case.** `''.split('\n')` returns `['']` (one empty line), not `[]`. So a diff of `''` → `'hello\nworld'` includes a `del` of the empty line followed by adds. The test assertion was adjusted to match this reality rather than assume context-only output.
+- **Trusted global namespace.** The MCP-Client extension exposes an `MCPClient` class on a global, but its surface isn't stable across the client's versions. We intentionally **do not import or reference that class**; we go through the stable HTTP endpoint of the server plugin instead. If you see a future agent adding `SillyTavern.getMCPClient()` calls or similar, that's a step backwards — push back.
+
+**How to verify:**
+- `node --test test/helpers.test.mjs` → 108 / 108 pass.
+- `node -e "import('./index.js').catch(e => e instanceof SyntaxError && process.exit(1))"` — syntax clean (import itself fails because `st-context.js` is not present outside ST; that's expected).
+- In ST with the MCP-Server plugin installed: open Overseer → Filesystem, click **Check MCP availability** — status flips to "MCP plugin reachable". Without the plugin, it says "not reachable" and the tool `action()` short-circuits with a helpful error.
+
+**What is NOT in this PR (intentional):**
+- Write-back tools (`overseer_send_as_system`/`overseer_send_as_user` — proposed for a later PR).
+- Streaming `sendToOverseer()` variant.
+- Any vendoring of MCP SDK code.
+
+---
+
 ### 2026-04-22 — `copilot/overhaul-openclaw-app` · Overhauled OpenClaw → Overseer agent (v0.13.0)
 
 **What changed:**

@@ -5,7 +5,7 @@
     "optional": [],
     "js": "index.js",
     "css": "style.css",
-    "version": "0.13.0",
+    "version": "0.14.0",
     "homePage": "https://github.com/dkylepeppers-alt/command-x",
-    "description": "Smartphone UI with Command-X neural messaging, iMessage-style texting, NPC profiles, a persistent Quests app, the Overseer agent (LLM with its own Connection Profile and native function-calling tools — successor to the OpenClaw bridge console), a Map app for tracking contact locations, and in-phone settings. Uses prompt injection for structured [sms], [status], [quests], and [place] tag extraction."
+    "description": "Smartphone UI with Command-X neural messaging, iMessage-style texting, NPC profiles, a persistent Quests app, the Overseer agent (LLM with its own Connection Profile, native function-calling tools, and optional MCP-backed filesystem read/write/list/delete under an approval UI), a Map app for tracking contact locations, and in-phone settings. Uses prompt injection for structured [sms], [status], [quests], and [place] tag extraction."
 }
