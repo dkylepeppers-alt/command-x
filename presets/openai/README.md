@@ -18,8 +18,21 @@ the **AI Response Configuration → Chat Completion presets** panel.
 | `openai_max_tokens` | `800` | Keeps replies beat-sized; phone bubbles stay short. |
 | `stream_openai` | `true` | Visible typing + early cancel. |
 | `names_behavior` | `2` (completion names) | Preserves `{{char}}` / `{{user}}` attribution across turns. |
-| `wi_format` | `{0}` | Raw WI inserts, no wrapper framing. |
-| `scenario_format` / `personality_format` | Default bracketed framings. | Matches upstream conventions so community cards render identically. |
+| `wi_format` | `{0}` | Raw WI inserts, no wrapper framing — matches upstream default. |
+| `scenario_format` / `personality_format` | `{{scenario}}` / `{{personality}}` | Bare template expansions — matches upstream default so community cards render identically. |
+
+## Schema parity with upstream
+
+The preset matches the full field set of SillyTavern's upstream
+`default/content/presets/openai/Default.json` (sampling params, all provider
+model fields, every marker prompt, both `prompt_order` entries for
+`character_id: 100000` single-character default and `100001` group/global
+default, plus `seed`, `n`, `use_sysprompt`, `assistant_prefill`,
+`squash_system_messages`, `continue_prefill`, `continue_postfix`,
+`media_inlining`, `show_external_models`, `max_context_unlocked`,
+`reverse_proxy`, `proxy_password`, `bias_preset_selected`). Only the Command-X
+tuning knobs (temperature, penalties, context/tokens, `names_behavior`) and the
+Main Prompt body diverge from upstream.
 
 ## Main Prompt
 
@@ -63,8 +76,11 @@ button ships, use **Option B** below.
 
 ## Cloning for other providers
 
-The only fields that are truly OpenAI-specific are
-`chat_completion_source` and the `*_model` fields. To clone:
+The preset already ships placeholder model IDs for every provider ST supports
+(`claude_model`, `google_model`, `vertexai_model`, `openrouter_model`,
+`ai21_model`, `mistralai_model`, `chutes_model`, `electronhub_model`,
+`custom_model`). To switch providers, just copy the file and change
+`chat_completion_source`:
 
 ```bash
 cp Command-X.json Command-X-claude.json
@@ -72,17 +88,21 @@ cp Command-X.json Command-X-claude.json
 
 Then edit the copy:
 
-- **Claude / Anthropic**: set `chat_completion_source` to `"claude"`; set
-  `claude_model` (e.g. `claude-3-5-sonnet-latest`). Leave `openai_max_context`
-  as the context window.
-- **Gemini**: `chat_completion_source` → `"makersuite"`; set `google_model`
-  (e.g. `gemini-1.5-pro-latest`).
-- **OpenRouter**: `chat_completion_source` → `"openrouter"`; set
+- **Claude / Anthropic**: `chat_completion_source` → `"claude"`. Override
+  `claude_model` if you want something other than the shipped default.
+- **Gemini (AI Studio)**: `chat_completion_source` → `"makersuite"`. Tune
+  `google_model`.
+- **Gemini (Vertex AI)**: `chat_completion_source` → `"vertexai"`. Tune
+  `vertexai_model`.
+- **OpenRouter**: `chat_completion_source` → `"openrouter"`. Tune
   `openrouter_model` (e.g. `anthropic/claude-3.5-sonnet`,
-  `openai/gpt-4o-mini`, etc.).
+  `openai/gpt-4o-mini`).
+- **Mistral / AI21 / Chutes / ElectronHub / Custom**: set
+  `chat_completion_source` to the matching source and override the provider's
+  `*_model` field.
 
-All other fields (`temperature`, `top_p`, `prompts[]`, `prompt_order[]`)
-carry over unchanged. The preset's Main Prompt is provider-agnostic.
+All other fields (`temperature`, `top_p`, `prompts[]`, `prompt_order[]`,
+sampling params) carry over unchanged. The Main Prompt is provider-agnostic.
 
 ## Nova compatibility
 

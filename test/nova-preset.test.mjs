@@ -105,3 +105,30 @@ test('prompt_order references only defined prompt identifiers', async () => {
         }
     }
 });
+
+test('prompt_order ships both upstream default character_id entries', async () => {
+    // Upstream ST Default.json ships 100000 (single-character default) AND
+    // 100001 (global/group default). Missing either causes ST to fall back to
+    // hard-coded defaults on import, losing our custom ordering.
+    const { preset } = await loadPreset();
+    const ids = preset.prompt_order.map(b => b.character_id);
+    assert.ok(ids.includes(100000), 'prompt_order missing character_id: 100000');
+    assert.ok(ids.includes(100001), 'prompt_order missing character_id: 100001');
+});
+
+test('schema matches upstream ST Default.json field set', async () => {
+    // Fields present in upstream that ST's import code expects. If any go
+    // missing the preset still imports but settings silently fall back.
+    const { preset } = await loadPreset();
+    const UPSTREAM_FIELDS = [
+        'top_k', 'top_a', 'min_p', 'repetition_penalty',
+        'bias_preset_selected', 'reverse_proxy', 'proxy_password',
+        'max_context_unlocked', 'show_external_models', 'assistant_prefill',
+        'assistant_impersonation', 'use_sysprompt', 'squash_system_messages',
+        'media_inlining', 'bypass_status_check', 'continue_prefill',
+        'continue_postfix', 'seed', 'n',
+    ];
+    for (const key of UPSTREAM_FIELDS) {
+        assert.ok(key in preset, `missing upstream field: ${key}`);
+    }
+});

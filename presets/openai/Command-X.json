@@ -1,40 +1,57 @@
 {
     "chat_completion_source": "openai",
     "openai_model": "gpt-4o-mini",
+    "claude_model": "claude-sonnet-4-5",
+    "openrouter_model": "OR_Website",
+    "openrouter_use_fallback": false,
+    "openrouter_group_models": false,
+    "openrouter_sort_models": "alphabetically",
+    "ai21_model": "jamba-large",
+    "mistralai_model": "mistral-large-latest",
+    "chutes_model": "deepseek-ai/DeepSeek-V3-0324",
+    "chutes_sort_models": "alphabetically",
+    "electronhub_model": "gpt-4o-mini",
+    "electronhub_sort_models": "alphabetically",
+    "electronhub_group_models": false,
+    "custom_model": "",
+    "custom_url": "",
+    "custom_include_body": "",
+    "custom_exclude_body": "",
+    "custom_include_headers": "",
+    "google_model": "gemini-2.5-pro",
+    "vertexai_model": "gemini-2.5-pro",
     "temperature": 0.85,
     "frequency_penalty": 0.1,
     "presence_penalty": 0.1,
     "top_p": 1,
     "top_k": 0,
-    "top_a": 1,
+    "top_a": 0,
     "min_p": 0,
     "repetition_penalty": 1,
     "openai_max_context": 32768,
     "openai_max_tokens": 800,
-    "stream_openai": true,
-    "websearch_cohere": false,
-    "wrap_in_quotes": false,
     "names_behavior": 2,
     "send_if_empty": "",
-    "jailbreak_system": false,
-    "impersonation_prompt": "[Write your next reply from the point of view of {{user}}. Match the style and tone of the conversation so far. Stay in character.]",
-    "new_chat_prompt": "[Start a new chat]",
+    "impersonation_prompt": "[Write your next reply from the point of view of {{user}}, using the chat history so far as a guideline for the writing style of {{user}}. Don't write as {{char}} or system. Don't describe actions of {{char}}.]",
+    "new_chat_prompt": "[Start a new Chat]",
     "new_group_chat_prompt": "[Start a new group chat. Group members: {{group}}]",
     "new_example_chat_prompt": "[Example Chat]",
-    "continue_nudge_prompt": "[Continue the last message. Maintain consistency of voice, style, and pacing.]",
+    "continue_nudge_prompt": "[Continue your last message without repeating its original content.]",
     "bias_preset_selected": "Default (none)",
+    "reverse_proxy": "",
+    "proxy_password": "",
     "max_context_unlocked": false,
     "wi_format": "{0}",
-    "scenario_format": "[Circumstances and context of the dialogue: {{scenario}}]",
-    "personality_format": "[{{char}}'s personality: {{personality}}]",
+    "scenario_format": "{{scenario}}",
+    "personality_format": "{{personality}}",
     "group_nudge_prompt": "[Write the next reply only as {{char}}.]",
-    "stream_openai_sse": true,
+    "stream_openai": true,
     "prompts": [
         {
             "name": "Main Prompt",
             "system_prompt": true,
             "role": "system",
-            "content": "You are {{char}} in a live roleplay with {{user}}. Stay in character, write in present tense, and keep replies tight and vivid. Narration and spoken dialogue go in the normal reply. When the scene or the user's action would plausibly trigger a phone text, a contact status update, a quest tick, or a location change, emit those as side-channel tags on their own lines at the END of your reply, never narrated:\n\n- Phone texts:  [sms from=\"<ContactName>\" to=\"user\"]<short text message>[/sms]\n- Contact state: [status][{\"name\":\"<Name>\",\"emoji\":\"<emoji>\",\"status\":\"<online|away|offline>\",\"mood\":\"<emoji + word>\",\"location\":\"<place>\",\"relationship\":\"<label>\",\"thoughts\":\"<one line>\"}][/status]\n- Quests:       [quests][{\"id\":\"<slug>\",\"title\":\"<title>\",\"status\":\"<active|done|failed>\",\"priority\":\"<low|med|high>\",\"objective\":\"<one line>\"}][/quests]\n- Place:        [place]<current location name>[/place]\n\nRules for tags:\n- Only emit a tag when the scene actually warrants it. Don't force them.\n- Never write the tag text as dialogue or narration; they are machine data.\n- Phone texts should sound like real SMS: contractions, lowercase is fine, short.\n- Multiple [sms] blocks are allowed per reply (different senders / beats).\n- Do not explain, label, or markdown-fence the tags.",
+            "content": "You are {{char}} in a live roleplay with {{user}}. Stay in character, write in present tense, and keep replies tight and vivid.\n\nWhen the scene or {{user}}'s action would plausibly trigger a phone text, a contact status update, a quest tick, or a location change, emit those as side-channel tags on their own lines at the END of your reply, never narrated:\n\n- Phone texts:   [sms from=\"<ContactName>\" to=\"user\"]<short text message>[/sms]\n- Contact state: [status][{\"name\":\"<Name>\",\"emoji\":\"<emoji>\",\"status\":\"<online|away|offline>\",\"mood\":\"<emoji + word>\",\"location\":\"<place>\",\"relationship\":\"<label>\",\"thoughts\":\"<one line>\"}][/status]\n- Quests:        [quests][{\"id\":\"<slug>\",\"title\":\"<title>\",\"status\":\"<active|done|failed>\",\"priority\":\"<low|med|high>\",\"objective\":\"<one line>\"}][/quests]\n- Place:         [place]<current location name>[/place]\n\nRules for tags:\n- Only emit a tag when the scene actually warrants it. Don't force them.\n- Never write the tag text as dialogue or narration; they are machine data.\n- Never markdown-fence, label, or explain the tags.\n- Phone texts should sound like real SMS: contractions, lowercase is fine, short.\n- Multiple [sms] blocks are allowed per reply (different senders or beats).",
             "identifier": "main"
         },
         {
@@ -43,6 +60,12 @@
             "role": "system",
             "content": "",
             "identifier": "nsfw"
+        },
+        {
+            "identifier": "dialogueExamples",
+            "name": "Chat Examples",
+            "system_prompt": true,
+            "marker": true
         },
         {
             "name": "Post-History Instructions",
@@ -54,12 +77,6 @@
         {
             "identifier": "chatHistory",
             "name": "Chat History",
-            "system_prompt": true,
-            "marker": true
-        },
-        {
-            "identifier": "dialogueExamples",
-            "name": "Chat Examples",
             "system_prompt": true,
             "marker": true
         },
@@ -79,8 +96,9 @@
             "identifier": "enhanceDefinitions",
             "role": "system",
             "name": "Enhance Definitions",
-            "content": "If you have more than one passage of character definition, you must pay attention to all of them while writing. Do not narrate actions that contradict them.",
-            "system_prompt": true
+            "content": "If you have more knowledge of {{char}}, add to the character's lore and personality to enhance them but keep the Character Sheet's definitions absolute.",
+            "system_prompt": true,
+            "marker": false
         },
         {
             "identifier": "charDescription",
@@ -109,6 +127,22 @@
     ],
     "prompt_order": [
         {
+            "character_id": 100000,
+            "order": [
+                { "identifier": "main", "enabled": true },
+                { "identifier": "worldInfoBefore", "enabled": true },
+                { "identifier": "charDescription", "enabled": true },
+                { "identifier": "charPersonality", "enabled": true },
+                { "identifier": "scenario", "enabled": true },
+                { "identifier": "enhanceDefinitions", "enabled": false },
+                { "identifier": "nsfw", "enabled": true },
+                { "identifier": "worldInfoAfter", "enabled": true },
+                { "identifier": "dialogueExamples", "enabled": true },
+                { "identifier": "chatHistory", "enabled": true },
+                { "identifier": "jailbreak", "enabled": true }
+            ]
+        },
+        {
             "character_id": 100001,
             "order": [
                 { "identifier": "main", "enabled": true },
@@ -126,5 +160,16 @@
             ]
         }
     ],
+    "show_external_models": false,
+    "assistant_prefill": "",
+    "assistant_impersonation": "",
+    "use_sysprompt": false,
+    "squash_system_messages": false,
+    "media_inlining": true,
+    "bypass_status_check": false,
+    "continue_prefill": false,
+    "continue_postfix": " ",
+    "seed": -1,
+    "n": 1,
     "name": "Command-X"
 }
