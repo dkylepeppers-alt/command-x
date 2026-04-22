@@ -487,7 +487,11 @@ function normalizeAbsolutePath(input) {
         out.push(seg);
     }
     const normalized = prefix + '/' + out.join('/');
-    return normalized.length > 1 && normalized.endsWith('/') ? normalized.slice(0, -1) : normalized;
+    const isDriveOrUncRoot = out.length === 0 && prefix.length > 0;
+    if (normalized.length > 1 && normalized.endsWith('/') && !isDriveOrUncRoot) {
+        return normalized.slice(0, -1);
+    }
+    return normalized;
 }
 
 function pathAllowed(normalizedPath, allowList) {
@@ -607,7 +611,10 @@ describe('normalizeAbsolutePath (security trust boundary)', () => {
     });
     it('accepts UNC paths with host + share and normalizes the tail', () => {
         assert.equal(normalizeAbsolutePath('//host/share/dir'), '//host/share/dir');
-        assert.equal(normalizeAbsolutePath('//host/share/'), '//host/share');
+        // Bare "//host/share" / "//host/share/" is the UNC root — trailing
+        // slash is preserved so the result remains a valid absolute path.
+        assert.equal(normalizeAbsolutePath('//host/share/'), '//host/share/');
+        assert.equal(normalizeAbsolutePath('//host/share'), '//host/share/');
     });
     it('rejects UNC paths missing host or share', () => {
         assert.equal(normalizeAbsolutePath('//host/'), null);
@@ -615,6 +622,13 @@ describe('normalizeAbsolutePath (security trust boundary)', () => {
     });
     it('strips trailing slashes from non-root paths', () => {
         assert.equal(normalizeAbsolutePath('/home/user/'), '/home/user');
+    });
+    it('preserves the trailing slash for drive roots and POSIX root', () => {
+        // Drive roots without the slash are not valid absolute paths on
+        // Windows ("c:" is drive-relative), so we must keep it.
+        assert.equal(normalizeAbsolutePath('C:/'), 'c:/');
+        assert.equal(normalizeAbsolutePath('C:\\'), 'c:/');
+        assert.equal(normalizeAbsolutePath('/'), '/');
     });
 });
 

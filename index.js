@@ -283,7 +283,14 @@ function normalizeAbsolutePath(input) {
     }
     const normalized = prefix + '/' + out.join('/');
     // Strip trailing slash for non-root paths to make prefix matching consistent.
-    return normalized.length > 1 && normalized.endsWith('/') ? normalized.slice(0, -1) : normalized;
+    // Preserve it for root ("/") and Windows/UNC drive roots ("c:/", "//host/share/")
+    // — stripping there would produce an invalid path ("c:", "//host/share") that
+    // no MCP filesystem server will accept.
+    const isDriveOrUncRoot = out.length === 0 && prefix.length > 0;
+    if (normalized.length > 1 && normalized.endsWith('/') && !isDriveOrUncRoot) {
+        return normalized.slice(0, -1);
+    }
+    return normalized;
 }
 
 /**
@@ -664,7 +671,7 @@ function renderOverseerActions() {
                 const cls = r.kind === 'add' ? 'cx-diff-add' : r.kind === 'del' ? 'cx-diff-del' : 'cx-diff-ctx';
                 const sigil = r.kind === 'add' ? '+' : r.kind === 'del' ? '-' : ' ';
                 return `<span class="${cls}">${escapeHtml(sigil + r.line)}</span>`;
-            }).join('\n')}</pre>
+            }).join('')}</pre>
         ` : '';
         return `
         <div class="cx-overseer-action-card" data-action-id="${escapeHtml(action.id)}">
@@ -879,18 +886,29 @@ async function approveOverseerAction(actionId) {
         let receipt;
         if (isFsAction) {
             const kind = action.type.slice('fs.'.length);
+            // Re-validate path + allow-list + policy at approval time. The user
+            // may have edited fsAllowList / fsPolicy between proposal and
+            // approval; the approval-time precheck is the authoritative
+            // enforcement point before any HTTP call.
+            const payload = getFsPendingPayload(actionId, action);
+            const rawPath = payload?.path || action.title.replace(/^(Read|List|Write|Delete)\s+/, '').trim();
+            const pre = fsPrecheck(kind, rawPath);
+            if (!pre.ok) {
+                appendMcpAuditEntry({ tool: `fs.${kind}`, path: pre.path || rawPath, decision: pre.auditDecision, error: pre.error });
+                overseerFsPending.delete(actionId);
+                throw new Error(`Re-validation at approval failed: ${pre.error}`);
+            }
             if (kind === 'read' || kind === 'list') {
                 // Read/list proposals approved by the user — execute via MCP call.
                 const serverName = settings.overseerMcpServerName || 'filesystem';
-                const path = (overseerFsPending.get(actionId)?.path) || action.title.replace(/^(Read|List)\s+/, '').trim();
                 const toolName = kind === 'read' ? 'read_file' : 'list_directory';
-                const result = await mcpCallTool(serverName, toolName, { path });
+                const result = await mcpCallTool(serverName, toolName, { path: pre.path });
                 receipt = mcpResultToText(result) || JSON.stringify(result);
-                appendMcpAuditEntry({ tool: `fs.${kind}`, path, decision: 'approved', bytes: receipt.length });
+                appendMcpAuditEntry({ tool: `fs.${kind}`, path: pre.path, decision: 'approved', bytes: receipt.length });
                 overseerFsPending.delete(actionId);
             } else {
                 // Write / delete — executeFsPending appends its own audit entry.
-                receipt = await executeFsPending(actionId);
+                receipt = await executeFsPending(actionId, pre.path, action);
             }
         } else {
             const result = await executeOverseerSlashCommand(action.command);
@@ -913,7 +931,7 @@ async function approveOverseerAction(actionId) {
         appendOverseerTurn('tool', `Error running ${action.command}: ${receipt}`, { toolName: isFsAction ? action.type : 'slash.run' });
         setOverseerStatus(`Execution failed: ${receipt}`);
         if (isFsAction) {
-            appendMcpAuditEntry({ tool: action.type, path: overseerFsPending.get(actionId)?.path || '', decision: 'error', error: receipt });
+            appendMcpAuditEntry({ tool: action.type, path: getFsPendingPayload(actionId, action)?.path || '', decision: 'error', error: receipt });
             overseerFsPending.delete(actionId);
         }
     }
@@ -933,7 +951,7 @@ async function rejectOverseerAction(actionId) {
     appendOverseerLog('ACTION REJECTED', JSON.stringify({ actionId, command: action.command }, null, 2));
     appendOverseerTurn('tool', `Rejected ${action.command}`, { toolName: isFsAction ? action.type : 'slash.run' });
     if (isFsAction) {
-        appendMcpAuditEntry({ tool: action.type, path: overseerFsPending.get(actionId)?.path || '', decision: 'rejected' });
+        appendMcpAuditEntry({ tool: action.type, path: getFsPendingPayload(actionId, action)?.path || '', decision: 'rejected' });
         overseerFsPending.delete(actionId);
     }
     setOverseerStatus('Action rejected.');
@@ -1038,9 +1056,10 @@ function overseerMcpFsShouldRegister() {
 
 /**
  * Per-chat registry of pending filesystem approvals keyed by action id.
- * When a `confirm`-policy FS operation is proposed by the model, we enqueue
- * an entry here and surface an approval card via the existing operate-envelope
- * UI. On approve → execute; on reject → discard. See approveOverseerAction().
+ * This is a hot cache of the payload (content, diff) that is ALSO persisted
+ * onto the action object in `lastOperateEnvelope` so that approvals survive
+ * page reload and `rebuildPhone()` calls. Readers should fall back to the
+ * action's `pendingPayload` when the Map lookup misses.
  */
 const overseerFsPending = new Map(); // id → { kind, path, content?, diff?, contentBefore? }
 
@@ -1049,9 +1068,26 @@ function makeFsActionId(kind) {
 }
 
 /**
- * Shared precheck for all FS tools. Returns `{ ok: true, path }` on success
- * or `{ ok: false, error, auditDecision }` on failure. Callers MUST append
- * an audit entry in either branch.
+ * Resolve the payload for a pending FS action, preferring the in-memory
+ * cache but falling back to the persisted copy on the action object.
+ * Returns null if neither is available (e.g. corrupted state).
+ */
+function getFsPendingPayload(actionId, action = null) {
+    const cached = overseerFsPending.get(actionId);
+    if (cached) return cached;
+    if (action && action.pendingPayload && typeof action.pendingPayload === 'object') {
+        return action.pendingPayload;
+    }
+    return null;
+}
+
+/**
+ * Shared precheck for all FS tools. Returns `{ ok: true, path, policy }` on
+ * success or `{ ok: false, error, auditDecision }` on failure. Callers MUST
+ * append an audit entry in either branch. Called both at proposal time
+ * (inside each tool's `action()`) AND again at approval time — the second
+ * call is the authoritative enforcement point, since the user may have
+ * edited `fsAllowList` / `fsPolicy` between proposal and approval.
  */
 function fsPrecheck(kind, rawPath) {
     const path = normalizeAbsolutePath(rawPath);
@@ -1070,14 +1106,19 @@ function fsPrecheck(kind, rawPath) {
 }
 
 /**
- * Propose a write/delete operation for user approval by appending to the
- * operate envelope in chat state. The existing UI in renderOverseerActions()
- * will pick this up on next render. Returns the action id so the tool can
- * report it to the model.
+ * Propose a write/delete/read/list operation for user approval by appending
+ * to the operate envelope in chat state. The existing UI in
+ * `renderOverseerActions()` will pick this up on next render. Returns the
+ * action id so the tool can report it to the model.
+ *
+ * The full payload (content, diff, contentBefore) is persisted onto the
+ * action object under `pendingPayload` so approvals survive a page reload —
+ * the in-memory `overseerFsPending` Map is just a hot cache.
  */
 function proposeFsAction({ kind, path, content, diff, contentBefore, summary }) {
     const id = makeFsActionId(kind);
-    overseerFsPending.set(id, { kind, path, content, diff, contentBefore });
+    const payload = { kind, path, content, diff, contentBefore };
+    overseerFsPending.set(id, payload);
     const state = getOverseerChatState();
     const envelope = state.lastOperateEnvelope && state.lastOperateEnvelope.kind === 'command-x/operate/v1'
         ? { ...state.lastOperateEnvelope, actions: state.lastOperateEnvelope.actions.slice() }
@@ -1086,11 +1127,14 @@ function proposeFsAction({ kind, path, content, diff, contentBefore, summary }) 
         id,
         type: `fs.${kind}`,
         title: summary || `${kind} ${path}`,
-        command: kind === 'read' || kind === 'list' ? `fs ${kind} ${path}` : `fs ${kind} ${path}`,
+        command: `fs ${kind} ${path}`,
         reason: kind === 'write' ? 'Destructive: overwrites file contents.' : (kind === 'delete' ? 'Destructive: removes file.' : ''),
         status: 'pending',
         receipt: '',
         diff: diff || null,
+        // Persist enough to survive reload. For reads/lists the content field
+        // is irrelevant, but keeping the shape uniform simplifies execution.
+        pendingPayload: { kind, path, content: kind === 'write' ? String(content ?? '') : undefined },
     });
     saveOverseerChatState({ lastOperateEnvelope: envelope });
     try { renderOverseerActions(); } catch { /* UI may not be mounted */ }
@@ -1098,14 +1142,25 @@ function proposeFsAction({ kind, path, content, diff, contentBefore, summary }) 
 }
 
 /**
- * Execute a pending FS action (called from approveOverseerAction on approve).
- * Returns the tool-result text to surface to the user and (indirectly) to the
- * model on its next turn via the conversation log.
+ * Execute a pending write/delete FS action. Called from approveOverseerAction
+ * AFTER a fresh fsPrecheck has passed. Returns the tool-result text to
+ * surface to the user and (indirectly) to the model on its next turn via
+ * the conversation log.
+ *
+ * The caller is responsible for passing the re-validated `path` — we do not
+ * re-normalize here to avoid drift between what the user saw on the approval
+ * card and what we execute.
  */
-async function executeFsPending(actionId) {
-    const pending = overseerFsPending.get(actionId);
-    if (!pending) throw new Error(`No pending FS action with id ${actionId}`);
-    const { kind, path, content } = pending;
+async function executeFsPending(actionId, validatedPath, action = null) {
+    const pending = getFsPendingPayload(actionId, action);
+    if (!pending) {
+        throw new Error(
+            `No pending FS payload for action ${actionId}. The proposal may have been lost across a reload — ` +
+            `ask the model to re-propose the operation.`,
+        );
+    }
+    const { kind, content } = pending;
+    const path = validatedPath || pending.path;
     const serverName = settings.overseerMcpServerName || 'filesystem';
     let result;
     try {
@@ -1346,27 +1401,35 @@ function registerOverseerTools() {
                 const pre = fsPrecheck('write', rawPath);
                 if (!pre.ok) { appendMcpAuditEntry({ tool: 'fs.write', path: pre.path || String(rawPath ?? ''), decision: pre.auditDecision, error: pre.error }); return `Error: ${pre.error}`; }
                 if (!(await mcpClientAvailable())) { appendMcpAuditEntry({ tool: 'fs.write', path: pre.path, decision: 'error', error: 'mcp-plugin-unavailable' }); return 'Error: SillyTavern-MCP-Server plugin is not installed or not running. See the README for setup.'; }
-                // Attempt to read current contents for a diff preview. Ignore errors (new file).
-                let contentBefore = '';
-                try {
-                    const serverName = settings.overseerMcpServerName || 'filesystem';
-                    const existing = await mcpCallTool(serverName, 'read_file', { path: pre.path });
-                    contentBefore = mcpResultToText(existing);
-                } catch { contentBefore = ''; }
-                const diff = computeUnifiedDiff(contentBefore, String(content ?? ''));
+                const contentStr = String(content ?? '');
+                const serverName = settings.overseerMcpServerName || 'filesystem';
+                // Fast path: auto-policy writes skip the pre-read and diff
+                // entirely. The diff is only used to populate the approval
+                // card, and an auto-policy write has no approval card.
                 if (pre.policy === 'auto') {
                     try {
-                        const serverName = settings.overseerMcpServerName || 'filesystem';
-                        const result = await mcpCallTool(serverName, 'write_file', { path: pre.path, content: String(content ?? '') });
-                        appendMcpAuditEntry({ tool: 'fs.write', path: pre.path, decision: 'auto', bytes: String(content ?? '').length });
-                        return mcpResultToText(result) || `OK (wrote ${String(content ?? '').length} bytes)`;
+                        const result = await mcpCallTool(serverName, 'write_file', { path: pre.path, content: contentStr });
+                        appendMcpAuditEntry({ tool: 'fs.write', path: pre.path, decision: 'auto', bytes: contentStr.length });
+                        return mcpResultToText(result) || `OK (wrote ${contentStr.length} bytes)`;
                     } catch (e) {
                         appendMcpAuditEntry({ tool: 'fs.write', path: pre.path, decision: 'error', error: e?.message || String(e) });
                         return `Error: ${e?.message || e}`;
                     }
                 }
-                const id = proposeFsAction({ kind: 'write', path: pre.path, content: String(content ?? ''), diff, contentBefore, summary: `Write ${pre.path}` });
-                appendMcpAuditEntry({ tool: 'fs.write', path: pre.path, decision: 'proposed', bytes: String(content ?? '').length });
+                // Confirm path: read existing contents (capped) to build the
+                // diff preview for the approval card. A missing file is
+                // treated as an empty "before"; any read error is non-fatal.
+                const diffCap = Math.min(Number(settings.overseerFsMaxReadBytes) || DEFAULTS.overseerFsMaxReadBytes, 262144);
+                let contentBefore = '';
+                try {
+                    const existing = await mcpCallTool(serverName, 'read_file', { path: pre.path });
+                    contentBefore = mcpResultToText(existing);
+                    if (contentBefore.length > diffCap) contentBefore = contentBefore.slice(0, diffCap);
+                } catch { contentBefore = ''; }
+                const contentForDiff = contentStr.length > diffCap ? contentStr.slice(0, diffCap) : contentStr;
+                const diff = computeUnifiedDiff(contentBefore, contentForDiff);
+                const id = proposeFsAction({ kind: 'write', path: pre.path, content: contentStr, diff, contentBefore, summary: `Write ${pre.path}` });
+                appendMcpAuditEntry({ tool: 'fs.write', path: pre.path, decision: 'proposed', bytes: contentStr.length });
                 return `Pending user approval (action id: ${id}). A diff preview has been shown in the Overseer UI; the user must approve before this write executes.`;
             },
             formatMessage: (args) => `Overseer proposed write: ${args?.path || '(none)'}`,
