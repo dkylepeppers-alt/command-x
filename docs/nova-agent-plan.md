@@ -1,0 +1,500 @@
+# Nova Agent — Implementation Plan (Revised & Approved)
+
+Status: **Approved** — 2026-04-22. This document is the source of truth for the
+Nova Agent work. Update checkboxes as items land and append amendments at the
+bottom.
+
+Rewrite target: replace the `openclaw` app with **Nova**, an interactive
+tool-calling agent inside the Command-X phone. Nova has full read/write access
+to the SillyTavern install directory via a new companion server plugin, ships
+with three skills (Character Creator, Worldbook Creator, Image Prompter) plus a
+free-form fallback, and is anchored by a `soul.md` + `memory.md` pair that is
+always injected into the system prompt.
+
+Out of scope / explicitly rejected by user:
+- The `observe`/`assist`/`operate` mode system — **removed entirely**.
+- Text-Completion fallback — **not needed**. Nova requires a Chat-Completion
+  source that supports tool calling.
+
+---
+
+## 0. Naming & High-Level Layout
+
+- [ ] Adopt **Nova** everywhere (UI label, CSS prefix, code section, storage
+  keys, settings keys, system-prompt references).
+- [ ] Companion server plugin: **`nova-agent-bridge`** (replaces
+  `openclaw-bridge`). Ship plugin source under
+  `server-plugin/nova-agent-bridge/` with install instructions.
+- [ ] Phone app tile name **"Nova"** with a new icon (✴︎ / 🧠) and a distinct
+  accent color separate from the Command-X pink.
+- [ ] Code section header in `index.js`: `/* === NOVA AGENT === */`.
+- [ ] CSS prefix `cx-nova-*`, DOM IDs `cx-nova-*`, storage keys `cx-nova-*`,
+  settings nested under `settings.nova.*`.
+
+---
+
+## 1. Remove OpenClaw (clean-slate deletion)
+
+### 1a. `index.js`
+- [ ] Remove `OPENCLAW_API_BASE` constant.
+- [ ] Remove `openclawMode` from the `DEFAULTS` object.
+- [ ] Remove all `OpenClaw`-named functions (full list: `getOpenClawChatState`,
+  `saveOpenClawChatState`, `callOpenClawBridge`, `getOpenClawEls`,
+  `setOpenClawStatus`, `appendOpenClawLog`, `parseOpenClawOperateEnvelope`,
+  `applyOpenClawResponse`, `formatOpenClawResult`, `renderOpenClawActions`,
+  `syncOpenClawView`, `insertContextIntoOpenClawPrompt`, `checkOpenClawHealth`,
+  `refreshOpenClawSessionStatus`, `sendToOpenClaw`,
+  `sendOpenClawOperateReceipt`, `resetOpenClawSession`,
+  `executeOpenClawSlashCommand`, `approveOpenClawAction`,
+  `rejectOpenClawAction`, `runOpenClawSlashLocally`, `clearOpenClawPrompt`).
+- [ ] Remove the OpenClaw home-screen tile.
+- [ ] Remove the OpenClaw view block and its nav footer.
+- [ ] Remove the `app === 'openclaw'` branches in `switchView` and in the
+  initial-view restore block.
+- [ ] Remove all `#cx-ocb-*` event wire-ups in `wirePhone`.
+- [ ] Remove `syncOpenClawView()` calls in `rebuildPhone` / init.
+- [ ] Remove the openclawMode normalisation + setting-save code.
+- [ ] Update the module docstring to drop "OpenClaw bridge controls".
+
+### 1b. `settings.html`
+- [ ] Remove the `#cx_ext_openclaw_mode` row.
+- [ ] Update phone-panel description text to drop OpenClaw.
+
+### 1c. `style.css`
+- [ ] Remove every `.cx-openclaw-*` and `.cx-icon-openclaw` rule.
+
+### 1d. `manifest.json`
+- [ ] Rewrite `description` field (drop OpenClaw, add Nova).
+- [ ] Bump `version` → `0.13.0`.
+
+### 1e. `README.md`
+- [ ] Remove all OpenClaw sections.
+- [ ] Replace with a new "Nova Agent" section.
+
+### 1f. Storage / metadata migration
+- [ ] On Nova init, move `ctx.chatMetadata[EXT].openclaw` →
+  `ctx.chatMetadata[EXT].legacy_openclaw` and save metadata. Do not read it
+  afterwards. Delete `settings.openclawMode` if present and persist settings.
+
+---
+
+## 2. Nova App — UI Layer
+
+### 2a. Home-screen tile
+- [ ] Add Nova tile in `buildPhone()` with `data-app="nova"` and new
+  emoji/icon.
+- [ ] Add `'nova'` to every app-list guard (switchView, saved-app restore,
+  nav footer label).
+
+### 2b. Nova view DOM
+Chat-style agent transcript. Layout (top → bottom):
+- [ ] **Header bar** — title "Nova"; right pills: profile, skill,
+  permission-tier (Read / Write / Full). Each pill opens a chooser modal.
+- [ ] **Transcript pane** `#cx-nova-transcript` — user bubbles, assistant text
+  chunks (Markdown), and **tool-call cards** (name, arg summary, full JSON,
+  status, duration, result preview, Approve/Reject when pending).
+- [ ] **Composer** — textarea, Send, Cancel (while in flight), "+" sheet with
+  skill picker, tier selector, "Attach current chat context" toggle,
+  "Clear transcript"/"New session".
+- [ ] **Audit-log drawer** (via 📜 icon) — tailing view of persisted tool
+  calls.
+- [ ] Back button exits Nova; transcript is persisted.
+
+### 2c. Modals / sheets
+- [ ] `cxConfirm`-based approval modal for any Write/Full tool call, with
+  **diff preview** for file writes and command preview for shell.
+- [ ] Connection-profile picker modal (uses `/profile-list`).
+- [ ] Skill picker modal, static list.
+
+### 2d. Rendering rules
+- [ ] Use `escapeHtml` helper for all text; no `innerHTML` with untrusted data.
+- [ ] `role="button"` / `tabindex="0"` / `aria-label` on interactive divs.
+- [ ] Use `cxAlert` / `cxConfirm`, never native `alert` / `confirm`.
+- [ ] New `.cx-nova-toolcard` class in `style.css`.
+
+---
+
+## 3. Nova Agent Loop
+
+### 3a. State
+- [ ] Per-chat state in `ctx.chatMetadata[EXT].nova`:
+  - `sessions: [{ id, skill, tier, profileName, messages, toolCalls, createdAt, updatedAt }]`, cap 20.
+  - `activeSessionId`.
+  - `auditLog: [{ ts, tool, argsSummary, outcome }]`, cap 500.
+- [ ] Module-level: `novaTurnInFlight`, `novaAbortController`,
+  `novaToolRegistryVersion`.
+
+### 3b. Turn lifecycle
+- [ ] `sendNovaTurn(userText)`:
+  1. Validate profile is set and `ctx.isToolCallingSupported()` returns true.
+  2. Push user message, persist.
+  3. **Snapshot** active profile via `/profile`; swap to
+     `settings.nova.profileName` via `/profile <name>`.
+  4. Build messages: `[system: composedPrompt(), ...transcript]`.
+  5. Call `ctx.ConnectionManagerRequestService.sendRequest({ messages, tools, tool_choice: 'auto', stream: true, signal })`.
+     Fallback: `ctx.generateRaw({ ... useTools: true })` when
+     `ConnectionManagerRequestService` isn't present. Probe at init time.
+  6. Stream chunks. On `tool_calls`, dispatch (§4), append `role:'tool'` msg,
+     re-request.
+  7. Enforce caps: `maxToolCalls` (24), wall-clock (5 min), tokens.
+  8. **Finally** restore original profile (even on error/abort). Clear
+     `novaTurnInFlight`. Persist.
+
+### 3c. Tool registration
+- [ ] **Embedded path** (default): tools passed inline on `sendRequest`.
+- [ ] **Registered path** (fallback): `ctx.registerFunctionTool` with
+  `shouldRegister: () => false` default, flipped during the turn.
+- [ ] Single `NOVA_TOOLS` array: `{ name, displayName, description,
+  parameters, permission: 'read'|'write'|'shell', handler, formatApproval }`.
+
+### 3d. Cancellation and errors
+- [ ] `AbortController` per turn; Cancel button → `.abort()`.
+- [ ] Handler throws → tool result `{ error }` so the LLM can recover; red card.
+
+---
+
+## 4. Tool Surface
+
+### 4a. Filesystem (via `nova-agent-bridge`)
+- [ ] `fs_list({ path, recursive?, maxDepth? })`.
+- [ ] `fs_read({ path, encoding?, maxBytes? })`.
+- [ ] `fs_write({ path, content, encoding?, createParents?, overwrite? })`
+  with `.nova-trash/<ts>/<path>` backup on overwrite.
+- [ ] `fs_delete({ path, recursive? })` — moves to trash.
+- [ ] `fs_move({ from, to, overwrite? })`.
+- [ ] `fs_stat({ path })`.
+- [ ] `fs_search({ query, glob?, path?, maxResults? })`.
+
+Rooted at the **SillyTavern install dir** per user request. Plugin refuses
+escape, blocks symlinks out, and denies `.git/**`, `node_modules/**`, and its
+own plugin folder by default.
+
+### 4b. Shell (via `nova-agent-bridge`)
+- [ ] `shell_run({ cmd, args, cwd?, timeoutMs? })`. Allow-list: `node`, `npm`,
+  `git`, `python`, `python3`, `grep`, `rg`, `ls`, `cat`, `head`, `tail`, `wc`,
+  `find`. User-extensible. Hard timeout default 60 s.
+- [ ] Full tier only; per-call approval unless
+  "Remember approvals this session" is on.
+
+### 4c. Diff preview helper
+- [ ] For every `fs_write` approval: fetch current file, render unified diff
+  vs `content`. New files show raw content. Modal blocks the loop until
+  accept/reject.
+
+### 4d. SillyTavern API tools (no plugin)
+- [ ] `st_list_characters`, `st_read_character`, `st_write_character`
+  (via `/api/characters/*`).
+- [ ] `st_list_worldbooks`, `st_read_worldbook`, `st_write_worldbook`
+  (via `/api/worldinfo/*`).
+- [ ] `st_run_slash({ command })` — `ctx.executeSlashCommandsWithOptions`.
+- [ ] `st_get_context()` — compact view (last N msgs, character, persona).
+- [ ] `st_list_profiles`, `st_get_profile`.
+
+### 4e. Phone-internal tools
+- [ ] `phone_list_npcs`, `phone_write_npc`, `phone_list_quests`,
+  `phone_write_quest`, `phone_list_places`, `phone_write_place`,
+  `phone_list_messages`, `phone_inject_message`.
+
+### 4f. Tool capability discovery
+- [ ] Probe `GET /api/plugins/nova-agent-bridge/manifest`. If present,
+  register 4a/4b. If 404, register only 4d/4e and show a yellow banner.
+
+---
+
+## 5. Skills System
+
+Skill = named system-prompt pack + default tier + default tool subset. Single
+`NOVA_SKILLS` array in `index.js`.
+
+### 5a. Character Creator
+- [ ] System prompt: expert on ST character-card schema v2. Required fields:
+  `name`, `description`, `personality`, `scenario`, `first_mes`, `mes_example`,
+  `creator_notes`, `system_prompt`, `post_history_instructions`,
+  `alternate_greetings`, `character_book`, `tags`, `creator`,
+  `character_version`, `extensions`; wrapped with `spec: 'chara_card_v2'` +
+  `spec_version: '2.0'`. Always write to
+  `SillyTavern/data/<user>/characters/<name>.json` (user detected dynamically
+  via `ctx.name1` / user settings). Never overwrite without diff confirm.
+  Binary PNG embedding only via `/api/characters/*`.
+- [ ] Default tools: all `st_*character*` + `fs_*` read + `fs_write`
+  (scoped to characters dir).
+- [ ] Default tier: Write.
+
+### 5b. Worldbook Creator
+- [ ] System prompt: expert on ST Worldbook (World Info) schema: `entries` map
+  keyed by uid with `key`, `keysecondary`, `comment`, `content`, `constant`,
+  `selective`, `selectiveLogic`, `addMemo`, `order`, `position` (0..4),
+  `disable`, `excludeRecursion`, `preventRecursion`, `probability`,
+  `useProbability`, `depth`, `group`, `groupOverride`, `groupWeight`,
+  `scanDepth`, `caseSensitive`, `matchWholeWords`, `useGroupScoring`,
+  `automationId`, `role`, `vectorized`. Path:
+  `SillyTavern/data/<user>/worlds/<name>.json`.
+- [ ] Default tools: all `st_*worldbook*` + `fs_*` read + `fs_write`
+  (scoped to worlds dir).
+- [ ] Default tier: Write.
+
+### 5c. Image Prompter
+- [ ] System prompt: expert for SD/SDXL/Flux/Illustrious. Pulls the current
+  ST chat via `st_get_context`, proposes positive + negative prompts tied to
+  the current scene, character, outfit, location, lighting, camera. Three
+  profiles: Anime (booru tags), Realistic (natural language + cinematic),
+  Artistic (style tokens + artist refs). Structured output:
+  `{ positive, negative, sampler_hint, steps_hint, cfg_hint, notes }`.
+- [ ] Default tools: `st_get_context`, `phone_list_npcs`, optional `fs_write`
+  to save prompts to `SillyTavern/data/<user>/user/files/image-prompts/`.
+- [ ] Default tier: Read-only (escalatable to Write).
+
+### 5d. Free-form ("Plain helper")
+- [ ] Minimal system prompt. Default tier: Read-only. All tools available when
+  elevated.
+
+### 5e. Skill structure
+```
+{ id, label, icon, systemPrompt, defaultTier, defaultTools: [names] | 'all',
+  allowTierEscalation: true }
+```
+- [ ] `SKILLS_VERSION` constant bumps when prompts change.
+
+---
+
+## 6. `soul.md` and `memory.md`
+
+Always concatenated into the Nova system prompt regardless of skill.
+
+### 6a. Location
+- [ ] Default: extension folder —
+  `SillyTavern/public/scripts/extensions/third-party/command-x/nova/soul.md`
+  and `.../nova/memory.md`. Served by ST's static handler so `fetch('./nova/…')`
+  works with no plugin.
+- [ ] Seed both files in the repo with starter content (see §6d).
+
+### 6b. Load/save
+- [ ] On Nova init, fetch both files; cache in memory. Cache-bust on explicit
+  "Reload soul/memory" and after any self-edit.
+- [ ] Self-edit tools:
+  - `nova_read_soul`, `nova_write_soul` (Write).
+  - `nova_read_memory`, `nova_append_memory({ note, tags? })`,
+    `nova_overwrite_memory({ content })` (Write).
+- [ ] Route through `fs_write` when plugin installed; fall back to
+  `POST /api/files/*` into `SillyTavern/data/<user>/user/files/nova/`.
+- [ ] In-phone Settings: "Soul & Memory" pane with textareas + Save + Reset.
+
+### 6c. Prompt composition order
+```
+[Nova base system prompt]
+[Active skill prompt]
+---
+# Soul
+<soul.md>
+---
+# Memory
+<memory.md truncated to 16 KB>
+---
+[Tool-use contract: how to call tools, stop conditions, safety]
+```
+
+### 6d. Starter content
+- [ ] `soul.md`: Nova voice/persona — curious, crisp, SillyTavern-native,
+  confirms destructive ops, explains intent before acting, references the
+  current chat by name.
+- [ ] `memory.md`: empty template with section headers
+  ("User preferences", "Project notes", "Recent wins/failures", "Do not do").
+
+---
+
+## 7. Settings Surface
+
+### 7a. `settings.html` (ST-side)
+- [ ] Remove OpenClaw row.
+- [ ] Add collapsible **Nova** section:
+  - [ ] Profile picker (from `/profile-list`).
+  - [ ] Default permission tier radio.
+  - [ ] Max tool calls per turn (default 24).
+  - [ ] Turn wall-clock timeout s (default 300).
+  - [ ] Plugin base URL override (default `/api/plugins/nova-agent-bridge`).
+  - [ ] "Open Soul & Memory editor" → phone Settings.
+  - [ ] "Install Command-X Chat Completion preset" button (see §11).
+
+### 7b. In-phone Settings additions
+- [ ] "Nova" section: same fields as 7a + Soul & Memory editor + "View audit
+  log".
+- [ ] Persist under `extension_settings.command_x.nova = { profileName,
+  defaultTier, maxToolCalls, turnTimeoutMs, pluginBaseUrl,
+  rememberApprovalsSession: false, activeSkill }`.
+
+### 7c. Defaults
+- [ ] In `DEFAULTS`, replace `openclawMode` with `nova: {...}`.
+
+---
+
+## 8. `nova-agent-bridge` Server Plugin
+
+### 8a. Layout
+- [ ] `server-plugin/nova-agent-bridge/index.js` — CJS `init`/`exit`/`info`.
+- [ ] `server-plugin/nova-agent-bridge/package.json` — zero runtime deps;
+  use Node built-ins (`fs/promises`, `path`, `child_process`, `crypto`).
+- [ ] `server-plugin/nova-agent-bridge/config.example.yaml`.
+- [ ] `server-plugin/nova-agent-bridge/README.md` — install steps.
+
+### 8b. Routes (`/api/plugins/nova-agent-bridge/*`)
+- [ ] `GET /manifest` → `{ version, root, shellAllowList, capabilities }`.
+- [ ] `GET /health`.
+- [ ] `GET /fs/list`, `GET /fs/read`, `POST /fs/write`, `POST /fs/delete`,
+  `POST /fs/move`, `GET /fs/stat`, `POST /fs/search` (NDJSON).
+- [ ] `POST /shell/run` (NDJSON streaming `stdout`/`stderr`/`exit`).
+
+### 8c. Security
+- [ ] Root = `process.cwd()` by default; override via `config.yaml: root:`.
+- [ ] Normalise every request path; reject escapes; reject symlink escapes
+  (`fs.realpath` check).
+- [ ] Deny-list: `.git/**`, `node_modules/**`, `plugins/nova-agent-bridge/**`.
+- [ ] Max file size read/write: 20 MB.
+- [ ] Shell: no `shell: true`; binaries resolved via allow-list at startup.
+- [ ] CSRF protection mirroring ST's header check.
+- [ ] Require ST session cookie on every route.
+- [ ] Audit log: append to `SillyTavern/data/_nova-audit.jsonl` with
+  `{ ts, user, route, argsSummary, outcome, bytes }`. Never log `content`.
+
+### 8d. Lifecycle
+- [ ] `exit()` flushes audit log and releases file handles.
+
+---
+
+## 9. Connection-Profile Handling
+
+- [ ] **Probe**: `/profile-list` on Nova init; cache names.
+- [ ] **Validate** `settings.nova.profileName`; show setup card if missing.
+- [ ] **Swap**: capture previous profile from `/profile` (no-arg) then
+  `/profile <name>`. Skip swap if already active.
+- [ ] **Restore** in `finally`.
+- [ ] **Race protection**: module-level `profileSwapMutex` Promise chain.
+- [ ] **Feedback**: transcript lines "🔌 Switched to …" / "🔌 Restored …".
+
+---
+
+## 10. Migration, Compatibility, Minimum ST Version
+
+- [ ] Bump `manifest.json` → `0.13.0`.
+- [ ] Document minimum ST version (1.12.6+: `isToolCallingSupported`,
+  `ConnectionManagerRequestService`, Connection Profiles).
+- [ ] One-shot migration at first Nova init:
+  - Move `chatMetadata[EXT].openclaw` → `.legacy_openclaw`.
+  - Drop `settings.openclawMode`.
+  - Create `nova/soul.md` + `nova/memory.md` if absent (plugin if available,
+    else ST `/api/files/*`).
+
+---
+
+## 11. **Chat Completion Preset** *(added per amendment)*
+
+Ship a preset file the user can import into ST's Chat Completion section and
+point their Nova profile (and any other Command-X utility profile) at. Based
+on ST's own `default/content/presets/openai/Default.json` schema.
+
+### 11a. File
+- [ ] `presets/openai/Command-X.json` in this repo.
+- [ ] Uses the real ST preset schema (`chat_completion_source`,
+  `openai_model`, `temperature`, `top_p`, `frequency_penalty`,
+  `presence_penalty`, `openai_max_context`, `openai_max_tokens`,
+  `stream_openai`, `names_behavior`, `send_if_empty`, `impersonation_prompt`,
+  `new_chat_prompt`, `new_group_chat_prompt`, `new_example_chat_prompt`,
+  `continue_nudge_prompt`, `wi_format`, `scenario_format`,
+  `personality_format`, `group_nudge_prompt`, `prompts[]`, `prompt_order[]`,
+  …).
+- [ ] Configured for roleplay + utility blend:
+  - `chat_completion_source: "openai"`, `openai_model` placeholder
+    `gpt-4o-mini` (user can override).
+  - `temperature: 0.85`, `top_p: 1`, `frequency_penalty: 0.1`,
+    `presence_penalty: 0.1`, `openai_max_context: 32768`,
+    `openai_max_tokens: 800`, `stream_openai: true`,
+    `names_behavior: 2` (completion names).
+  - Main Prompt authored for Command-X RP: tells the model to emit
+    `[sms from=… to=…]…[/sms]`, `[status]…[/status]`, `[quests]…[/quests]`,
+    `[place]…[/place]` tags when relevant, **to never narrate them**, and to
+    keep phone bubbles short and texty.
+  - Jailbreak / Post-History: empty by default.
+  - Preserve all marker prompts (`chatHistory`, `worldInfoBefore`, etc.).
+- [ ] Preset doubles as the default for Nova: Nova's system prompt is
+  layered *on top of* the preset's Main Prompt; tool-use contract is added at
+  request build time by Nova (not baked into the preset).
+
+### 11b. Install flow
+- [ ] In-settings button "Install Command-X preset" calls
+  `ctx.executeSlashCommandsWithOptions('/preset-import …')` or, if absent,
+  uses `POST /api/presets/save` with the preset body (the standard ST API).
+- [ ] After install, show toast with the preset's name so the user can pick it
+  in the Connection Profile.
+
+### 11c. Research basis
+- [ ] Modeled on the upstream ST default preset
+  (`SillyTavern/SillyTavern@default/content/presets/openai/Default.json`),
+  trimmed for Command-X defaults. Public community presets (e.g. Celia,
+  Marinara, Universal Light) reviewed for conventions around `wi_format`,
+  `scenario_format`, and `names_behavior`; Command-X preset aligns with the
+  "simple, portable, provider-agnostic" end of that spectrum.
+
+### 11d. Docs
+- [ ] `presets/openai/README.md` documenting: what each field is tuned for,
+  how to import, how to clone for other providers (Claude/Gemini/OpenRouter)
+  by changing `chat_completion_source` and corresponding `*_model`.
+
+---
+
+## 12. Documentation Updates
+
+- [ ] `README.md`: rewrite order — Features → Install → Nova Agent → Preset →
+  Tag Reference → Advanced.
+- [ ] `docs/nova-agent-plan.md` (this file).
+- [ ] Update `.github/copilot-instructions.md` and `CLAUDE.md`: drop OpenClaw,
+  add Nova sections mirroring the same depth (state vars, event flow,
+  pitfalls, constants). Note the `/* === NOVA AGENT === */` code section.
+- [ ] Append an entry to `AGENT_MEMORY.md` at the end of the PR.
+
+---
+
+## 13. Tests
+
+All under `test/` using Node `--test`.
+- [ ] `nova-paths.test.mjs` — path-normalisation helper.
+- [ ] `nova-tool-args.test.mjs` — JSON-schema validation of each
+  `NOVA_TOOLS[].parameters` against sample args.
+- [ ] `nova-profile-swap.test.mjs` — mocks `executeSlashCommandsWithOptions`;
+  verifies swap/restore on throw and mutex serialisation.
+- [ ] `nova-prompt-compose.test.mjs` — soul+memory concatenation, truncation,
+  skill ordering.
+- [ ] `nova-audit-redact.test.mjs` — audit entries never include raw content.
+- [ ] `nova-preset.test.mjs` — validates the shipped preset JSON parses,
+  contains required top-level fields, has all marker prompts present, and
+  `prompt_order` references only defined identifiers.
+- [ ] Keep `helpers.test.mjs` green.
+
+---
+
+## 14. Manual Validation
+
+- [ ] Reload ST → console logs `[command-x] v0.13.0 Loaded OK` without errors.
+- [ ] OpenClaw no longer on the home screen.
+- [ ] Nova tile opens to empty transcript + "Pick a connection profile" card.
+- [ ] Install preset via the Settings button → preset appears in ST; set as
+  active on a new profile named "Command-X".
+- [ ] Point Nova at that profile; Read-only turn ("list my characters") →
+  `st_list_characters` card renders; assistant summarises.
+- [ ] Elevate to Write + Character Creator → "Create Aria, a hacker" → Nova
+  proposes `fs_write` → approval modal with diff → approve → file written →
+  re-read.
+- [ ] Worldbook Creator: 3 entries → load in ST's Worldbook UI, schema valid.
+- [ ] Image Prompter mid-RP → structured positive/negative prompts.
+- [ ] Edit `soul.md` via in-phone editor → next turn reflects change.
+- [ ] Install `nova-agent-bridge` → `/fs/list` works → `shell_run` `git status`
+  works behind approval → audit log exists.
+- [ ] Uninstall bridge → Nova works with ST-API subset; yellow banner shows.
+- [ ] Cancel mid-turn → loop aborts; profile restored (verify via `/profile`).
+- [ ] Swipe underlying ST chat → Nova transcript untouched.
+
+---
+
+## Amendments log
+
+- **2026-04-22** — User approved plan and added §11: ship a Chat Completion
+  preset usable by Nova and other Command-X utilities. Schema modeled on
+  upstream ST `Default.json`. Plan saved to this file prior to starting work.
