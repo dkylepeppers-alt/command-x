@@ -62,6 +62,16 @@
                 </label>
             </div>
             <div class="cx-opt">
+                <label class="checkbox_label" for="cx_ext_overseer_mcp_enabled">
+                    <input id="cx_ext_overseer_mcp_enabled" type="checkbox" />
+                    <span>Enable Overseer filesystem tools via MCP (requires SillyTavern-MCP-Server + SillyTavern-MCP-Client)</span>
+                </label>
+            </div>
+            <div class="cx-opt">
+                <label for="cx_ext_overseer_mcp_server_name"><span>MCP filesystem server name (key in mcp_settings.json)</span></label>
+                <input id="cx_ext_overseer_mcp_server_name" type="text" placeholder="filesystem" class="text_pole" />
+            </div>
+            <div class="cx-opt">
                 <label for="cx_ext_contacts_every_n"><span>Inject [status] every N turns (1 = every turn)</span></label>
                 <input id="cx_ext_contacts_every_n" type="number" min="1" max="20" step="1" class="text_pole" />
             </div>

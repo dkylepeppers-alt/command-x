@@ -24,7 +24,7 @@ import {
     extension_prompt_roles,
 } from '../../../../script.js';
 
-const VERSION = '0.13.0';
+const VERSION = '0.14.0';
 const EXT = 'command-x';
 const INJECT_KEY = 'command-x-sms';
 const INJECT_KEY_CONTACTS = 'command-x-contacts';
@@ -45,6 +45,15 @@ const DEFAULTS = {
     overseerMode: 'assist',
     overseerConnectionProfile: '',
     overseerToolsEnabled: false,
+    // Overseer MCP filesystem integration (v0.14.0, Option A).
+    // Off by default. Requires the user to install `bmen25124/SillyTavern-MCP-Server`
+    // plugin + `bmen25124/SillyTavern-MCP-Client` extension + a filesystem MCP
+    // server (e.g. `@modelcontextprotocol/server-filesystem`). We detect the plugin
+    // via a HEAD-style probe of `/api/plugins/mcp/servers`. The server name must
+    // match the key the user configured in the MCP client's mcp_settings.json.
+    overseerMcpEnabled: false,
+    overseerMcpServerName: 'filesystem',
+    overseerFsMaxReadBytes: 524288, // 512 KB — refuse reads larger than this
     // Deprecated — kept in DEFAULTS for backwards-compat read of older saved settings
     openclawMode: 'assist',
     contactsInjectEveryN: 1,
@@ -137,6 +146,14 @@ function getOverseerChatState() {
     let mutated = false;
     if (!Number.isFinite(Number(state.resetNonce))) { state.resetNonce = 0; mutated = true; }
     if (!Array.isArray(state.conversation)) { state.conversation = []; mutated = true; }
+    // MCP filesystem per-chat state (v0.14.0). Defaults chosen to be fail-closed:
+    // empty allow-list = nothing accessible; write/delete require confirmation.
+    if (!Array.isArray(state.fsAllowList)) { state.fsAllowList = []; mutated = true; }
+    if (!state.fsPolicy || typeof state.fsPolicy !== 'object') {
+        state.fsPolicy = { read: 'auto', list: 'auto', write: 'confirm', delete: 'confirm' };
+        mutated = true;
+    }
+    if (!Array.isArray(state.mcpAuditLog)) { state.mcpAuditLog = []; mutated = true; }
     if (mutated && typeof ctx.saveMetadata === 'function') ctx.saveMetadata();
     return state;
 }
@@ -198,6 +215,295 @@ function escapeHtml(value) {
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
 }
+
+/* ======================================================================
+   OVERSEER MCP FILESYSTEM — pure helpers (v0.14.0)
+
+   These are the security-critical trust boundary. Keep them pure and
+   unit-testable; `test/helpers.test.mjs` mirrors them.
+   ====================================================================== */
+
+/**
+ * Normalize a user-provided absolute path for allow-list comparison.
+ * Returns null for any input we consider unsafe or ambiguous:
+ *   - empty / non-string
+ *   - contains NUL
+ *   - not absolute (must start with "/" or a drive letter like "C:")
+ *   - contains "..", "." segments we cannot resolve statically, or ADS markers
+ *   - mixes encoded traversal sequences
+ *
+ * Accepts both POSIX ("/home/user/x") and Windows ("C:\Users\...") absolute
+ * paths. We normalize backslashes to forward slashes for matching, lowercase
+ * the drive letter on Windows, collapse runs of "/", and strip trailing "/".
+ * We explicitly resolve "." segments but REJECT ".." segments rather than
+ * resolving them, because the MCP server performs the actual filesystem
+ * operation and we want a conservative textual allow-list that cannot be
+ * tricked by path contortions before the server-side canonicalization.
+ */
+function normalizeAbsolutePath(input) {
+    if (typeof input !== 'string') return null;
+    if (input.length === 0) return null;
+    if (input.includes('\0')) return null;
+    // Reject percent-encoded traversal; callers should decode before passing.
+    if (/%2e%2e|%2f%2e%2e|%5c%2e%2e/i.test(input)) return null;
+
+    let p = input.replace(/\\/g, '/').trim();
+    if (p.length === 0) return null;
+
+    // Windows drive letter (C:, c:/) — normalize to lowercase drive.
+    let prefix = '';
+    const driveMatch = /^([a-zA-Z]):(\/?)/.exec(p);
+    if (driveMatch) {
+        prefix = driveMatch[1].toLowerCase() + ':';
+        p = p.slice(driveMatch[0].length);
+        // A drive-relative path "C:foo" (no slash after drive) is ambiguous; reject.
+        if (driveMatch[2] !== '/') return null;
+        p = '/' + p;
+    } else if (p.startsWith('//')) {
+        // UNC ("//host/share/...") — require at least host + share segments.
+        const parts = p.slice(2).split('/');
+        if (parts.length < 2 || !parts[0] || !parts[1]) return null;
+        prefix = '//' + parts[0] + '/' + parts[1];
+        p = '/' + parts.slice(2).join('/');
+    } else if (!p.startsWith('/')) {
+        return null; // relative path — refuse
+    }
+
+    // Collapse runs of "/", resolve "." segments, reject ".." segments.
+    const segments = p.split('/').filter(Boolean);
+    const out = [];
+    for (const seg of segments) {
+        if (seg === '.') continue;
+        if (seg === '..') return null;
+        // Reject Windows alternate-data-stream markers and trailing dots/spaces
+        // which some filesystems treat as equivalent to the trimmed name.
+        if (seg.includes(':')) return null;
+        if (/[ .]$/.test(seg) && seg.length > 1) return null;
+        out.push(seg);
+    }
+    const normalized = prefix + '/' + out.join('/');
+    // Strip trailing slash for non-root paths to make prefix matching consistent.
+    return normalized.length > 1 && normalized.endsWith('/') ? normalized.slice(0, -1) : normalized;
+}
+
+/**
+ * Is the normalized path allowed by the per-chat allow-list?
+ * Rules:
+ *   - An empty / non-array allow-list denies everything (fail-closed).
+ *   - Each allow-list entry is itself normalized; malformed entries are ignored.
+ *   - A path is allowed iff it equals an allow-list entry OR starts with an
+ *     allow-list entry followed by "/". "/home/foo" does NOT match "/home/foobar".
+ * On Windows, matching is case-insensitive (filesystem convention).
+ * On POSIX, matching is case-sensitive.
+ */
+function pathAllowed(normalizedPath, allowList) {
+    if (typeof normalizedPath !== 'string' || !normalizedPath) return false;
+    if (!Array.isArray(allowList) || allowList.length === 0) return false;
+    const isWindows = /^[a-z]:\//.test(normalizedPath) || normalizedPath.startsWith('//');
+    const target = isWindows ? normalizedPath.toLowerCase() : normalizedPath;
+    for (const raw of allowList) {
+        const entry = normalizeAbsolutePath(raw);
+        if (!entry) continue;
+        const candidate = isWindows ? entry.toLowerCase() : entry;
+        if (target === candidate) return true;
+        if (target.startsWith(candidate === '/' ? '/' : candidate + '/')) return true;
+    }
+    return false;
+}
+
+/**
+ * Resolve the effective policy for an Overseer filesystem tool, given the
+ * user's per-chat policy object. Returns one of:
+ *   'auto'    — execute immediately (only safe for read/list by default)
+ *   'confirm' — propose via the approval UI (default for write/delete)
+ *   'deny'    — refuse outright
+ *
+ * Defaults:
+ *   read   → 'auto'
+ *   list   → 'auto'
+ *   write  → 'confirm'
+ *   delete → 'confirm'
+ * `delete` can NEVER be 'auto' — even if the user configures it we coerce to
+ * 'confirm'. This is a safety invariant, not a typo.
+ */
+function policyFor(toolKind, fsPolicy = {}) {
+    const kind = String(toolKind || '').toLowerCase();
+    const defaults = { read: 'auto', list: 'auto', write: 'confirm', delete: 'confirm' };
+    const allowedValues = new Set(['auto', 'confirm', 'deny']);
+    const raw = fsPolicy && allowedValues.has(fsPolicy[kind]) ? fsPolicy[kind] : defaults[kind];
+    if (!raw) return 'deny';
+    if (kind === 'delete' && raw === 'auto') return 'confirm'; // safety invariant
+    return raw;
+}
+
+/**
+ * Compute a minimal unified diff between two strings for the approval card.
+ * Not a full LCS — we use a cheap line-by-line greedy diff which is good
+ * enough for preview purposes and keeps the extension dependency-free.
+ *
+ * Returns an array of { kind: 'ctx'|'add'|'del', line: string, oldNo?, newNo? }
+ * Callers render this with escapeHtml — do not HTML-escape here.
+ *
+ * For large files we truncate at `maxLines` total output rows (default 200)
+ * with a single '...' context marker so the approval UI stays readable.
+ */
+function computeUnifiedDiff(before, after, { maxLines = 200 } = {}) {
+    const a = String(before ?? '').split('\n');
+    const b = String(after ?? '').split('\n');
+    const rows = [];
+    let i = 0, j = 0;
+    while (i < a.length || j < b.length) {
+        if (i < a.length && j < b.length && a[i] === b[j]) {
+            rows.push({ kind: 'ctx', line: a[i], oldNo: i + 1, newNo: j + 1 });
+            i++; j++;
+            continue;
+        }
+        // Greedy: look ahead up to 20 lines for a sync point. Sentinel 0 = "no sync found";
+        // positive k = advance i by k (treat those as deletions), negative k = advance j.
+        let sync = 0;
+        for (let k = 1; k <= 20 && (i + k <= a.length || j + k <= b.length); k++) {
+            if (i + k < a.length && a[i + k] === b[j]) { sync = k; break; }
+            if (j + k < b.length && a[i] === b[j + k]) { sync = -k; break; }
+        }
+        if (sync > 0) {
+            for (let k = 0; k < sync; k++) rows.push({ kind: 'del', line: a[i + k], oldNo: i + k + 1 });
+            i += sync;
+        } else if (sync < 0) {
+            for (let k = 0; k < -sync; k++) rows.push({ kind: 'add', line: b[j + k], newNo: j + k + 1 });
+            j += -sync;
+        } else if (i < a.length && j < b.length) {
+            rows.push({ kind: 'del', line: a[i], oldNo: i + 1 });
+            rows.push({ kind: 'add', line: b[j], newNo: j + 1 });
+            i++; j++;
+        } else if (i < a.length) {
+            rows.push({ kind: 'del', line: a[i], oldNo: i + 1 });
+            i++;
+        } else {
+            rows.push({ kind: 'add', line: b[j], newNo: j + 1 });
+            j++;
+        }
+    }
+    if (rows.length > maxLines) {
+        const head = rows.slice(0, Math.floor(maxLines / 2));
+        const tail = rows.slice(rows.length - Math.floor(maxLines / 2));
+        return [...head, { kind: 'ctx', line: `... (${rows.length - head.length - tail.length} lines elided) ...` }, ...tail];
+    }
+    return rows;
+}
+
+// ---- MCP client wrapper (HTTP surface of SillyTavern-MCP-Server plugin) ----
+
+const MCP_PLUGIN_BASE = '/api/plugins/mcp';
+let _mcpAvailableCache = { known: false, value: false, ts: 0 };
+
+/**
+ * Probe whether the SillyTavern-MCP-Server plugin is installed + reachable.
+ * Cached for 60 seconds to avoid hammering the endpoint on every tool call.
+ * Returns false (never throws) if the plugin is absent or the server is
+ * unreachable — this is a soft capability check.
+ */
+async function mcpClientAvailable() {
+    const now = Date.now();
+    if (_mcpAvailableCache.known && now - _mcpAvailableCache.ts < 60_000) {
+        return _mcpAvailableCache.value;
+    }
+    let value = false;
+    try {
+        const ctx = getContext();
+        const headers = typeof ctx.getRequestHeaders === 'function' ? ctx.getRequestHeaders() : {};
+        const resp = await fetch(`${MCP_PLUGIN_BASE}/servers`, { method: 'GET', headers });
+        value = resp.ok;
+    } catch { value = false; }
+    _mcpAvailableCache = { known: true, value, ts: now };
+    return value;
+}
+
+/**
+ * Invoke an MCP tool via the SillyTavern-MCP-Server plugin. Throws on any
+ * non-2xx response with a useful message; the caller is responsible for
+ * catching and converting to an Overseer tool error string.
+ */
+async function mcpCallTool(serverName, toolName, args) {
+    const ctx = getContext();
+    const headers = typeof ctx.getRequestHeaders === 'function' ? ctx.getRequestHeaders() : {};
+    const mergedHeaders = { ...headers, 'Content-Type': 'application/json' };
+    const url = `${MCP_PLUGIN_BASE}/servers/${encodeURIComponent(serverName)}/call-tool`;
+    const resp = await fetch(url, {
+        method: 'POST',
+        headers: mergedHeaders,
+        body: JSON.stringify({ toolName, arguments: args || {} }),
+    });
+    if (!resp.ok) {
+        if (resp.status === 404) {
+            throw new Error(
+                'MCP Server plugin not found or server not registered. Install bmen25124/SillyTavern-MCP-Server ' +
+                `and add an MCP server named "${serverName}" via the MCP Client extension.`,
+            );
+        }
+        let detail = resp.statusText;
+        try { const j = await resp.json(); detail = j?.error || JSON.stringify(j?.data ?? j); } catch { /* ignore */ }
+        throw new Error(`MCP call failed (${resp.status}): ${detail}`);
+    }
+    const data = await resp.json();
+    return data?.result ?? data;
+}
+
+/**
+ * Extract a plain-text body from an MCP tool response. The MCP protocol
+ * returns `{ content: [{ type, text?, data?, mimeType? }, ...], isError? }`.
+ * We concatenate the `text` fields for text content items and ignore binary
+ * items. Returns an empty string if no text content is present.
+ */
+function mcpResultToText(result) {
+    if (!result) return '';
+    if (typeof result === 'string') return result;
+    const content = Array.isArray(result.content) ? result.content : [];
+    return content
+        .filter(item => item && (item.type === 'text' || typeof item.text === 'string'))
+        .map(item => String(item.text ?? ''))
+        .join('\n');
+}
+
+/**
+ * Append a structured audit-log entry for an MCP filesystem operation.
+ * Persisted per-chat in `chatMetadata[EXT].overseer.mcpAuditLog` (capped),
+ * and mirrored into the `#cx-ovr-log` pane so the user can see it inline.
+ * Entry shape: { ts, tool, path, decision, bytes?, error? }
+ */
+const MCP_AUDIT_LOG_CAP = 50;
+function appendMcpAuditEntry(entry) {
+    try {
+        const state = getOverseerChatState();
+        const log = Array.isArray(state.mcpAuditLog) ? state.mcpAuditLog.slice() : [];
+        log.push({
+            ts: Date.now(),
+            tool: String(entry?.tool || ''),
+            path: String(entry?.path || ''),
+            decision: String(entry?.decision || ''),
+            bytes: Number.isFinite(entry?.bytes) ? entry.bytes : undefined,
+            error: entry?.error ? String(entry.error) : undefined,
+        });
+        while (log.length > MCP_AUDIT_LOG_CAP) log.shift();
+        saveOverseerChatState({ mcpAuditLog: log });
+    } catch (e) {
+        console.warn(`[${EXT}] appendMcpAuditEntry failed`, e);
+    }
+    // Mirror into the visible Overseer log pane.
+    try {
+        const pretty = [
+            `[mcp ${entry?.tool || '?'}]`,
+            entry?.path ? ` ${entry.path}` : '',
+            ` → ${entry?.decision || '?'}`,
+            Number.isFinite(entry?.bytes) ? ` (${entry.bytes} bytes)` : '',
+            entry?.error ? ` ERROR: ${entry.error}` : '',
+        ].join('');
+        appendOverseerLog('AUDIT', pretty);
+    } catch { /* UI may not be mounted */ }
+}
+
+/* ======================================================================
+   End MCP pure helpers
+   ====================================================================== */
 
 // ---- Connection Profile (Overseer-specific) ----------------------------
 
@@ -347,7 +653,20 @@ function renderOverseerActions() {
     }
 
     actionState.textContent = envelope.summary || 'Overseer proposed local actions.';
-    actions.innerHTML = envelope.actions.map(action => `
+    actions.innerHTML = envelope.actions.map(action => {
+        // v0.14.0: FS write/delete actions may carry a `diff` payload for preview.
+        // We render it inside the same card. Use escapeHtml (no <br> conversion)
+        // so the <pre> preserves newlines via CSS white-space.
+        const diffRows = Array.isArray(action.diff) ? action.diff : null;
+        const diffBlock = diffRows ? `
+            <div class="cx-overseer-action-diff-label">Diff preview</div>
+            <pre class="cx-overseer-action-diff">${diffRows.map(r => {
+                const cls = r.kind === 'add' ? 'cx-diff-add' : r.kind === 'del' ? 'cx-diff-del' : 'cx-diff-ctx';
+                const sigil = r.kind === 'add' ? '+' : r.kind === 'del' ? '-' : ' ';
+                return `<span class="${cls}">${escapeHtml(sigil + r.line)}</span>`;
+            }).join('\n')}</pre>
+        ` : '';
+        return `
         <div class="cx-overseer-action-card" data-action-id="${escapeHtml(action.id)}">
             <div class="cx-overseer-action-head">
                 <strong>${escapeHtml(action.title)}</strong>
@@ -355,13 +674,15 @@ function renderOverseerActions() {
             </div>
             <pre class="cx-overseer-action-command">${escapeHtml(action.command)}</pre>
             ${action.reason ? `<div class="cx-overseer-action-reason">${escapeHtml(action.reason)}</div>` : ''}
+            ${diffBlock}
             <div class="cx-overseer-action-receipt">${escapeHtml(action.receipt || `Status: ${action.status}`)}</div>
             <div class="cx-overseer-actions">
                 <button data-ovr-approve="${escapeHtml(action.id)}" ${action.status !== 'pending' ? 'disabled' : ''}>Approve</button>
                 <button data-ovr-reject="${escapeHtml(action.id)}" ${action.status !== 'pending' ? 'disabled' : ''}>Reject</button>
             </div>
         </div>
-    `).join('');
+    `;
+    }).join('');
 }
 
 function syncOverseerView() {
@@ -545,21 +866,42 @@ async function approveOverseerAction(actionId) {
     const action = envelope?.actions?.find(item => item.id === actionId);
     if (!action || action.status !== 'pending') return;
 
+    // v0.14.0: route FS actions through the MCP executor.
+    const isFsAction = typeof action.type === 'string' && action.type.startsWith('fs.');
+
     action.status = 'running';
-    action.receipt = 'Executing locally...';
+    action.receipt = isFsAction ? 'Executing filesystem operation…' : 'Executing locally...';
     saveOverseerChatState({ lastOperateEnvelope: envelope });
     renderOverseerActions();
     setOverseerStatus(`Running ${action.command}`);
 
     try {
-        const result = await executeOverseerSlashCommand(action.command);
-        const receipt = formatOverseerResult(result);
+        let receipt;
+        if (isFsAction) {
+            const kind = action.type.slice('fs.'.length);
+            if (kind === 'read' || kind === 'list') {
+                // Read/list proposals approved by the user — execute via MCP call.
+                const serverName = settings.overseerMcpServerName || 'filesystem';
+                const path = (overseerFsPending.get(actionId)?.path) || action.title.replace(/^(Read|List)\s+/, '').trim();
+                const toolName = kind === 'read' ? 'read_file' : 'list_directory';
+                const result = await mcpCallTool(serverName, toolName, { path });
+                receipt = mcpResultToText(result) || JSON.stringify(result);
+                appendMcpAuditEntry({ tool: `fs.${kind}`, path, decision: 'approved', bytes: receipt.length });
+                overseerFsPending.delete(actionId);
+            } else {
+                // Write / delete — executeFsPending appends its own audit entry.
+                receipt = await executeFsPending(actionId);
+            }
+        } else {
+            const result = await executeOverseerSlashCommand(action.command);
+            receipt = formatOverseerResult(result);
+        }
         action.status = 'approved';
         action.receipt = `Approved and executed.\n\n${receipt}`;
         saveOverseerChatState({ lastOperateEnvelope: envelope });
         renderOverseerActions();
         appendOverseerLog('ACTION APPROVED', JSON.stringify({ actionId, command: action.command, receipt }, null, 2));
-        appendOverseerTurn('tool', `Ran ${action.command}\n\n${receipt}`, { toolName: 'slash.run' });
+        appendOverseerTurn('tool', `Ran ${action.command}\n\n${receipt}`, { toolName: isFsAction ? action.type : 'slash.run' });
         setOverseerStatus('Action executed.');
     } catch (error) {
         const receipt = String(error?.message || error);
@@ -568,8 +910,12 @@ async function approveOverseerAction(actionId) {
         saveOverseerChatState({ lastOperateEnvelope: envelope });
         renderOverseerActions();
         appendOverseerLog('ACTION ERROR', JSON.stringify({ actionId, command: action.command, error: receipt }, null, 2));
-        appendOverseerTurn('tool', `Error running ${action.command}: ${receipt}`, { toolName: 'slash.run' });
+        appendOverseerTurn('tool', `Error running ${action.command}: ${receipt}`, { toolName: isFsAction ? action.type : 'slash.run' });
         setOverseerStatus(`Execution failed: ${receipt}`);
+        if (isFsAction) {
+            appendMcpAuditEntry({ tool: action.type, path: overseerFsPending.get(actionId)?.path || '', decision: 'error', error: receipt });
+            overseerFsPending.delete(actionId);
+        }
     }
 }
 
@@ -579,12 +925,17 @@ async function rejectOverseerAction(actionId) {
     const action = envelope?.actions?.find(item => item.id === actionId);
     if (!action || action.status !== 'pending') return;
 
+    const isFsAction = typeof action.type === 'string' && action.type.startsWith('fs.');
     action.status = 'rejected';
     action.receipt = 'Rejected locally. Command was not run.';
     saveOverseerChatState({ lastOperateEnvelope: envelope });
     renderOverseerActions();
     appendOverseerLog('ACTION REJECTED', JSON.stringify({ actionId, command: action.command }, null, 2));
-    appendOverseerTurn('tool', `Rejected ${action.command}`, { toolName: 'slash.run' });
+    appendOverseerTurn('tool', `Rejected ${action.command}`, { toolName: isFsAction ? action.type : 'slash.run' });
+    if (isFsAction) {
+        appendMcpAuditEntry({ tool: action.type, path: overseerFsPending.get(actionId)?.path || '', decision: 'rejected' });
+        overseerFsPending.delete(actionId);
+    }
     setOverseerStatus('Action rejected.');
 }
 
@@ -671,6 +1022,108 @@ function overseerToolsShouldRegister() {
     return !!(settings?.enabled
         && settings?.overseerToolsEnabled === true
         && currentApp === 'overseer');
+}
+
+/**
+ * Stricter gate for the MCP filesystem tools: in addition to the normal
+ * Overseer-tool gate, the user must have explicitly opted in to the MCP
+ * filesystem integration. We do NOT probe `mcpClientAvailable()` here —
+ * ST calls `shouldRegister` synchronously and frequently, and a failing
+ * HTTP probe would spam the console. The actual tool invocation checks
+ * availability and returns a helpful error if the plugin is missing.
+ */
+function overseerMcpFsShouldRegister() {
+    return !!(overseerToolsShouldRegister() && settings?.overseerMcpEnabled === true);
+}
+
+/**
+ * Per-chat registry of pending filesystem approvals keyed by action id.
+ * When a `confirm`-policy FS operation is proposed by the model, we enqueue
+ * an entry here and surface an approval card via the existing operate-envelope
+ * UI. On approve → execute; on reject → discard. See approveOverseerAction().
+ */
+const overseerFsPending = new Map(); // id → { kind, path, content?, diff?, contentBefore? }
+
+function makeFsActionId(kind) {
+    return `fs-${kind}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Shared precheck for all FS tools. Returns `{ ok: true, path }` on success
+ * or `{ ok: false, error, auditDecision }` on failure. Callers MUST append
+ * an audit entry in either branch.
+ */
+function fsPrecheck(kind, rawPath) {
+    const path = normalizeAbsolutePath(rawPath);
+    if (!path) {
+        return { ok: false, error: `Invalid path: ${JSON.stringify(rawPath)}. Must be absolute and contain no ".." segments.`, auditDecision: 'rejected-path' };
+    }
+    const state = getOverseerChatState();
+    if (!pathAllowed(path, state.fsAllowList)) {
+        return { ok: false, error: `Path not in allow-list: ${path}. Add it via the Overseer → Filesystem panel.`, auditDecision: 'rejected-allowlist', path };
+    }
+    const policy = policyFor(kind, state.fsPolicy);
+    if (policy === 'deny') {
+        return { ok: false, error: `Filesystem ${kind} is set to 'deny' for this chat.`, auditDecision: 'denied', path };
+    }
+    return { ok: true, path, policy };
+}
+
+/**
+ * Propose a write/delete operation for user approval by appending to the
+ * operate envelope in chat state. The existing UI in renderOverseerActions()
+ * will pick this up on next render. Returns the action id so the tool can
+ * report it to the model.
+ */
+function proposeFsAction({ kind, path, content, diff, contentBefore, summary }) {
+    const id = makeFsActionId(kind);
+    overseerFsPending.set(id, { kind, path, content, diff, contentBefore });
+    const state = getOverseerChatState();
+    const envelope = state.lastOperateEnvelope && state.lastOperateEnvelope.kind === 'command-x/operate/v1'
+        ? { ...state.lastOperateEnvelope, actions: state.lastOperateEnvelope.actions.slice() }
+        : { kind: 'command-x/operate/v1', summary: 'Pending filesystem operations.', actions: [] };
+    envelope.actions.push({
+        id,
+        type: `fs.${kind}`,
+        title: summary || `${kind} ${path}`,
+        command: kind === 'read' || kind === 'list' ? `fs ${kind} ${path}` : `fs ${kind} ${path}`,
+        reason: kind === 'write' ? 'Destructive: overwrites file contents.' : (kind === 'delete' ? 'Destructive: removes file.' : ''),
+        status: 'pending',
+        receipt: '',
+        diff: diff || null,
+    });
+    saveOverseerChatState({ lastOperateEnvelope: envelope });
+    try { renderOverseerActions(); } catch { /* UI may not be mounted */ }
+    return id;
+}
+
+/**
+ * Execute a pending FS action (called from approveOverseerAction on approve).
+ * Returns the tool-result text to surface to the user and (indirectly) to the
+ * model on its next turn via the conversation log.
+ */
+async function executeFsPending(actionId) {
+    const pending = overseerFsPending.get(actionId);
+    if (!pending) throw new Error(`No pending FS action with id ${actionId}`);
+    const { kind, path, content } = pending;
+    const serverName = settings.overseerMcpServerName || 'filesystem';
+    let result;
+    try {
+        if (kind === 'write') {
+            result = await mcpCallTool(serverName, 'write_file', { path, content: String(content ?? '') });
+            appendMcpAuditEntry({ tool: 'fs.write', path, decision: 'approved', bytes: String(content ?? '').length });
+        } else if (kind === 'delete') {
+            // MCP filesystem server's tool name varies by version; try the common ones.
+            try { result = await mcpCallTool(serverName, 'delete_file', { path }); }
+            catch { result = await mcpCallTool(serverName, 'move_file', { source: path, destination: path + '.deleted' }); }
+            appendMcpAuditEntry({ tool: 'fs.delete', path, decision: 'approved' });
+        } else {
+            throw new Error(`Unsupported pending kind: ${kind}`);
+        }
+    } finally {
+        overseerFsPending.delete(actionId);
+    }
+    return mcpResultToText(result) || `OK (${kind} ${path})`;
 }
 
 function registerOverseerTools() {
@@ -786,6 +1239,146 @@ function registerOverseerTools() {
         },
     ];
 
+    // ---- MCP filesystem tools (v0.14.0, opt-in) -----------------------
+    // Registered through the same tool array but with a stricter gate
+    // (`overseerMcpFsShouldRegister`) so they only surface when the user
+    // has explicitly enabled `overseerMcpEnabled`. The actual MCP plugin
+    // availability is checked inside each action() so a missing plugin
+    // produces a clear error instead of a silent no-op.
+    const fsTools = [
+        {
+            name: 'overseer_fs_read_file',
+            displayName: 'Overseer: Read File (MCP)',
+            description: 'Read the contents of a file via the configured MCP filesystem server. Path must be absolute and fall within the per-chat allow-list configured in the Overseer app.',
+            parameters: {
+                type: 'object',
+                properties: { path: { type: 'string', description: 'Absolute filesystem path.' } },
+                required: ['path'],
+                additionalProperties: false,
+            },
+            action: async ({ path: rawPath } = {}) => {
+                const pre = fsPrecheck('read', rawPath);
+                if (!pre.ok) { appendMcpAuditEntry({ tool: 'fs.read', path: pre.path || String(rawPath ?? ''), decision: pre.auditDecision, error: pre.error }); return `Error: ${pre.error}`; }
+                if (!(await mcpClientAvailable())) { appendMcpAuditEntry({ tool: 'fs.read', path: pre.path, decision: 'error', error: 'mcp-plugin-unavailable' }); return 'Error: SillyTavern-MCP-Server plugin is not installed or not running. See the README for setup.'; }
+                if (pre.policy === 'confirm') {
+                    // Uncommon for reads, but honor if user set it.
+                    const id = proposeFsAction({ kind: 'read', path: pre.path, summary: `Read ${pre.path}` });
+                    appendMcpAuditEntry({ tool: 'fs.read', path: pre.path, decision: 'proposed' });
+                    return `Pending user approval (action id: ${id}). The user will approve or reject this read in the Overseer UI.`;
+                }
+                try {
+                    const serverName = settings.overseerMcpServerName || 'filesystem';
+                    const result = await mcpCallTool(serverName, 'read_file', { path: pre.path });
+                    const text = mcpResultToText(result);
+                    const cap = Number(settings.overseerFsMaxReadBytes) || 524288;
+                    const truncated = text.length > cap;
+                    const body = truncated ? text.slice(0, cap) : text;
+                    appendMcpAuditEntry({ tool: 'fs.read', path: pre.path, decision: truncated ? 'auto-truncated' : 'auto', bytes: body.length });
+                    return truncated ? `${body}\n\n[truncated at ${cap} bytes of ${text.length}]` : body;
+                } catch (e) {
+                    appendMcpAuditEntry({ tool: 'fs.read', path: pre.path, decision: 'error', error: e?.message || String(e) });
+                    return `Error: ${e?.message || e}`;
+                }
+            },
+            formatMessage: (args) => `Overseer read file: ${args?.path || '(none)'}`,
+        },
+        {
+            name: 'overseer_fs_list_directory',
+            displayName: 'Overseer: List Directory (MCP)',
+            description: 'List entries in a directory via the configured MCP filesystem server. Path must be absolute and fall within the per-chat allow-list.',
+            parameters: {
+                type: 'object',
+                properties: { path: { type: 'string', description: 'Absolute directory path.' } },
+                required: ['path'],
+                additionalProperties: false,
+            },
+            action: async ({ path: rawPath } = {}) => {
+                const pre = fsPrecheck('list', rawPath);
+                if (!pre.ok) { appendMcpAuditEntry({ tool: 'fs.list', path: pre.path || String(rawPath ?? ''), decision: pre.auditDecision, error: pre.error }); return `Error: ${pre.error}`; }
+                if (!(await mcpClientAvailable())) { appendMcpAuditEntry({ tool: 'fs.list', path: pre.path, decision: 'error', error: 'mcp-plugin-unavailable' }); return 'Error: SillyTavern-MCP-Server plugin is not installed or not running. See the README for setup.'; }
+                if (pre.policy === 'confirm') {
+                    const id = proposeFsAction({ kind: 'list', path: pre.path, summary: `List ${pre.path}` });
+                    appendMcpAuditEntry({ tool: 'fs.list', path: pre.path, decision: 'proposed' });
+                    return `Pending user approval (action id: ${id}).`;
+                }
+                try {
+                    const serverName = settings.overseerMcpServerName || 'filesystem';
+                    const result = await mcpCallTool(serverName, 'list_directory', { path: pre.path });
+                    const text = mcpResultToText(result) || JSON.stringify(result);
+                    appendMcpAuditEntry({ tool: 'fs.list', path: pre.path, decision: 'auto', bytes: text.length });
+                    return text;
+                } catch (e) {
+                    appendMcpAuditEntry({ tool: 'fs.list', path: pre.path, decision: 'error', error: e?.message || String(e) });
+                    return `Error: ${e?.message || e}`;
+                }
+            },
+            formatMessage: (args) => `Overseer listed directory: ${args?.path || '(none)'}`,
+        },
+        {
+            name: 'overseer_fs_write_file',
+            displayName: 'Overseer: Write File (MCP)',
+            description: 'Write (or overwrite) a file via the configured MCP filesystem server. ALWAYS routed through a user approval UI with a diff preview unless the user has explicitly set the write policy to "auto" in the Overseer app. Path must fall within the per-chat allow-list.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    path: { type: 'string', description: 'Absolute filesystem path.' },
+                    content: { type: 'string', description: 'Full new contents of the file.' },
+                },
+                required: ['path', 'content'],
+                additionalProperties: false,
+            },
+            action: async ({ path: rawPath, content } = {}) => {
+                const pre = fsPrecheck('write', rawPath);
+                if (!pre.ok) { appendMcpAuditEntry({ tool: 'fs.write', path: pre.path || String(rawPath ?? ''), decision: pre.auditDecision, error: pre.error }); return `Error: ${pre.error}`; }
+                if (!(await mcpClientAvailable())) { appendMcpAuditEntry({ tool: 'fs.write', path: pre.path, decision: 'error', error: 'mcp-plugin-unavailable' }); return 'Error: SillyTavern-MCP-Server plugin is not installed or not running. See the README for setup.'; }
+                // Attempt to read current contents for a diff preview. Ignore errors (new file).
+                let contentBefore = '';
+                try {
+                    const serverName = settings.overseerMcpServerName || 'filesystem';
+                    const existing = await mcpCallTool(serverName, 'read_file', { path: pre.path });
+                    contentBefore = mcpResultToText(existing);
+                } catch { contentBefore = ''; }
+                const diff = computeUnifiedDiff(contentBefore, String(content ?? ''));
+                if (pre.policy === 'auto') {
+                    try {
+                        const serverName = settings.overseerMcpServerName || 'filesystem';
+                        const result = await mcpCallTool(serverName, 'write_file', { path: pre.path, content: String(content ?? '') });
+                        appendMcpAuditEntry({ tool: 'fs.write', path: pre.path, decision: 'auto', bytes: String(content ?? '').length });
+                        return mcpResultToText(result) || `OK (wrote ${String(content ?? '').length} bytes)`;
+                    } catch (e) {
+                        appendMcpAuditEntry({ tool: 'fs.write', path: pre.path, decision: 'error', error: e?.message || String(e) });
+                        return `Error: ${e?.message || e}`;
+                    }
+                }
+                const id = proposeFsAction({ kind: 'write', path: pre.path, content: String(content ?? ''), diff, contentBefore, summary: `Write ${pre.path}` });
+                appendMcpAuditEntry({ tool: 'fs.write', path: pre.path, decision: 'proposed', bytes: String(content ?? '').length });
+                return `Pending user approval (action id: ${id}). A diff preview has been shown in the Overseer UI; the user must approve before this write executes.`;
+            },
+            formatMessage: (args) => `Overseer proposed write: ${args?.path || '(none)'}`,
+        },
+        {
+            name: 'overseer_fs_delete_file',
+            displayName: 'Overseer: Delete File (MCP)',
+            description: 'Delete a file via the configured MCP filesystem server. ALWAYS requires user approval (the "auto" policy is not available for deletes). Path must fall within the per-chat allow-list.',
+            parameters: {
+                type: 'object',
+                properties: { path: { type: 'string', description: 'Absolute filesystem path to delete.' } },
+                required: ['path'],
+                additionalProperties: false,
+            },
+            action: async ({ path: rawPath } = {}) => {
+                const pre = fsPrecheck('delete', rawPath);
+                if (!pre.ok) { appendMcpAuditEntry({ tool: 'fs.delete', path: pre.path || String(rawPath ?? ''), decision: pre.auditDecision, error: pre.error }); return `Error: ${pre.error}`; }
+                if (!(await mcpClientAvailable())) { appendMcpAuditEntry({ tool: 'fs.delete', path: pre.path, decision: 'error', error: 'mcp-plugin-unavailable' }); return 'Error: SillyTavern-MCP-Server plugin is not installed or not running. See the README for setup.'; }
+                // policyFor() coerces delete+auto → confirm, so we always propose.
+                const id = proposeFsAction({ kind: 'delete', path: pre.path, summary: `Delete ${pre.path}` });
+                appendMcpAuditEntry({ tool: 'fs.delete', path: pre.path, decision: 'proposed' });
+                return `Pending user approval (action id: ${id}). The user must approve this delete in the Overseer UI.`;
+            },
+            formatMessage: (args) => `Overseer proposed delete: ${args?.path || '(none)'}`,
+        },
+    ];
+
     for (const tool of tools) {
         try {
             ctx.registerFunctionTool({
@@ -794,6 +1387,16 @@ function registerOverseerTools() {
             });
         } catch (e) {
             console.warn(`[${EXT}] Failed to register Overseer tool ${tool.name}`, e);
+        }
+    }
+    for (const tool of fsTools) {
+        try {
+            ctx.registerFunctionTool({
+                ...tool,
+                shouldRegister: overseerMcpFsShouldRegister,
+            });
+        } catch (e) {
+            console.warn(`[${EXT}] Failed to register Overseer MCP FS tool ${tool.name}`, e);
         }
     }
     overseerToolsRegistered = true;
@@ -4088,6 +4691,54 @@ function buildPhone() {
                         <div id="cx-ovr-actions-list"><div class="cx-overseer-empty">No pending local actions.</div></div>
                     </div>
                 </div>
+                <details class="cx-overseer-fs" id="cx-ovr-fs-panel">
+                    <summary>Filesystem (MCP) — ${settings.overseerMcpEnabled ? 'enabled' : 'disabled'}</summary>
+                    <div class="cx-overseer-fs-body">
+                        <label class="cx-overseer-field cx-overseer-field-inline">
+                            <input type="checkbox" id="cx-ovr-fs-enabled" ${settings.overseerMcpEnabled ? 'checked' : ''} />
+                            <span>Enable filesystem tools via MCP</span>
+                        </label>
+                        <div class="cx-overseer-fs-hint" id="cx-ovr-fs-status">Requires bmen25124/SillyTavern-MCP-Server + SillyTavern-MCP-Client. See the README for setup.</div>
+                        <label class="cx-overseer-field">
+                            <span>MCP server name (must match mcp_settings.json)</span>
+                            <input type="text" id="cx-ovr-fs-server" placeholder="filesystem" value="${escapeHtml(settings.overseerMcpServerName || 'filesystem')}" />
+                        </label>
+                        <label class="cx-overseer-field">
+                            <span>Per-chat allow-list (one absolute path per line). Empty = deny all.</span>
+                            <textarea id="cx-ovr-fs-allowlist" rows="3" placeholder="/absolute/path/to/scratch"></textarea>
+                        </label>
+                        <div class="cx-overseer-fs-policies">
+                            <label class="cx-overseer-field">
+                                <span>read</span>
+                                <select id="cx-ovr-fs-policy-read">
+                                    <option value="auto">auto</option><option value="confirm">confirm</option><option value="deny">deny</option>
+                                </select>
+                            </label>
+                            <label class="cx-overseer-field">
+                                <span>list</span>
+                                <select id="cx-ovr-fs-policy-list">
+                                    <option value="auto">auto</option><option value="confirm">confirm</option><option value="deny">deny</option>
+                                </select>
+                            </label>
+                            <label class="cx-overseer-field">
+                                <span>write</span>
+                                <select id="cx-ovr-fs-policy-write">
+                                    <option value="auto">auto</option><option value="confirm">confirm</option><option value="deny">deny</option>
+                                </select>
+                            </label>
+                            <label class="cx-overseer-field">
+                                <span>delete (auto coerced → confirm)</span>
+                                <select id="cx-ovr-fs-policy-delete">
+                                    <option value="confirm">confirm</option><option value="deny">deny</option>
+                                </select>
+                            </label>
+                        </div>
+                        <div class="cx-overseer-actions">
+                            <button id="cx-ovr-fs-save">Save</button>
+                            <button id="cx-ovr-fs-probe">Check MCP availability</button>
+                        </div>
+                    </div>
+                </details>
                 <pre id="cx-ovr-log"></pre>
             </div>
             <div class="cx-navbar">
@@ -4911,6 +5562,66 @@ function wirePhone() {
             rejectOverseerAction(rejectId).catch(error => setOverseerStatus(String(error?.message || error)));
         }
     });
+
+    // ---- Overseer FS (MCP) panel wiring ----
+    (function wireOverseerFsPanel() {
+        const state = getOverseerChatState();
+        const enabled = phoneContainer.querySelector('#cx-ovr-fs-enabled');
+        const server = phoneContainer.querySelector('#cx-ovr-fs-server');
+        const allowlist = phoneContainer.querySelector('#cx-ovr-fs-allowlist');
+        const polR = phoneContainer.querySelector('#cx-ovr-fs-policy-read');
+        const polL = phoneContainer.querySelector('#cx-ovr-fs-policy-list');
+        const polW = phoneContainer.querySelector('#cx-ovr-fs-policy-write');
+        const polD = phoneContainer.querySelector('#cx-ovr-fs-policy-delete');
+        const saveBtn = phoneContainer.querySelector('#cx-ovr-fs-save');
+        const probeBtn = phoneContainer.querySelector('#cx-ovr-fs-probe');
+        const statusEl = phoneContainer.querySelector('#cx-ovr-fs-status');
+        if (!saveBtn) return; // panel not present
+        // Rehydrate allow-list + policy values.
+        if (allowlist) allowlist.value = (state.fsAllowList || []).join('\n');
+        if (polR) polR.value = state.fsPolicy?.read || 'auto';
+        if (polL) polL.value = state.fsPolicy?.list || 'auto';
+        if (polW) polW.value = state.fsPolicy?.write || 'confirm';
+        if (polD) polD.value = state.fsPolicy?.delete || 'confirm';
+
+        saveBtn.addEventListener('click', () => {
+            settings.overseerMcpEnabled = !!enabled?.checked;
+            settings.overseerMcpServerName = String(server?.value || '').trim() || 'filesystem';
+            saveSettings();
+            const rawList = String(allowlist?.value || '').split('\n').map(s => s.trim()).filter(Boolean);
+            // Filter to only entries that normalize successfully — warn about others.
+            const accepted = [];
+            const rejected = [];
+            for (const p of rawList) {
+                if (normalizeAbsolutePath(p)) accepted.push(p); else rejected.push(p);
+            }
+            saveOverseerChatState({
+                fsAllowList: accepted,
+                fsPolicy: {
+                    read: polR?.value || 'auto',
+                    list: polL?.value || 'auto',
+                    write: polW?.value || 'confirm',
+                    delete: polD?.value || 'confirm',
+                },
+            });
+            if (statusEl) {
+                statusEl.textContent = rejected.length
+                    ? `Saved. ${accepted.length} allow-list entries accepted; ${rejected.length} rejected (must be absolute, no "..").`
+                    : `Saved. ${accepted.length} allow-list entries.`;
+            }
+        });
+
+        probeBtn.addEventListener('click', async () => {
+            if (statusEl) statusEl.textContent = 'Probing MCP plugin…';
+            _mcpAvailableCache = { known: false, value: false, ts: 0 }; // bust cache
+            const ok = await mcpClientAvailable();
+            if (statusEl) {
+                statusEl.textContent = ok
+                    ? 'MCP plugin reachable. Ensure the filesystem server is registered and enabled in mcp_settings.json.'
+                    : 'MCP plugin not reachable. Install bmen25124/SillyTavern-MCP-Server and restart SillyTavern.';
+            }
+        });
+    })();
     phoneContainer.querySelectorAll('[data-cx-edit]').forEach(btn =>
         btn.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -5280,6 +5991,9 @@ function loadSettings() {
     cb('cx_ext_auto_register_places', 'autoRegisterPlaces', true);
     cb('cx_ext_show_trails', 'showLocationTrails', true);
     cb('cx_ext_overseer_tools_enabled', 'overseerToolsEnabled', false);
+    cb('cx_ext_overseer_mcp_enabled', 'overseerMcpEnabled', false);
+    const mcpServerNameEl = document.getElementById('cx_ext_overseer_mcp_server_name');
+    if (mcpServerNameEl) mcpServerNameEl.value = settings.overseerMcpServerName || 'filesystem';
     // ── Overseer mode (new key). Back-compat: migrate from legacy `openclawMode` on first load. ──
     if (!settings.overseerMode && settings.openclawMode) settings.overseerMode = settings.openclawMode;
     if (!["observe", "assist", "operate"].includes(settings.overseerMode)) settings.overseerMode = 'assist';
@@ -5336,6 +6050,9 @@ function saveSettings() {
     settings.overseerMode = document.getElementById('cx_ext_overseer_mode')?.value || settings.overseerMode || 'assist';
     settings.openclawMode = settings.overseerMode; // legacy mirror
     settings.overseerToolsEnabled = document.getElementById('cx_ext_overseer_tools_enabled')?.checked ?? settings.overseerToolsEnabled ?? false;
+    settings.overseerMcpEnabled = document.getElementById('cx_ext_overseer_mcp_enabled')?.checked ?? document.getElementById('cx-ovr-fs-enabled')?.checked ?? settings.overseerMcpEnabled ?? false;
+    const mcpServerNameRaw = document.getElementById('cx_ext_overseer_mcp_server_name')?.value ?? document.getElementById('cx-ovr-fs-server')?.value;
+    if (mcpServerNameRaw !== undefined) settings.overseerMcpServerName = String(mcpServerNameRaw || '').trim() || 'filesystem';
     settings.trackLocations = document.getElementById('cx_ext_track_locations')?.checked ?? document.getElementById('cx-set-track-locations')?.checked ?? settings.trackLocations ?? true;
     settings.autoRegisterPlaces = document.getElementById('cx_ext_auto_register_places')?.checked ?? document.getElementById('cx-set-auto-places')?.checked ?? settings.autoRegisterPlaces ?? true;
     settings.showLocationTrails = document.getElementById('cx_ext_show_trails')?.checked ?? document.getElementById('cx-set-trails')?.checked ?? settings.showLocationTrails ?? true;
@@ -5376,7 +6093,7 @@ jQuery(async () => {
         refreshPrivatePhonePrompt();
         // Register Overseer native function-calling tools (once per page load).
         try { registerOverseerTools(); } catch (e) { console.warn(`[${EXT}] registerOverseerTools failed`, e); }
-        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_overseer_mode, #cx_ext_overseer_profile, #cx_ext_overseer_tools_enabled, #cx_ext_contacts_every_n, #cx_ext_quests_every_n, #cx_ext_auto_private_poll_n, #cx_ext_track_locations, #cx_ext_auto_register_places, #cx_ext_show_trails, #cx_ext_map_every_n, #cx_ext_utility_profile').on('change', () => {
+        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_overseer_mode, #cx_ext_overseer_profile, #cx_ext_overseer_tools_enabled, #cx_ext_overseer_mcp_enabled, #cx_ext_overseer_mcp_server_name, #cx_ext_contacts_every_n, #cx_ext_quests_every_n, #cx_ext_auto_private_poll_n, #cx_ext_track_locations, #cx_ext_auto_register_places, #cx_ext_show_trails, #cx_ext_map_every_n, #cx_ext_utility_profile').on('change', () => {
             saveSettings();
             if (settings.enabled) {
                 createPanel();
