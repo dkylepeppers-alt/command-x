@@ -9,7 +9,7 @@ Messages flow through the RP naturally. The extension uses prompt injection so t
 ### 📱 Phone UI
 - **Realistic phone shell** — Notch, bezel, status bar, home indicator
 - **Lock screen → Home screen → Apps** — Navigate like a real phone
-- **Five apps:** Command-X (neural messaging), Profiles (contact intel), Quests (persistent story goals), OpenClaw (bridge console), Settings
+- **Five apps:** Command-X (neural messaging), Profiles (contact intel), Quests (persistent story goals), Map (contact location tracking), Settings
 
 ### 💬 Messaging
 - **iMessage-style chat bubbles** — Sent (blue), received (dark gray), neural commands (pink/purple glow)
@@ -58,13 +58,6 @@ Messages flow through the RP naturally. The extension uses prompt injection so t
 6. Map images are stored locally per ST chat (`localStorage`) and are **never uploaded to the LLM** or any server.
 
 
-### 🦞 OpenClaw App
-- **Native bridge console** — Uses the existing `openclaw-bridge` backend from inside the Command-X phone UI
-- **Per-chat session controls** — Health, session inspect, reset, and send actions stay scoped to the current ST chat
-- **Context-aware prompts** — One tap inserts recent SillyTavern context before sending to OpenClaw
-- **Operate action loop (phase 1)** — OpenClaw can propose `slash.run` actions, which are then approved/rejected locally in Command-X before execution
-- **Local slash fallback** — Run SillyTavern slash commands locally from the same operator surface
-
 ### 🔍 Profiles App (Contact Intel)
 - **Character state tracking** — The LLM reports present-character status via `[status]` tags (mood, location, relationship, inner monologue)
 - **Intel cards** — The active character and relevant contacts get profile cards with their current state
@@ -103,9 +96,6 @@ git clone https://github.com/dkylepeppers-alt/command-x.git
 ```
 Refresh SillyTavern.
 
-### OpenClaw app dependency
-The in-phone **OpenClaw** app requires the local `openclaw-bridge` SillyTavern server plugin/backend to be present and enabled. The Command-X repo contains the native phone UI for that bridge, but not the bridge backend itself.
-
 ## Usage
 
 1. Enable in **Extensions → Command-X Phone**
@@ -113,12 +103,12 @@ The in-phone **OpenClaw** app requires the local `openclaw-bridge` SillyTavern s
 3. Tap a contact to chat
 4. **Messages app** — Normal texting
 5. **Command-X app** — Neural commands (use the drawer buttons or the ⚡ toggle)
-6. **OpenClaw app** — Operator bridge tools for the current chat
-   - **Observe** = read-only context inspection
-   - **Assist** = advice/planning over current chat context
-   - **Operate** = propose local `slash.run` actions for approval, then execute them locally if approved
-7. **Profiles app** — View NPC intel cards
-8. **Settings app** — Configure everything in-phone
+6. **Profiles app** — View NPC intel cards
+7. **Quests app** — Track persistent story goals
+8. **Map app** — Track contact locations
+9. **Settings app** — Configure everything in-phone
+
+> **Note:** The OpenClaw bridge app has been removed in v0.13.0 and is being replaced by **Nova** — a tool-calling agent with a companion server plugin that can read and write the SillyTavern install directory. See `docs/nova-agent-plan.md` for status.
 
 ### How It Works
 
@@ -146,20 +136,6 @@ The **Check Messages** button in the Command-X app fires a background LLM prompt
 Requirements:
 - A SillyTavern build that exposes `generateQuietPrompt()` (v1.12.10+)
 - **Private hybrid texts** enabled in the in-phone Settings app
-
-### OpenClaw Operate Mode
-
-The OpenClaw app connects to an optional `openclaw-bridge` backend plugin and offers three escalating modes:
-
-| Mode | What it does |
-|------|-------------|
-| **Observe** | Sends the current ST chat context to OpenClaw for read-only analysis |
-| **Assist** | OpenClaw responds with advice, plans, or narrative suggestions (streamed into the console) |
-| **Operate** | OpenClaw proposes a list of SillyTavern slash commands (`/echo`, `/setvar`, etc.); you see each proposed action as an **Approve / Reject** card before anything runs |
-
-The operate approval loop ensures no side-effects happen without user confirmation. Each approved action is executed locally via SillyTavern's slash-command runner.
-
-The **OpenClaw** app requires the `openclaw-bridge` server plugin. The Command-X repo ships the phone UI only; the backend is a separate component.
 
 ### Tag Reference
 

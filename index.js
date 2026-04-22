@@ -8,7 +8,7 @@
  *
  * v0.10.0: Compose queue (batch mode), notification badges, [status] tag,
  *          Profiles app, Settings app, toast notifications, recency sort,
- *          character avatars, [sms to] filtering, and embedded OpenClaw bridge controls.
+ *          character avatars, [sms to] filtering.
  */
 import { getContext } from '../../../st-context.js';
 import {
@@ -24,7 +24,7 @@ const INJECT_KEY_CONTACTS = 'command-x-contacts';
 const INJECT_KEY_PRIVATE_PHONE = 'command-x-private-phone';
 const INJECT_KEY_QUESTS = 'command-x-quests';
 const INJECT_KEY_MAP = 'command-x-map';
-const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true, manualHybridPrivateTexts: true, openclawMode: 'assist', contactsInjectEveryN: 1, questsInjectEveryN: 1, autoPrivatePollEveryN: 0, trackLocations: true, autoRegisterPlaces: true, mapInjectEveryN: 3, showLocationTrails: true };
+const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true, manualHybridPrivateTexts: true, contactsInjectEveryN: 1, questsInjectEveryN: 1, autoPrivatePollEveryN: 0, trackLocations: true, autoRegisterPlaces: true, mapInjectEveryN: 3, showLocationTrails: true };
 const MAX_AVATAR_FILE_BYTES = 8 * 1024 * 1024; // 8 MB hard cap on raw upload size
 const MAX_MAP_IMAGE_WIDTH = 1024;           // max downscaled width for uploaded map image
 const AWAIT_TIMEOUT_MS = 30_000;             // ms before awaitingReply auto-clears
@@ -64,28 +64,6 @@ const SCAN_CONTACTS_LABEL = '🔍 Scan Contacts';
 let questEnrichmentInFlight = false;
 
 
-const OPENCLAW_API_BASE = '/api/plugins/openclaw-bridge';
-
-function getOpenClawChatState() {
-    const ctx = getContext();
-    ctx.chatMetadata[EXT] = ctx.chatMetadata[EXT] || {};
-    ctx.chatMetadata[EXT].openclaw = ctx.chatMetadata[EXT].openclaw || {};
-    const state = ctx.chatMetadata[EXT].openclaw;
-    let mutated = false;
-    if (!Number.isFinite(Number(state.resetNonce))) { state.resetNonce = 0; mutated = true; }
-    if (mutated && typeof ctx.saveMetadata === 'function') ctx.saveMetadata();
-    return state;
-}
-
-function saveOpenClawChatState(patch = {}) {
-    const ctx = getContext();
-    const current = getOpenClawChatState();
-    ctx.chatMetadata[EXT] = ctx.chatMetadata[EXT] || {};
-    ctx.chatMetadata[EXT].openclaw = { ...current, ...patch };
-    ctx.saveMetadata();
-    return ctx.chatMetadata[EXT].openclaw;
-}
-
 function currentChatId() {
     const ctx = getContext();
     return String(ctx.chatId || ctx.groupId || ctx.getCurrentChatId?.() || 'no-chat');
@@ -122,368 +100,6 @@ function getRecentMessages() {
         isUser: !!message.is_user,
         isSystem: !!message.is_system,
     }));
-}
-
-async function callOpenClawBridge(path, options = {}) {
-    const ctx = getContext();
-    const response = await fetch(`${OPENCLAW_API_BASE}${path}`, {
-        method: options.method || 'GET',
-        headers: ctx.getRequestHeaders(),
-        body: options.body ? JSON.stringify(options.body) : undefined,
-    });
-
-    const data = await response.json();
-    if (!response.ok || !data?.ok) {
-        throw new Error(data?.error || `${response.status} ${response.statusText}`);
-    }
-
-    return data;
-}
-
-function getOpenClawEls() {
-    return {
-        status: phoneContainer?.querySelector('#cx-ocb-status'),
-        session: phoneContainer?.querySelector('#cx-ocb-session'),
-        reply: phoneContainer?.querySelector('#cx-ocb-reply'),
-        prompt: phoneContainer?.querySelector('#cx-ocb-prompt'),
-        mode: phoneContainer?.querySelector('#cx-ocb-mode'),
-        actions: phoneContainer?.querySelector('#cx-ocb-actions-list'),
-        actionState: phoneContainer?.querySelector('#cx-ocb-actions-state'),
-        log: phoneContainer?.querySelector('#cx-ocb-log'),
-    };
-}
-
-function setOpenClawStatus(text) {
-    const { status } = getOpenClawEls();
-    if (status) status.textContent = text;
-}
-
-function appendOpenClawLog(title, value) {
-    const { log } = getOpenClawEls();
-    if (!log) return;
-    const chunk = [title, value].filter(Boolean).join('\n');
-    const previous = String(log.textContent || '').trim();
-    log.textContent = [previous, chunk].filter(Boolean).join('\n\n').slice(-16000);
-    log.scrollTop = log.scrollHeight;
-}
-
-function escapeHtml(value) {
-    return String(value ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-}
-
-function parseOpenClawOperateEnvelope(reply, envelopeFromBridge = null) {
-    const raw = envelopeFromBridge || (() => {
-        const match = String(reply || '').match(/\[command-x-operate\]\s*([\s\S]*?)\s*\[\/command-x-operate\]/i);
-        if (!match) return null;
-        try {
-            return JSON.parse(match[1]);
-        } catch {
-            return null;
-        }
-    })();
-
-    if (!raw || raw.kind !== 'command-x/operate/v1' || !Array.isArray(raw.actions)) return null;
-    const actions = raw.actions
-        .map((action, index) => ({
-            id: String(action?.id || `action-${index + 1}`),
-            type: String(action?.type || ''),
-            title: String(action?.title || action?.type || `Action ${index + 1}`),
-            command: String(action?.command || '').trim(),
-            reason: String(action?.reason || '').trim(),
-            status: 'pending',
-            receipt: '',
-        }))
-        .filter(action => action.type === 'slash.run' && action.command.startsWith('/'));
-
-    if (!actions.length) return null;
-    return {
-        kind: raw.kind,
-        summary: String(raw.summary || '').trim(),
-        actions,
-    };
-}
-
-function applyOpenClawResponse(data, logTitle = 'OPENCLAW RESULT', responseMode = settings.openclawMode || 'assist') {
-    const envelope = responseMode === 'operate'
-        ? parseOpenClawOperateEnvelope(data.reply, data.operateEnvelope)
-        : null;
-
-    saveOpenClawChatState({
-        lastReply: data.reply,
-        lastSessionId: data.sessionId,
-        lastOperateEnvelope: envelope,
-    });
-    syncOpenClawView();
-    appendOpenClawLog(logTitle, JSON.stringify({
-        sessionId: data.sessionId,
-        reply: data.reply,
-        operateEnvelope: envelope,
-    }, null, 2));
-    return envelope;
-}
-
-function formatOpenClawResult(result) {
-    if (result == null) return '(no output)';
-    if (typeof result === 'string') return result.trim() || '(empty string)';
-    try {
-        return JSON.stringify(result, null, 2);
-    } catch {
-        return String(result);
-    }
-}
-
-function renderOpenClawActions() {
-    const chatState = getOpenClawChatState();
-    const { actions, actionState } = getOpenClawEls();
-    if (!actions || !actionState) return;
-
-    const envelope = chatState.lastOperateEnvelope;
-    if (!envelope?.actions?.length) {
-        actions.innerHTML = '<div class="cx-openclaw-empty">No pending local actions.</div>';
-        actionState.textContent = settings.openclawMode === 'operate'
-            ? 'Operate mode can propose slash.run actions here.'
-            : 'Switch to operate mode to receive actionable proposals.';
-        return;
-    }
-
-    actionState.textContent = envelope.summary || 'OpenClaw proposed local actions.';
-    actions.innerHTML = envelope.actions.map(action => `
-        <div class="cx-openclaw-action-card" data-action-id="${escapeHtml(action.id)}">
-            <div class="cx-openclaw-action-head">
-                <strong>${escapeHtml(action.title)}</strong>
-                <span class="cx-openclaw-action-type">${escapeHtml(action.type)}</span>
-            </div>
-            <pre class="cx-openclaw-action-command">${escapeHtml(action.command)}</pre>
-            ${action.reason ? `<div class="cx-openclaw-action-reason">${escapeHtml(action.reason)}</div>` : ''}
-            <div class="cx-openclaw-action-receipt">${escapeHtml(action.receipt || `Status: ${action.status}`)}</div>
-            <div class="cx-openclaw-actions">
-                <button data-ocb-approve="${escapeHtml(action.id)}" ${action.status !== 'pending' ? 'disabled' : ''}>Approve</button>
-                <button data-ocb-reject="${escapeHtml(action.id)}" ${action.status !== 'pending' ? 'disabled' : ''}>Reject</button>
-            </div>
-        </div>
-    `).join('');
-}
-
-function syncOpenClawView() {
-    const chatState = getOpenClawChatState();
-    const { session, reply, mode } = getOpenClawEls();
-    if (session) session.textContent = chatState.lastSessionId || '(not used yet)';
-    if (reply) reply.textContent = chatState.lastReply || '(no reply yet)';
-    if (mode) mode.value = settings.openclawMode || 'assist';
-    renderOpenClawActions();
-}
-
-function insertContextIntoOpenClawPrompt() {
-    const { prompt } = getOpenClawEls();
-    if (!prompt) return;
-    const ctx = getContext();
-    const lines = getRecentMessages().map(message => `${message.name}: ${message.text}`);
-    const block = [
-        `Mode: ${settings.openclawMode || 'assist'}`,
-        `Chat ID: ${currentChatId()}`,
-        `Character ID: ${ctx.characterId}`,
-        `Group ID: ${ctx.groupId}`,
-        '',
-        ...lines,
-    ].join('\n');
-    prompt.value = prompt.value ? `${prompt.value}\n\n${block}` : block;
-    setOpenClawStatus('Inserted current SillyTavern context.');
-}
-
-async function checkOpenClawHealth() {
-    setOpenClawStatus('Checking bridge health...');
-    const data = await callOpenClawBridge('/health');
-    appendOpenClawLog('HEALTH', JSON.stringify(data, null, 2));
-    setOpenClawStatus(`Bridge healthy: ${data.version}`);
-}
-
-async function refreshOpenClawSessionStatus() {
-    setOpenClawStatus('Checking session status...');
-    const chatState = getOpenClawChatState();
-    const params = new URLSearchParams({
-        chatId: currentChatId(),
-        resetNonce: String(chatState.resetNonce || 0),
-    });
-    const data = await callOpenClawBridge(`/session/status?${params.toString()}`);
-    saveOpenClawChatState({ lastSessionId: data.sessionId });
-    syncOpenClawView();
-    appendOpenClawLog('SESSION STATUS', JSON.stringify(data, null, 2));
-    setOpenClawStatus(data.sessionFound ? `Session ready: ${data.sessionId} (existing)` : `Session ready: ${data.sessionId}`);
-}
-
-async function sendToOpenClaw() {
-    const { prompt } = getOpenClawEls();
-    const ctx = getContext();
-    const userPrompt = String(prompt?.value || '').trim();
-    if (!userPrompt) {
-        setOpenClawStatus('Write a prompt first.');
-        return;
-    }
-
-    const chatState = getOpenClawChatState();
-    setOpenClawStatus('Sending to OpenClaw...');
-
-    const data = await callOpenClawBridge('/session/message', {
-        method: 'POST',
-        body: {
-            mode: settings.openclawMode || 'assist',
-            chatId: currentChatId(),
-            characterId: ctx.characterId,
-            groupId: ctx.groupId,
-            resetNonce: chatState.resetNonce || 0,
-            userPrompt,
-            recentMessages: getRecentMessages(),
-        },
-    });
-
-    const envelope = applyOpenClawResponse(data, 'OPENCLAW RESULT', settings.openclawMode || 'assist');
-    setOpenClawStatus(envelope ? `OpenClaw proposed ${envelope.actions.length} local action(s).` : `OpenClaw replied on ${data.sessionId}.`);
-}
-
-async function sendOpenClawOperateReceipt(userPrompt, logTitle) {
-    const ctx = getContext();
-    const chatState = getOpenClawChatState();
-    const data = await callOpenClawBridge('/session/message', {
-        method: 'POST',
-        body: {
-            mode: 'operate',
-            chatId: currentChatId(),
-            characterId: ctx.characterId,
-            groupId: ctx.groupId,
-            resetNonce: chatState.resetNonce || 0,
-            userPrompt,
-            recentMessages: getRecentMessages(),
-        },
-    });
-    return applyOpenClawResponse(data, logTitle, 'operate');
-}
-
-async function resetOpenClawSession() {
-    const state = getOpenClawChatState();
-    const nextNonce = Number(state.resetNonce || 0) + 1;
-    const data = await callOpenClawBridge('/session/reset', {
-        method: 'POST',
-        body: {
-            chatId: currentChatId(),
-            resetNonce: nextNonce,
-        },
-    });
-    saveOpenClawChatState({
-        resetNonce: nextNonce,
-        lastSessionId: data.sessionId,
-        lastReply: '',
-        lastOperateEnvelope: null,
-    });
-    syncOpenClawView();
-    appendOpenClawLog('SESSION RESET', JSON.stringify(data, null, 2));
-    setOpenClawStatus(`Switched to ${data.sessionId}.`);
-}
-
-async function executeOpenClawSlashCommand(text) {
-    return getContext().executeSlashCommandsWithOptions(text, {
-        handleExecutionErrors: true,
-        source: 'command-x-openclaw',
-    });
-}
-
-async function approveOpenClawAction(actionId) {
-    const chatState = getOpenClawChatState();
-    const envelope = chatState.lastOperateEnvelope;
-    const action = envelope?.actions?.find(item => item.id === actionId);
-    if (!action || action.status !== 'pending') return;
-
-    action.status = 'running';
-    action.receipt = 'Executing locally...';
-    saveOpenClawChatState({ lastOperateEnvelope: envelope });
-    syncOpenClawView();
-    setOpenClawStatus(`Running ${action.command}`);
-
-    try {
-        const result = await executeOpenClawSlashCommand(action.command);
-        const receipt = formatOpenClawResult(result);
-        action.status = 'approved';
-        action.receipt = `Approved and executed.\n\n${receipt}`;
-        saveOpenClawChatState({ lastOperateEnvelope: envelope });
-        syncOpenClawView();
-        appendOpenClawLog('OPERATE ACTION APPROVED', JSON.stringify({ actionId, command: action.command, receipt }, null, 2));
-        const followUp = await sendOpenClawOperateReceipt([
-            `Action receipt for ${action.id}:`,
-            `- decision: approved`,
-            `- type: ${action.type}`,
-            `- command: ${action.command}`,
-            '- result:',
-            receipt,
-        ].join('\n'), 'OPERATE FOLLOW-UP');
-        setOpenClawStatus(followUp ? 'Action executed. OpenClaw sent a follow-up proposal.' : 'Action executed. OpenClaw received the result.');
-    } catch (error) {
-        const receipt = String(error?.message || error);
-        action.status = 'failed';
-        action.receipt = `Execution failed.\n\n${receipt}`;
-        saveOpenClawChatState({ lastOperateEnvelope: envelope });
-        syncOpenClawView();
-        appendOpenClawLog('OPERATE ACTION ERROR', JSON.stringify({ actionId, command: action.command, error: receipt }, null, 2));
-        const followUp = await sendOpenClawOperateReceipt([
-            `Action receipt for ${action.id}:`,
-            `- decision: approved`,
-            `- type: ${action.type}`,
-            `- command: ${action.command}`,
-            '- outcome: execution_error',
-            '- error:',
-            receipt,
-        ].join('\n'), 'OPERATE FOLLOW-UP');
-        setOpenClawStatus(followUp ? 'Execution failed. OpenClaw proposed a next step.' : 'Execution failed. OpenClaw received the error.');
-    }
-}
-
-async function rejectOpenClawAction(actionId) {
-    const chatState = getOpenClawChatState();
-    const envelope = chatState.lastOperateEnvelope;
-    const action = envelope?.actions?.find(item => item.id === actionId);
-    if (!action || action.status !== 'pending') return;
-
-    action.status = 'rejected';
-    action.receipt = 'Rejected locally. Command was not run.';
-    saveOpenClawChatState({ lastOperateEnvelope: envelope });
-    syncOpenClawView();
-    appendOpenClawLog('OPERATE ACTION REJECTED', JSON.stringify({ actionId, command: action.command }, null, 2));
-    setOpenClawStatus('Action rejected. Sending receipt back to OpenClaw...');
-    const followUp = await sendOpenClawOperateReceipt([
-        `Action receipt for ${action.id}:`,
-        '- decision: rejected',
-        `- type: ${action.type}`,
-        `- command: ${action.command}`,
-        '- note: The local operator rejected this action and it was not executed.',
-    ].join('\n'), 'OPERATE FOLLOW-UP');
-    setOpenClawStatus(followUp ? 'Action rejected. OpenClaw proposed an alternative.' : 'Action rejected. OpenClaw received the rejection.');
-}
-
-async function runOpenClawSlashLocally() {
-    const { prompt } = getOpenClawEls();
-    const text = String(prompt?.value || '').trim();
-    if (!text.startsWith('/')) {
-        setOpenClawStatus('Local action expects a slash command starting with /.');
-        return;
-    }
-
-    try {
-        const result = await executeOpenClawSlashCommand(text);
-        appendOpenClawLog('LOCAL SLASH', `${text}\n\n${formatOpenClawResult(result)}`);
-        setOpenClawStatus('Ran slash command locally.');
-    } catch (error) {
-        appendOpenClawLog('LOCAL SLASH ERROR', String(error?.message || error));
-        setOpenClawStatus(String(error?.message || error));
-    }
-}
-
-function clearOpenClawPrompt() {
-    const { prompt } = getOpenClawEls();
-    if (prompt) prompt.value = '';
-    setOpenClawStatus('Cleared prompt.');
 }
 
 /* ======================================================================
@@ -2710,6 +2326,7 @@ const now = () => new Date().toLocaleTimeString([], { hour: 'numeric', minute: '
 const today = () => new Date().toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
 function escHtml(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>'); }
 function escAttr(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escapeHtml(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 
 
 function buildOutOfBandPollPrompt() {
@@ -3524,10 +3141,6 @@ function buildPhone() {
                     <div class="cx-icon-img cx-icon-map">🧭</div>
                     <div class="cx-icon-label">Map</div>
                 </div>
-                <div class="cx-app-icon" data-app="openclaw" role="button" tabindex="0" aria-label="Open OpenClaw app">
-                    <div class="cx-icon-img cx-icon-openclaw">🦞</div>
-                    <div class="cx-icon-label">OpenClaw</div>
-                </div>
                 <div class="cx-app-icon" data-app="phone-settings" role="button" tabindex="0" aria-label="Open Settings">
                     <div class="cx-icon-img cx-icon-settings">⚙️</div>
                     <div class="cx-icon-label">Settings</div>
@@ -3687,62 +3300,6 @@ function buildPhone() {
                 <div class="cx-nav" data-goto="home" role="button" tabindex="0" aria-label="Go to home screen"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
             </div>
         </div>
-
-        <!-- OpenClaw View -->
-        <div class="cx-view" data-view="openclaw">
-            <div class="cx-openclaw-header">
-                <div class="cx-openclaw-title">OpenClaw</div>
-                <div class="cx-openclaw-sub">Bridge console inside Command-X</div>
-            </div>
-            <div class="cx-openclaw-body">
-                <label class="cx-openclaw-field">
-                    <span>Mode</span>
-                    <select id="cx-ocb-mode">
-                        <option value="observe">observe</option>
-                        <option value="assist">assist</option>
-                        <option value="operate">operate</option>
-                    </select>
-                </label>
-                <div class="cx-openclaw-actions cx-openclaw-actions-tight">
-                    <button id="cx-ocb-health">Health</button>
-                    <button id="cx-ocb-session-btn">Session</button>
-                    <button id="cx-ocb-reset">Reset</button>
-                </div>
-                <div class="cx-openclaw-status" id="cx-ocb-status">Ready.</div>
-                <div class="cx-openclaw-meta">
-                    <div>
-                        <span class="cx-openclaw-meta-label">Session</span>
-                        <pre id="cx-ocb-session">(not used yet)</pre>
-                    </div>
-                    <div>
-                        <span class="cx-openclaw-meta-label">Last reply</span>
-                        <pre id="cx-ocb-reply">(no reply yet)</pre>
-                    </div>
-                </div>
-                <textarea id="cx-ocb-prompt" placeholder="Ask OpenClaw about the current chat, or paste a SillyTavern slash command to run locally."></textarea>
-                <div class="cx-openclaw-actions">
-                    <button id="cx-ocb-insert">Insert context</button>
-                    <button id="cx-ocb-send" class="cx-openclaw-primary">Send</button>
-                </div>
-                <div class="cx-openclaw-actions">
-                    <button id="cx-ocb-slash">Run slash locally</button>
-                    <button id="cx-ocb-clear">Clear</button>
-                </div>
-                <div class="cx-openclaw-meta">
-                    <div>
-                        <span class="cx-openclaw-meta-label">Proposed actions</span>
-                        <div class="cx-openclaw-action-state" id="cx-ocb-actions-state">Switch to operate mode to receive actionable proposals.</div>
-                        <div id="cx-ocb-actions-list"><div class="cx-openclaw-empty">No pending local actions.</div></div>
-                    </div>
-                </div>
-                <pre id="cx-ocb-log"></pre>
-            </div>
-            <div class="cx-navbar">
-                <div class="cx-nav active"><div class="cx-nav-ico">🦞</div><div class="cx-nav-lbl">OpenClaw</div></div>
-                <div class="cx-nav" data-goto="home" role="button" tabindex="0" aria-label="Go to home screen"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
-            </div>
-        </div>
-
 
         <!-- Chat View -->
         <div class="cx-view" data-view="chat">
@@ -4442,13 +3999,9 @@ function wirePhone() {
     phoneContainer.querySelectorAll('.cx-app-icon[data-app]').forEach(icon =>
         icon.addEventListener('click', () => {
             const app = icon.dataset.app;
-            if (app === 'cmdx' || app === 'profiles' || app === 'quests' || app === 'openclaw' || app === 'phone-settings' || app === 'map') {
+            if (app === 'cmdx' || app === 'profiles' || app === 'quests' || app === 'phone-settings' || app === 'map') {
                 currentApp = app;
                 switchView(app);
-                if (app === 'openclaw') {
-                    syncOpenClawView();
-                    setOpenClawStatus('Ready.');
-                }
             }
         })
     );
@@ -4524,29 +4077,6 @@ function wirePhone() {
         if (await cxConfirm('Clear all NPC contacts for this chat?', 'Clear Contacts', { confirmLabel: 'Clear All', danger: true })) {
             saveNpcs([]);
             rebuildPhone();
-        }
-    });
-    phoneContainer.querySelector('#cx-ocb-mode')?.addEventListener('change', (e) => {
-        settings.openclawMode = e.target.value;
-        saveSettings();
-        setOpenClawStatus(`Mode set: ${settings.openclawMode}`);
-    });
-    phoneContainer.querySelector('#cx-ocb-health')?.addEventListener('click', () => checkOpenClawHealth().catch(error => setOpenClawStatus(String(error?.message || error))));
-    phoneContainer.querySelector('#cx-ocb-session-btn')?.addEventListener('click', () => refreshOpenClawSessionStatus().catch(error => setOpenClawStatus(String(error?.message || error))));
-    phoneContainer.querySelector('#cx-ocb-send')?.addEventListener('click', () => sendToOpenClaw().catch(error => setOpenClawStatus(String(error?.message || error))));
-    phoneContainer.querySelector('#cx-ocb-reset')?.addEventListener('click', () => resetOpenClawSession().catch(error => setOpenClawStatus(String(error?.message || error))));
-    phoneContainer.querySelector('#cx-ocb-insert')?.addEventListener('click', insertContextIntoOpenClawPrompt);
-    phoneContainer.querySelector('#cx-ocb-slash')?.addEventListener('click', runOpenClawSlashLocally);
-    phoneContainer.querySelector('#cx-ocb-clear')?.addEventListener('click', clearOpenClawPrompt);
-    phoneContainer.querySelector('#cx-ocb-actions-list')?.addEventListener('click', (event) => {
-        const approveId = event.target?.closest?.('[data-ocb-approve]')?.dataset?.ocbApprove;
-        const rejectId = event.target?.closest?.('[data-ocb-reject]')?.dataset?.ocbReject;
-        if (approveId) {
-            approveOpenClawAction(approveId).catch(error => setOpenClawStatus(String(error?.message || error)));
-            return;
-        }
-        if (rejectId) {
-            rejectOpenClawAction(rejectId).catch(error => setOpenClawStatus(String(error?.message || error)));
         }
     });
     phoneContainer.querySelectorAll('[data-cx-edit]').forEach(btn =>
@@ -4842,7 +4372,6 @@ function createPanel() {
         }
     });
     wirePhone();
-    syncOpenClawView();
     updateUnreadBadges();
 }
 
@@ -4858,12 +4387,8 @@ function rebuildPhone() {
         saveSettings();
     });
     wirePhone();
-    syncOpenClawView();
     if (savedContact && savedApp) {
         openChat(savedContact, savedApp, true);
-    } else if (savedApp === 'openclaw') {
-        switchView('openclaw');
-        setOpenClawStatus('Ready.');
     } else if (savedApp) {
         switchView(savedApp);
     }
@@ -4903,6 +4428,10 @@ function styleCommandsInMessage(mesId) {
 function loadSettings() {
     const ctx = getContext();
     if (ctx.extensionSettings[EXT]) Object.assign(settings, ctx.extensionSettings[EXT]);
+    // Migration: drop legacy OpenClaw settings (removed in v0.13.0)
+    if ('openclawMode' in settings) {
+        delete settings.openclawMode;
+    }
     const cb = (id, key, fallback = false) => {
         const el = document.getElementById(id);
         if (el) el.checked = settings[key] ?? fallback;
@@ -4916,9 +4445,6 @@ function loadSettings() {
     cb('cx_ext_track_locations', 'trackLocations', true);
     cb('cx_ext_auto_register_places', 'autoRegisterPlaces', true);
     cb('cx_ext_show_trails', 'showLocationTrails', true);
-    if (!["observe", "assist", "operate"].includes(settings.openclawMode)) settings.openclawMode = 'assist';
-    const openclawMode = document.getElementById('cx_ext_openclaw_mode');
-    if (openclawMode) openclawMode.value = settings.openclawMode || 'assist';
     const contactsN = document.getElementById('cx_ext_contacts_every_n');
     if (contactsN) contactsN.value = Math.max(1, Number(settings.contactsInjectEveryN) || 1);
     const questsN = document.getElementById('cx_ext_quests_every_n');
@@ -4936,7 +4462,6 @@ function saveSettings() {
     settings.batchMode = document.getElementById('cx_ext_batch_mode')?.checked ?? settings.batchMode ?? false;
     settings.autoDetectNpcs = document.getElementById('cx_ext_auto_detect_npcs')?.checked ?? settings.autoDetectNpcs ?? true;
     settings.manualHybridPrivateTexts = document.getElementById('cx_set_private_hybrid')?.checked ?? document.getElementById('cx-set-private-hybrid')?.checked ?? settings.manualHybridPrivateTexts ?? true;
-    settings.openclawMode = document.getElementById('cx_ext_openclaw_mode')?.value || settings.openclawMode || 'assist';
     settings.trackLocations = document.getElementById('cx_ext_track_locations')?.checked ?? document.getElementById('cx-set-track-locations')?.checked ?? settings.trackLocations ?? true;
     settings.autoRegisterPlaces = document.getElementById('cx_ext_auto_register_places')?.checked ?? document.getElementById('cx-set-auto-places')?.checked ?? settings.autoRegisterPlaces ?? true;
     settings.showLocationTrails = document.getElementById('cx_ext_show_trails')?.checked ?? document.getElementById('cx-set-trails')?.checked ?? settings.showLocationTrails ?? true;
@@ -4969,7 +4494,7 @@ jQuery(async () => {
 
         loadSettings();
         refreshPrivatePhonePrompt();
-        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_openclaw_mode, #cx_ext_contacts_every_n, #cx_ext_quests_every_n, #cx_ext_auto_private_poll_n, #cx_ext_track_locations, #cx_ext_auto_register_places, #cx_ext_show_trails, #cx_ext_map_every_n').on('change', () => {
+        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_contacts_every_n, #cx_ext_quests_every_n, #cx_ext_auto_private_poll_n, #cx_ext_track_locations, #cx_ext_auto_register_places, #cx_ext_show_trails, #cx_ext_map_every_n').on('change', () => {
             saveSettings();
             if (settings.enabled) {
                 createPanel();
