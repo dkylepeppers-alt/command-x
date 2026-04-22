@@ -67,6 +67,7 @@ const DEFAULTS = {
 };
 const MAX_AVATAR_FILE_BYTES = 8 * 1024 * 1024; // 8 MB hard cap on raw upload size
 const MAX_MAP_IMAGE_WIDTH = 1024;           // max downscaled width for uploaded map image
+const MAX_DIFF_PREVIEW_BYTES = 262144;      // 256 KB — cap on both "before" and "after" sides when building a diff preview for the approval UI
 const AWAIT_TIMEOUT_MS = 30_000;             // ms before awaitingReply auto-clears
 const CLOCK_INTERVAL_MS = 30_000;            // clock display refresh interval
 const MESSAGE_HISTORY_CAP = 200;             // max messages stored per contact
@@ -1150,6 +1151,12 @@ function proposeFsAction({ kind, path, content, diff, contentBefore, summary }) 
  * The caller is responsible for passing the re-validated `path` — we do not
  * re-normalize here to avoid drift between what the user saw on the approval
  * card and what we execute.
+ *
+ * @param {string} actionId — id of the pending action in the operate envelope.
+ * @param {string} validatedPath — path returned by the approval-time fsPrecheck.
+ * @param {object|null} action — the action object from the operate envelope;
+ *        used as a fallback source for `pendingPayload` if the in-memory Map
+ *        is cold (e.g. after page reload).
  */
 async function executeFsPending(actionId, validatedPath, action = null) {
     const pending = getFsPendingPayload(actionId, action);
@@ -1419,7 +1426,7 @@ function registerOverseerTools() {
                 // Confirm path: read existing contents (capped) to build the
                 // diff preview for the approval card. A missing file is
                 // treated as an empty "before"; any read error is non-fatal.
-                const diffCap = Math.min(Number(settings.overseerFsMaxReadBytes) || DEFAULTS.overseerFsMaxReadBytes, 262144);
+                const diffCap = Math.min(Number(settings.overseerFsMaxReadBytes) || DEFAULTS.overseerFsMaxReadBytes, MAX_DIFF_PREVIEW_BYTES);
                 let contentBefore = '';
                 try {
                     const existing = await mcpCallTool(serverName, 'read_file', { path: pre.path });
