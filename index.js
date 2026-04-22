@@ -8,7 +8,14 @@
  *
  * v0.10.0: Compose queue (batch mode), notification badges, [status] tag,
  *          Profiles app, Settings app, toast notifications, recency sort,
- *          character avatars, [sms to] filtering, and embedded OpenClaw bridge controls.
+ *          character avatars, [sms to] filtering, and (in v0.12) an embedded
+ *          OpenClaw bridge console — renamed to the Overseer agent in v0.13.
+ * v0.13.0: Overhauled the former OpenClaw bridge console into "Overseer",
+ *          a first-class in-phone agent that talks to its own Connection
+ *          Profile via generateQuietPrompt() and registers native ST
+ *          function-calling tools (slash_run, recent messages, phone state
+ *          readers). MCP client integration + filesystem tools ship in a
+ *          follow-up PR.
  */
 import { getContext } from '../../../st-context.js';
 import {
@@ -17,14 +24,38 @@ import {
     extension_prompt_roles,
 } from '../../../../script.js';
 
-const VERSION = '0.12.0';
+const VERSION = '0.13.0';
 const EXT = 'command-x';
 const INJECT_KEY = 'command-x-sms';
 const INJECT_KEY_CONTACTS = 'command-x-contacts';
 const INJECT_KEY_PRIVATE_PHONE = 'command-x-private-phone';
 const INJECT_KEY_QUESTS = 'command-x-quests';
 const INJECT_KEY_MAP = 'command-x-map';
-const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true, manualHybridPrivateTexts: true, openclawMode: 'assist', contactsInjectEveryN: 1, questsInjectEveryN: 1, autoPrivatePollEveryN: 0, trackLocations: true, autoRegisterPlaces: true, mapInjectEveryN: 3, showLocationTrails: true, utilityConnectionProfile: '' };
+const DEFAULTS = {
+    enabled: true,
+    styleCommands: true,
+    showLockscreen: false,
+    panelOpen: false,
+    batchMode: false,
+    autoDetectNpcs: true,
+    manualHybridPrivateTexts: true,
+    // Overseer (renamed from OpenClaw): mode + its own Connection Profile + tool gate.
+    // Tools are disabled by default — function-calling lets the model execute local
+    // slash commands (potentially destructive), so opt-in is the safer posture.
+    overseerMode: 'assist',
+    overseerConnectionProfile: '',
+    overseerToolsEnabled: false,
+    // Deprecated — kept in DEFAULTS for backwards-compat read of older saved settings
+    openclawMode: 'assist',
+    contactsInjectEveryN: 1,
+    questsInjectEveryN: 1,
+    autoPrivatePollEveryN: 0,
+    trackLocations: true,
+    autoRegisterPlaces: true,
+    mapInjectEveryN: 3,
+    showLocationTrails: true,
+    utilityConnectionProfile: '',
+};
 const MAX_AVATAR_FILE_BYTES = 8 * 1024 * 1024; // 8 MB hard cap on raw upload size
 const MAX_MAP_IMAGE_WIDTH = 1024;           // max downscaled width for uploaded map image
 const AWAIT_TIMEOUT_MS = 30_000;             // ms before awaitingReply auto-clears
@@ -64,26 +95,59 @@ const SCAN_CONTACTS_LABEL = '🔍 Scan Contacts';
 let questEnrichmentInFlight = false;
 
 
-const OPENCLAW_API_BASE = '/api/plugins/openclaw-bridge';
+/* ======================================================================
+   OVERSEER — in-phone interactive agent (v0.13.0)
 
-function getOpenClawChatState() {
+   Formerly the "OpenClaw" bridge console. The previous implementation POSTed
+   to a custom `/api/plugins/openclaw-bridge` server plugin; that dependency
+   has been removed. Overseer now:
+
+   1. Talks to its *own* SillyTavern Connection Profile
+      (settings.overseerConnectionProfile) via ctx.generateQuietPrompt().
+   2. Registers native function-calling tools through ctx.registerFunctionTool
+      so any tool-capable model (OpenAI, Anthropic, Gemini, OpenRouter tools
+      profile, local models with tool grammars) invoked under that profile
+      can read phone state and run SillyTavern slash commands directly.
+   3. Keeps the existing "[command-x-operate]" slash-action approval loop for
+      models that don't support native tool calling — the agent can still
+      propose slash commands that the user approves/rejects in the UI.
+
+   File-system access (read/write/list under the SillyTavern install root)
+   is planned for a follow-up PR that vendors / integrates with the MCP
+   client + filesystem server. This PR lands the foundation only.
+   ====================================================================== */
+
+// ---- Persistence --------------------------------------------------------
+
+/**
+ * Returns the per-chat Overseer state, migrating from the legacy `openclaw`
+ * key on first read for chats created before v0.13.0.
+ */
+function getOverseerChatState() {
     const ctx = getContext();
     ctx.chatMetadata[EXT] = ctx.chatMetadata[EXT] || {};
-    ctx.chatMetadata[EXT].openclaw = ctx.chatMetadata[EXT].openclaw || {};
-    const state = ctx.chatMetadata[EXT].openclaw;
+    // One-time migration of the legacy `openclaw` key.
+    if (!ctx.chatMetadata[EXT].overseer && ctx.chatMetadata[EXT].openclaw) {
+        ctx.chatMetadata[EXT].overseer = { ...ctx.chatMetadata[EXT].openclaw };
+        // Drop the old key so it doesn't linger as stale state or cause confusion.
+        delete ctx.chatMetadata[EXT].openclaw;
+    }
+    ctx.chatMetadata[EXT].overseer = ctx.chatMetadata[EXT].overseer || {};
+    const state = ctx.chatMetadata[EXT].overseer;
     let mutated = false;
     if (!Number.isFinite(Number(state.resetNonce))) { state.resetNonce = 0; mutated = true; }
+    if (!Array.isArray(state.conversation)) { state.conversation = []; mutated = true; }
     if (mutated && typeof ctx.saveMetadata === 'function') ctx.saveMetadata();
     return state;
 }
 
-function saveOpenClawChatState(patch = {}) {
+function saveOverseerChatState(patch = {}) {
     const ctx = getContext();
-    const current = getOpenClawChatState();
+    const current = getOverseerChatState();
     ctx.chatMetadata[EXT] = ctx.chatMetadata[EXT] || {};
-    ctx.chatMetadata[EXT].openclaw = { ...current, ...patch };
-    ctx.saveMetadata();
-    return ctx.chatMetadata[EXT].openclaw;
+    ctx.chatMetadata[EXT].overseer = { ...current, ...patch };
+    if (typeof ctx.saveMetadata === 'function') ctx.saveMetadata();
+    return ctx.chatMetadata[EXT].overseer;
 }
 
 function currentChatId() {
@@ -124,48 +188,7 @@ function getRecentMessages() {
     }));
 }
 
-async function callOpenClawBridge(path, options = {}) {
-    const ctx = getContext();
-    const response = await fetch(`${OPENCLAW_API_BASE}${path}`, {
-        method: options.method || 'GET',
-        headers: ctx.getRequestHeaders(),
-        body: options.body ? JSON.stringify(options.body) : undefined,
-    });
-
-    const data = await response.json();
-    if (!response.ok || !data?.ok) {
-        throw new Error(data?.error || `${response.status} ${response.statusText}`);
-    }
-
-    return data;
-}
-
-function getOpenClawEls() {
-    return {
-        status: phoneContainer?.querySelector('#cx-ocb-status'),
-        session: phoneContainer?.querySelector('#cx-ocb-session'),
-        reply: phoneContainer?.querySelector('#cx-ocb-reply'),
-        prompt: phoneContainer?.querySelector('#cx-ocb-prompt'),
-        mode: phoneContainer?.querySelector('#cx-ocb-mode'),
-        actions: phoneContainer?.querySelector('#cx-ocb-actions-list'),
-        actionState: phoneContainer?.querySelector('#cx-ocb-actions-state'),
-        log: phoneContainer?.querySelector('#cx-ocb-log'),
-    };
-}
-
-function setOpenClawStatus(text) {
-    const { status } = getOpenClawEls();
-    if (status) status.textContent = text;
-}
-
-function appendOpenClawLog(title, value) {
-    const { log } = getOpenClawEls();
-    if (!log) return;
-    const chunk = [title, value].filter(Boolean).join('\n');
-    const previous = String(log.textContent || '').trim();
-    log.textContent = [previous, chunk].filter(Boolean).join('\n\n').slice(-16000);
-    log.scrollTop = log.scrollHeight;
-}
+// ---- Escaping (shared) --------------------------------------------------
 
 function escapeHtml(value) {
     return String(value ?? '')
@@ -176,7 +199,54 @@ function escapeHtml(value) {
         .replace(/'/g, '&#39;');
 }
 
-function parseOpenClawOperateEnvelope(reply, envelopeFromBridge = null) {
+// ---- Connection Profile (Overseer-specific) ----------------------------
+
+/**
+ * Lightweight accessor so other helpers can check the effective value
+ * without repeatedly poking at settings.
+ */
+function getOverseerConnectionProfileId() {
+    return settings.overseerConnectionProfile || '';
+}
+
+// ---- UI element lookups -------------------------------------------------
+
+function getOverseerEls() {
+    return {
+        status: phoneContainer?.querySelector('#cx-ovr-status'),
+        input: phoneContainer?.querySelector('#cx-ovr-input'),
+        mode: phoneContainer?.querySelector('#cx-ovr-mode'),
+        profile: phoneContainer?.querySelector('#cx-ovr-profile'),
+        conversation: phoneContainer?.querySelector('#cx-ovr-conversation'),
+        actions: phoneContainer?.querySelector('#cx-ovr-actions-list'),
+        actionState: phoneContainer?.querySelector('#cx-ovr-actions-state'),
+        log: phoneContainer?.querySelector('#cx-ovr-log'),
+    };
+}
+
+function setOverseerStatus(text) {
+    const { status } = getOverseerEls();
+    if (status) status.textContent = text;
+}
+
+function appendOverseerLog(title, value) {
+    const { log } = getOverseerEls();
+    if (!log) return;
+    const chunk = [title, value].filter(Boolean).join('\n');
+    const previous = String(log.textContent || '').trim();
+    log.textContent = [previous, chunk].filter(Boolean).join('\n\n').slice(-16000);
+    log.scrollTop = log.scrollHeight;
+}
+
+// ---- Operate envelope parsing ------------------------------------------
+//
+// When running in `operate` mode against a model without native tool calling,
+// Overseer's system prompt asks it to wrap any proposed slash actions in a
+// [command-x-operate]...[/command-x-operate] JSON block. The envelope format
+// matches what the old OpenClaw bridge returned, so existing persisted state
+// and UI code continues to work.
+
+function parseOverseerOperateEnvelope(reply, envelopeFromBridge = null) {
     const raw = envelopeFromBridge || (() => {
         const match = String(reply || '').match(/\[command-x-operate\]\s*([\s\S]*?)\s*\[\/command-x-operate\]/i);
         if (!match) return null;
@@ -208,26 +278,7 @@ function parseOpenClawOperateEnvelope(reply, envelopeFromBridge = null) {
     };
 }
 
-function applyOpenClawResponse(data, logTitle = 'OPENCLAW RESULT', responseMode = settings.openclawMode || 'assist') {
-    const envelope = responseMode === 'operate'
-        ? parseOpenClawOperateEnvelope(data.reply, data.operateEnvelope)
-        : null;
-
-    saveOpenClawChatState({
-        lastReply: data.reply,
-        lastSessionId: data.sessionId,
-        lastOperateEnvelope: envelope,
-    });
-    syncOpenClawView();
-    appendOpenClawLog(logTitle, JSON.stringify({
-        sessionId: data.sessionId,
-        reply: data.reply,
-        operateEnvelope: envelope,
-    }, null, 2));
-    return envelope;
-}
-
-function formatOpenClawResult(result) {
+function formatOverseerResult(result) {
     if (result == null) return '(no output)';
     if (typeof result === 'string') return result.trim() || '(empty string)';
     try {
@@ -237,254 +288,517 @@ function formatOpenClawResult(result) {
     }
 }
 
-function renderOpenClawActions() {
-    const chatState = getOpenClawChatState();
-    const { actions, actionState } = getOpenClawEls();
+// ---- Conversation rendering --------------------------------------------
+
+/**
+ * Append a turn to the persistent per-chat Overseer conversation and refresh
+ * the UI. Roles: 'user', 'agent', 'tool', 'system'.
+ */
+function appendOverseerTurn(role, text, extra = {}) {
+    const state = getOverseerChatState();
+    const conversation = Array.isArray(state.conversation) ? state.conversation.slice() : [];
+    conversation.push({
+        role: String(role || 'system'),
+        text: String(text ?? ''),
+        timestamp: Date.now(),
+        ...extra,
+    });
+    // Cap conversation history so chatMetadata doesn't grow unbounded.
+    while (conversation.length > 200) conversation.shift();
+    saveOverseerChatState({ conversation });
+    renderOverseerConversation();
+}
+
+function renderOverseerConversation() {
+    const { conversation } = getOverseerEls();
+    if (!conversation) return;
+    const state = getOverseerChatState();
+    const turns = Array.isArray(state.conversation) ? state.conversation : [];
+    if (!turns.length) {
+        conversation.innerHTML = '<div class="cx-overseer-empty">No conversation yet. Send a prompt to begin.</div>';
+        return;
+    }
+    conversation.innerHTML = turns.map(turn => {
+        const roleClass = `cx-overseer-turn cx-overseer-turn-${escapeHtml(turn.role || 'system')}`;
+        const label = turn.role === 'user' ? 'You'
+            : turn.role === 'agent' ? 'Overseer'
+            : turn.role === 'tool' ? `Tool · ${escapeHtml(turn.toolName || 'unknown')}`
+            : 'System';
+        return `<div class="${roleClass}">
+            <div class="cx-overseer-turn-label">${label}</div>
+            <div class="cx-overseer-turn-body">${escapeHtml(turn.text)}</div>
+        </div>`;
+    }).join('');
+    conversation.scrollTop = conversation.scrollHeight;
+}
+
+function renderOverseerActions() {
+    const chatState = getOverseerChatState();
+    const { actions, actionState } = getOverseerEls();
     if (!actions || !actionState) return;
 
     const envelope = chatState.lastOperateEnvelope;
     if (!envelope?.actions?.length) {
-        actions.innerHTML = '<div class="cx-openclaw-empty">No pending local actions.</div>';
-        actionState.textContent = settings.openclawMode === 'operate'
+        actions.innerHTML = '<div class="cx-overseer-empty">No pending local actions.</div>';
+        actionState.textContent = settings.overseerMode === 'operate'
             ? 'Operate mode can propose slash.run actions here.'
             : 'Switch to operate mode to receive actionable proposals.';
         return;
     }
 
-    actionState.textContent = envelope.summary || 'OpenClaw proposed local actions.';
+    actionState.textContent = envelope.summary || 'Overseer proposed local actions.';
     actions.innerHTML = envelope.actions.map(action => `
-        <div class="cx-openclaw-action-card" data-action-id="${escapeHtml(action.id)}">
-            <div class="cx-openclaw-action-head">
+        <div class="cx-overseer-action-card" data-action-id="${escapeHtml(action.id)}">
+            <div class="cx-overseer-action-head">
                 <strong>${escapeHtml(action.title)}</strong>
-                <span class="cx-openclaw-action-type">${escapeHtml(action.type)}</span>
+                <span class="cx-overseer-action-type">${escapeHtml(action.type)}</span>
             </div>
-            <pre class="cx-openclaw-action-command">${escapeHtml(action.command)}</pre>
-            ${action.reason ? `<div class="cx-openclaw-action-reason">${escapeHtml(action.reason)}</div>` : ''}
-            <div class="cx-openclaw-action-receipt">${escapeHtml(action.receipt || `Status: ${action.status}`)}</div>
-            <div class="cx-openclaw-actions">
-                <button data-ocb-approve="${escapeHtml(action.id)}" ${action.status !== 'pending' ? 'disabled' : ''}>Approve</button>
-                <button data-ocb-reject="${escapeHtml(action.id)}" ${action.status !== 'pending' ? 'disabled' : ''}>Reject</button>
+            <pre class="cx-overseer-action-command">${escapeHtml(action.command)}</pre>
+            ${action.reason ? `<div class="cx-overseer-action-reason">${escapeHtml(action.reason)}</div>` : ''}
+            <div class="cx-overseer-action-receipt">${escapeHtml(action.receipt || `Status: ${action.status}`)}</div>
+            <div class="cx-overseer-actions">
+                <button data-ovr-approve="${escapeHtml(action.id)}" ${action.status !== 'pending' ? 'disabled' : ''}>Approve</button>
+                <button data-ovr-reject="${escapeHtml(action.id)}" ${action.status !== 'pending' ? 'disabled' : ''}>Reject</button>
             </div>
         </div>
     `).join('');
 }
 
-function syncOpenClawView() {
-    const chatState = getOpenClawChatState();
-    const { session, reply, mode } = getOpenClawEls();
-    if (session) session.textContent = chatState.lastSessionId || '(not used yet)';
-    if (reply) reply.textContent = chatState.lastReply || '(no reply yet)';
-    if (mode) mode.value = settings.openclawMode || 'assist';
-    renderOpenClawActions();
+function syncOverseerView() {
+    const { mode, profile } = getOverseerEls();
+    if (mode) mode.value = settings.overseerMode || 'assist';
+    if (profile) profile.value = settings.overseerConnectionProfile || '';
+    renderOverseerConversation();
+    renderOverseerActions();
 }
 
-function insertContextIntoOpenClawPrompt() {
-    const { prompt } = getOpenClawEls();
-    if (!prompt) return;
+// ---- Per-turn Connection Profile switch --------------------------------
+//
+// Both Overseer and Utility generations temporarily swap SillyTavern's
+// *global* Connection Profile, so they share a single serialization queue
+// (`connectionProfileQueue`) — otherwise an Overseer turn and a Utility
+// generation could race and restore each other's "previous" profile,
+// leaving the user on the wrong model.
+//
+// `withOverseerProfile()` and `withUtilityProfile()` both delegate to
+// `runWithConnectionProfile()` so every switch/run/restore cycle is
+// atomic across the whole extension.
+
+let connectionProfileQueue = Promise.resolve();
+
+async function runWithConnectionProfile(profileId, fn, label = 'connection-profile') {
+    if (!profileId) return fn();
+
+    const run = async () => {
+        const ctx = getContext();
+        let previousProfileId = null;
+
+        const profileSelect = document.querySelector('#connection_profiles, #connection_profile');
+        if (profileSelect) previousProfileId = profileSelect.value;
+
+        try {
+            if (typeof ctx.setConnectionProfile === 'function') {
+                await ctx.setConnectionProfile(profileId);
+                await new Promise(r => setTimeout(r, 500));
+            } else if (profileSelect) {
+                profileSelect.value = profileId;
+                profileSelect.dispatchEvent(new Event('change'));
+                await new Promise(r => setTimeout(r, 500));
+            }
+        } catch (e) {
+            console.warn(`[${EXT}] ${label}: profile switch failed`, e);
+        }
+
+        try {
+            return await fn();
+        } finally {
+            await new Promise(r => setTimeout(r, 500));
+            if (previousProfileId) {
+                try {
+                    if (typeof ctx.setConnectionProfile === 'function') {
+                        await ctx.setConnectionProfile(previousProfileId);
+                        await new Promise(r => setTimeout(r, 500));
+                    } else if (profileSelect) {
+                        profileSelect.value = previousProfileId;
+                        profileSelect.dispatchEvent(new Event('change'));
+                    }
+                } catch (e) {
+                    console.warn(`[${EXT}] ${label}: profile restore failed`, e);
+                }
+            }
+        }
+    };
+
+    const next = connectionProfileQueue.then(run, run);
+    connectionProfileQueue = next.catch(() => {});
+    return next;
+}
+
+async function withOverseerProfile(fn) {
+    return runWithConnectionProfile(getOverseerConnectionProfileId(), fn, 'withOverseerProfile');
+}
+
+// ---- Agent turn (native generation via generateQuietPrompt) -----------
+
+function buildOverseerSystemPrompt(mode) {
     const ctx = getContext();
-    const lines = getRecentMessages().map(message => `${message.name}: ${message.text}`);
-    const block = [
-        `Mode: ${settings.openclawMode || 'assist'}`,
-        `Chat ID: ${currentChatId()}`,
-        `Character ID: ${ctx.characterId}`,
-        `Group ID: ${ctx.groupId}`,
+    const header = [
+        'You are Overseer, an operator-side AI agent embedded in a SillyTavern phone UI called Command-X.',
+        'You have read access to the current RP chat context and — via registered function tools — to local phone state (contacts, quests, places) and to SillyTavern slash commands.',
+        `Current mode: ${mode}. Current chat ID: ${currentChatId()}. Character ID: ${ctx.characterId ?? 'n/a'}. Group ID: ${ctx.groupId ?? 'n/a'}.`,
         '',
-        ...lines,
+        'Rules:',
+        '- Be concise. Answer the operator\'s question directly before offering follow-ups.',
+        '- Do NOT roleplay as any character. You are a tool, not part of the narrative.',
+        '- Only use tools when they materially help. Never fabricate tool output.',
+    ];
+    if (mode === 'operate') {
+        header.push(
+            '',
+            'OPERATE MODE:',
+            'If you want to execute local SillyTavern actions, emit a JSON envelope at the very end of your reply:',
+            '[command-x-operate]',
+            '{"kind":"command-x/operate/v1","summary":"short plain-English summary","actions":[{"id":"a1","type":"slash.run","title":"Short title","command":"/echo hello","reason":"why this helps"}]}',
+            '[/command-x-operate]',
+            'Only slash.run actions with commands starting with "/" are accepted. The operator approves or rejects each one manually.',
+        );
+    }
+    return header.join('\n');
+}
+
+function buildOverseerQuietPrompt(userPrompt, mode) {
+    const lines = getRecentMessages().map(m => `${m.isUser ? 'USER' : m.name}: ${m.text}`);
+    return [
+        buildOverseerSystemPrompt(mode),
+        '',
+        '--- Recent chat context (read-only) ---',
+        ...(lines.length ? lines : ['(no chat history)']),
+        '',
+        '--- Operator prompt ---',
+        userPrompt,
     ].join('\n');
-    prompt.value = prompt.value ? `${prompt.value}\n\n${block}` : block;
-    setOpenClawStatus('Inserted current SillyTavern context.');
 }
 
-async function checkOpenClawHealth() {
-    setOpenClawStatus('Checking bridge health...');
-    const data = await callOpenClawBridge('/health');
-    appendOpenClawLog('HEALTH', JSON.stringify(data, null, 2));
-    setOpenClawStatus(`Bridge healthy: ${data.version}`);
-}
-
-async function refreshOpenClawSessionStatus() {
-    setOpenClawStatus('Checking session status...');
-    const chatState = getOpenClawChatState();
-    const params = new URLSearchParams({
-        chatId: currentChatId(),
-        resetNonce: String(chatState.resetNonce || 0),
-    });
-    const data = await callOpenClawBridge(`/session/status?${params.toString()}`);
-    saveOpenClawChatState({ lastSessionId: data.sessionId });
-    syncOpenClawView();
-    appendOpenClawLog('SESSION STATUS', JSON.stringify(data, null, 2));
-    setOpenClawStatus(data.sessionFound ? `Session ready: ${data.sessionId} (existing)` : `Session ready: ${data.sessionId}`);
-}
-
-async function sendToOpenClaw() {
-    const { prompt } = getOpenClawEls();
-    const ctx = getContext();
-    const userPrompt = String(prompt?.value || '').trim();
+async function sendToOverseer() {
+    const { input } = getOverseerEls();
+    const userPrompt = String(input?.value || '').trim();
     if (!userPrompt) {
-        setOpenClawStatus('Write a prompt first.');
+        setOverseerStatus('Write a prompt first.');
         return;
     }
 
-    const chatState = getOpenClawChatState();
-    setOpenClawStatus('Sending to OpenClaw...');
-
-    const data = await callOpenClawBridge('/session/message', {
-        method: 'POST',
-        body: {
-            mode: settings.openclawMode || 'assist',
-            chatId: currentChatId(),
-            characterId: ctx.characterId,
-            groupId: ctx.groupId,
-            resetNonce: chatState.resetNonce || 0,
-            userPrompt,
-            recentMessages: getRecentMessages(),
-        },
-    });
-
-    const envelope = applyOpenClawResponse(data, 'OPENCLAW RESULT', settings.openclawMode || 'assist');
-    setOpenClawStatus(envelope ? `OpenClaw proposed ${envelope.actions.length} local action(s).` : `OpenClaw replied on ${data.sessionId}.`);
-}
-
-async function sendOpenClawOperateReceipt(userPrompt, logTitle) {
     const ctx = getContext();
-    const chatState = getOpenClawChatState();
-    const data = await callOpenClawBridge('/session/message', {
-        method: 'POST',
-        body: {
-            mode: 'operate',
-            chatId: currentChatId(),
-            characterId: ctx.characterId,
-            groupId: ctx.groupId,
-            resetNonce: chatState.resetNonce || 0,
-            userPrompt,
-            recentMessages: getRecentMessages(),
-        },
-    });
-    return applyOpenClawResponse(data, logTitle, 'operate');
+    if (typeof ctx.generateQuietPrompt !== 'function') {
+        setOverseerStatus('This SillyTavern build does not expose generateQuietPrompt.');
+        return;
+    }
+
+    appendOverseerTurn('user', userPrompt);
+    if (input) input.value = '';
+    const mode = settings.overseerMode || 'assist';
+    setOverseerStatus(`Thinking… (mode: ${mode})`);
+
+    try {
+        const reply = await withOverseerProfile(() => ctx.generateQuietPrompt({
+            quietPrompt: buildOverseerQuietPrompt(userPrompt, mode),
+            skipWIAN: true,
+        }));
+        const replyText = String(reply || '').trim();
+
+        const envelope = mode === 'operate' ? parseOverseerOperateEnvelope(replyText) : null;
+        // Strip the envelope from the shown reply so the user sees clean prose.
+        const displayedReply = envelope
+            ? replyText.replace(/\[command-x-operate\][\s\S]*?\[\/command-x-operate\]/gi, '').trim()
+            : replyText;
+
+        saveOverseerChatState({
+            lastReply: replyText,
+            lastOperateEnvelope: envelope,
+        });
+        appendOverseerTurn('agent', displayedReply || '(empty reply)');
+        renderOverseerActions();
+        appendOverseerLog('OVERSEER REPLY', JSON.stringify({
+            mode,
+            operateEnvelope: envelope,
+            reply: replyText,
+        }, null, 2));
+        setOverseerStatus(envelope
+            ? `Overseer proposed ${envelope.actions.length} local action(s).`
+            : 'Overseer replied.');
+    } catch (error) {
+        const msg = String(error?.message || error);
+        appendOverseerLog('OVERSEER ERROR', msg);
+        setOverseerStatus(`Error: ${msg}`);
+    }
 }
 
-async function resetOpenClawSession() {
-    const state = getOpenClawChatState();
-    const nextNonce = Number(state.resetNonce || 0) + 1;
-    const data = await callOpenClawBridge('/session/reset', {
-        method: 'POST',
-        body: {
-            chatId: currentChatId(),
-            resetNonce: nextNonce,
-        },
-    });
-    saveOpenClawChatState({
-        resetNonce: nextNonce,
-        lastSessionId: data.sessionId,
-        lastReply: '',
-        lastOperateEnvelope: null,
-    });
-    syncOpenClawView();
-    appendOpenClawLog('SESSION RESET', JSON.stringify(data, null, 2));
-    setOpenClawStatus(`Switched to ${data.sessionId}.`);
-}
-
-async function executeOpenClawSlashCommand(text) {
+async function executeOverseerSlashCommand(text) {
     return getContext().executeSlashCommandsWithOptions(text, {
         handleExecutionErrors: true,
-        source: 'command-x-openclaw',
+        source: 'command-x-overseer',
     });
 }
 
-async function approveOpenClawAction(actionId) {
-    const chatState = getOpenClawChatState();
+async function approveOverseerAction(actionId) {
+    const chatState = getOverseerChatState();
     const envelope = chatState.lastOperateEnvelope;
     const action = envelope?.actions?.find(item => item.id === actionId);
     if (!action || action.status !== 'pending') return;
 
     action.status = 'running';
     action.receipt = 'Executing locally...';
-    saveOpenClawChatState({ lastOperateEnvelope: envelope });
-    syncOpenClawView();
-    setOpenClawStatus(`Running ${action.command}`);
+    saveOverseerChatState({ lastOperateEnvelope: envelope });
+    renderOverseerActions();
+    setOverseerStatus(`Running ${action.command}`);
 
     try {
-        const result = await executeOpenClawSlashCommand(action.command);
-        const receipt = formatOpenClawResult(result);
+        const result = await executeOverseerSlashCommand(action.command);
+        const receipt = formatOverseerResult(result);
         action.status = 'approved';
         action.receipt = `Approved and executed.\n\n${receipt}`;
-        saveOpenClawChatState({ lastOperateEnvelope: envelope });
-        syncOpenClawView();
-        appendOpenClawLog('OPERATE ACTION APPROVED', JSON.stringify({ actionId, command: action.command, receipt }, null, 2));
-        const followUp = await sendOpenClawOperateReceipt([
-            `Action receipt for ${action.id}:`,
-            `- decision: approved`,
-            `- type: ${action.type}`,
-            `- command: ${action.command}`,
-            '- result:',
-            receipt,
-        ].join('\n'), 'OPERATE FOLLOW-UP');
-        setOpenClawStatus(followUp ? 'Action executed. OpenClaw sent a follow-up proposal.' : 'Action executed. OpenClaw received the result.');
+        saveOverseerChatState({ lastOperateEnvelope: envelope });
+        renderOverseerActions();
+        appendOverseerLog('ACTION APPROVED', JSON.stringify({ actionId, command: action.command, receipt }, null, 2));
+        appendOverseerTurn('tool', `Ran ${action.command}\n\n${receipt}`, { toolName: 'slash.run' });
+        setOverseerStatus('Action executed.');
     } catch (error) {
         const receipt = String(error?.message || error);
         action.status = 'failed';
         action.receipt = `Execution failed.\n\n${receipt}`;
-        saveOpenClawChatState({ lastOperateEnvelope: envelope });
-        syncOpenClawView();
-        appendOpenClawLog('OPERATE ACTION ERROR', JSON.stringify({ actionId, command: action.command, error: receipt }, null, 2));
-        const followUp = await sendOpenClawOperateReceipt([
-            `Action receipt for ${action.id}:`,
-            `- decision: approved`,
-            `- type: ${action.type}`,
-            `- command: ${action.command}`,
-            '- outcome: execution_error',
-            '- error:',
-            receipt,
-        ].join('\n'), 'OPERATE FOLLOW-UP');
-        setOpenClawStatus(followUp ? 'Execution failed. OpenClaw proposed a next step.' : 'Execution failed. OpenClaw received the error.');
+        saveOverseerChatState({ lastOperateEnvelope: envelope });
+        renderOverseerActions();
+        appendOverseerLog('ACTION ERROR', JSON.stringify({ actionId, command: action.command, error: receipt }, null, 2));
+        appendOverseerTurn('tool', `Error running ${action.command}: ${receipt}`, { toolName: 'slash.run' });
+        setOverseerStatus(`Execution failed: ${receipt}`);
     }
 }
 
-async function rejectOpenClawAction(actionId) {
-    const chatState = getOpenClawChatState();
+async function rejectOverseerAction(actionId) {
+    const chatState = getOverseerChatState();
     const envelope = chatState.lastOperateEnvelope;
     const action = envelope?.actions?.find(item => item.id === actionId);
     if (!action || action.status !== 'pending') return;
 
     action.status = 'rejected';
     action.receipt = 'Rejected locally. Command was not run.';
-    saveOpenClawChatState({ lastOperateEnvelope: envelope });
-    syncOpenClawView();
-    appendOpenClawLog('OPERATE ACTION REJECTED', JSON.stringify({ actionId, command: action.command }, null, 2));
-    setOpenClawStatus('Action rejected. Sending receipt back to OpenClaw...');
-    const followUp = await sendOpenClawOperateReceipt([
-        `Action receipt for ${action.id}:`,
-        '- decision: rejected',
-        `- type: ${action.type}`,
-        `- command: ${action.command}`,
-        '- note: The local operator rejected this action and it was not executed.',
-    ].join('\n'), 'OPERATE FOLLOW-UP');
-    setOpenClawStatus(followUp ? 'Action rejected. OpenClaw proposed an alternative.' : 'Action rejected. OpenClaw received the rejection.');
+    saveOverseerChatState({ lastOperateEnvelope: envelope });
+    renderOverseerActions();
+    appendOverseerLog('ACTION REJECTED', JSON.stringify({ actionId, command: action.command }, null, 2));
+    appendOverseerTurn('tool', `Rejected ${action.command}`, { toolName: 'slash.run' });
+    setOverseerStatus('Action rejected.');
 }
 
-async function runOpenClawSlashLocally() {
-    const { prompt } = getOpenClawEls();
-    const text = String(prompt?.value || '').trim();
+async function runOverseerSlashLocally() {
+    const { input } = getOverseerEls();
+    const text = String(input?.value || '').trim();
     if (!text.startsWith('/')) {
-        setOpenClawStatus('Local action expects a slash command starting with /.');
+        setOverseerStatus('Local action expects a slash command starting with /.');
         return;
     }
 
     try {
-        const result = await executeOpenClawSlashCommand(text);
-        appendOpenClawLog('LOCAL SLASH', `${text}\n\n${formatOpenClawResult(result)}`);
-        setOpenClawStatus('Ran slash command locally.');
+        const result = await executeOverseerSlashCommand(text);
+        const receipt = formatOverseerResult(result);
+        appendOverseerLog('LOCAL SLASH', `${text}\n\n${receipt}`);
+        appendOverseerTurn('tool', `${text}\n\n${receipt}`, { toolName: 'slash.run' });
+        setOverseerStatus('Ran slash command locally.');
     } catch (error) {
-        appendOpenClawLog('LOCAL SLASH ERROR', String(error?.message || error));
-        setOpenClawStatus(String(error?.message || error));
+        const msg = String(error?.message || error);
+        appendOverseerLog('LOCAL SLASH ERROR', msg);
+        setOverseerStatus(msg);
     }
 }
 
-function clearOpenClawPrompt() {
-    const { prompt } = getOpenClawEls();
-    if (prompt) prompt.value = '';
-    setOpenClawStatus('Cleared prompt.');
+function clearOverseerInput() {
+    const { input } = getOverseerEls();
+    if (input) input.value = '';
+    setOverseerStatus('Cleared.');
 }
+
+function insertContextIntoOverseerPrompt() {
+    const { input } = getOverseerEls();
+    if (!input) return;
+    const ctx = getContext();
+    const lines = getRecentMessages().map(message => `${message.name}: ${message.text}`);
+    const block = [
+        `Mode: ${settings.overseerMode || 'assist'}`,
+        `Chat ID: ${currentChatId()}`,
+        `Character ID: ${ctx.characterId}`,
+        `Group ID: ${ctx.groupId}`,
+        '',
+        ...lines,
+    ].join('\n');
+    input.value = input.value ? `${input.value}\n\n${block}` : block;
+    setOverseerStatus('Inserted current SillyTavern context.');
+}
+
+async function resetOverseerSession() {
+    const state = getOverseerChatState();
+    const nextNonce = Number(state.resetNonce || 0) + 1;
+    saveOverseerChatState({
+        resetNonce: nextNonce,
+        lastReply: '',
+        lastOperateEnvelope: null,
+        conversation: [],
+    });
+    syncOverseerView();
+    setOverseerStatus('Conversation cleared.');
+}
+
+// ---- Native function-tool registration ---------------------------------
+//
+// Registers a small, safe set of tools through ST's built-in function-calling
+// system. They're globally registered (ST requires this) but gated via
+// `shouldRegister` so they only appear to the model when:
+//   (a) the extension is enabled,
+//   (b) the Overseer app is the active phone app, and
+//   (c) the user has enabled overseer tools in settings.
+//
+// File-system read/write tools are NOT registered in this PR — those ship
+// with the MCP client integration (planned PR-2) and will additionally be
+// gated behind an explicit user allow-list.
+
+let overseerToolsRegistered = false;
+
+function overseerToolsShouldRegister() {
+    // Intentional scoping: Overseer's tools only surface to the model while
+    // the user is actively on the Overseer app. This keeps the tools out of
+    // normal RP generations (where they'd be noise / context cost) and
+    // matches the mental model that Overseer is a discrete "open the app,
+    // have a conversation, close the app" session. If the user navigates
+    // away mid-turn the current generation still completes normally — ST
+    // evaluates shouldRegister when it builds each request, not mid-stream.
+    return !!(settings?.enabled
+        && settings?.overseerToolsEnabled === true
+        && currentApp === 'overseer');
+}
+
+function registerOverseerTools() {
+    if (overseerToolsRegistered) return;
+    const ctx = getContext();
+    if (typeof ctx.registerFunctionTool !== 'function') {
+        console.info(`[${EXT}] registerFunctionTool not available on this ST build; Overseer tools disabled.`);
+        return;
+    }
+
+    const tools = [
+        {
+            name: 'overseer_get_recent_messages',
+            displayName: 'Overseer: Recent Chat Messages',
+            description: 'Return the last handful of messages from the current SillyTavern chat (operator + characters). Use to orient yourself before answering questions about the RP.',
+            parameters: { type: 'object', properties: {}, additionalProperties: false },
+            action: async () => {
+                try { return JSON.stringify(getRecentMessages()); }
+                catch (e) { return `Error: ${e?.message || e}`; }
+            },
+            formatMessage: () => 'Overseer read recent chat messages.',
+        },
+        {
+            name: 'overseer_list_contacts',
+            displayName: 'Overseer: List Phone Contacts',
+            description: 'List all phone contacts currently known to Command-X (operator characters, group members, and NPC status entries).',
+            parameters: { type: 'object', properties: {}, additionalProperties: false },
+            action: async () => {
+                try {
+                    const contacts = (typeof getContactsFromContext === 'function') ? getContactsFromContext() : [];
+                    return JSON.stringify(contacts.map(c => ({
+                        name: c.name,
+                        source: c.source,
+                        status: c.status,
+                        mood: c.mood,
+                        location: c.location,
+                        relationship: c.relationship,
+                    })));
+                } catch (e) { return `Error: ${e?.message || e}`; }
+            },
+            formatMessage: () => 'Overseer listed phone contacts.',
+        },
+        {
+            name: 'overseer_list_quests',
+            displayName: 'Overseer: List Quests',
+            description: 'List all tracked quests for the current chat, including status and priority.',
+            parameters: { type: 'object', properties: {}, additionalProperties: false },
+            action: async () => {
+                try {
+                    const quests = (typeof loadQuests === 'function') ? loadQuests() : [];
+                    return JSON.stringify(quests);
+                } catch (e) { return `Error: ${e?.message || e}`; }
+            },
+            formatMessage: () => 'Overseer listed quests.',
+        },
+        {
+            name: 'overseer_list_places',
+            displayName: 'Overseer: List Known Places',
+            description: 'List all places registered with the Map app for the current chat.',
+            parameters: { type: 'object', properties: {}, additionalProperties: false },
+            action: async () => {
+                try {
+                    const places = (typeof loadPlaces === 'function') ? loadPlaces() : [];
+                    return JSON.stringify(places);
+                } catch (e) { return `Error: ${e?.message || e}`; }
+            },
+            formatMessage: () => 'Overseer listed known places.',
+        },
+        {
+            name: 'overseer_list_characters',
+            displayName: 'Overseer: List ST Characters',
+            description: 'List the SillyTavern character cards currently loaded into the app (names only).',
+            parameters: { type: 'object', properties: {}, additionalProperties: false },
+            action: async () => {
+                try {
+                    const characters = Array.isArray(ctx.characters) ? ctx.characters : [];
+                    return JSON.stringify(characters.map(c => c?.name).filter(Boolean));
+                } catch (e) { return `Error: ${e?.message || e}`; }
+            },
+            formatMessage: () => 'Overseer listed SillyTavern characters.',
+        },
+        {
+            name: 'overseer_run_slash',
+            displayName: 'Overseer: Run Slash Command',
+            description: 'Execute a SillyTavern slash command locally and return its output. The command MUST start with "/". Use sparingly — destructive commands cannot be undone.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    command: {
+                        type: 'string',
+                        description: 'A full SillyTavern slash command, e.g. "/echo hello" or "/getvar foo".',
+                    },
+                },
+                required: ['command'],
+                additionalProperties: false,
+            },
+            action: async ({ command } = {}) => {
+                const text = String(command || '').trim();
+                if (!text.startsWith('/')) return 'Error: command must start with "/".';
+                try {
+                    const result = await executeOverseerSlashCommand(text);
+                    const receipt = formatOverseerResult(result);
+                    appendOverseerLog('TOOL slash.run', `${text}\n\n${receipt}`);
+                    appendOverseerTurn('tool', `${text}\n\n${receipt}`, { toolName: 'slash.run' });
+                    return receipt;
+                } catch (e) {
+                    const msg = String(e?.message || e);
+                    appendOverseerLog('TOOL slash.run ERROR', `${text}\n\n${msg}`);
+                    return `Error: ${msg}`;
+                }
+            },
+            formatMessage: (args) => `Overseer ran slash: ${args?.command || '(none)'}`,
+        },
+    ];
+
+    for (const tool of tools) {
+        try {
+            ctx.registerFunctionTool({
+                ...tool,
+                shouldRegister: overseerToolsShouldRegister,
+            });
+        } catch (e) {
+            console.warn(`[${EXT}] Failed to register Overseer tool ${tool.name}`, e);
+        }
+    }
+    overseerToolsRegistered = true;
+}
+
 
 /* ======================================================================
    COMPOSE QUEUE — batch multiple texts before sending to LLM
@@ -1898,72 +2212,20 @@ function parseQuestEnrichmentResponse(raw) {
     }
 }
 
-let utilityProfileQueue = Promise.resolve();
-
 /**
  * Switch to the user-configured utility Connection Profile (if any), run fn(),
  * then restore the original profile.  Mirrors the approach used by ScenePulse.
  * If no utility profile is configured, fn() runs on the current profile.
  *
- * Calls are serialized via a shared promise queue so that concurrent utility
- * generations (quest enrichment, auto-poll, contact scan) never interleave
- * their profile switches/restores.
+ * Delegates to the shared `runWithConnectionProfile()` helper so utility and
+ * Overseer generations share a single serialization queue — they both swap
+ * the same global profile, so they must never overlap.
  *
  * @param {Function} fn  Async callback to execute under the utility profile.
  * @returns {*} Whatever fn() returns.
  */
 async function withUtilityProfile(fn) {
-    const profileId = settings.utilityConnectionProfile || '';
-    if (!profileId) return fn();
-
-    const run = async () => {
-        const ctx = getContext();
-        let previousProfileId = null;
-
-        // ── Capture current profile ──────────────────────────────────────────
-        const profileSelect = document.querySelector('#connection_profiles, #connection_profile');
-        if (profileSelect) previousProfileId = profileSelect.value;
-
-        // ── Switch to utility profile ────────────────────────────────────────
-        try {
-            if (typeof ctx.setConnectionProfile === 'function') {
-                await ctx.setConnectionProfile(profileId);
-                await new Promise(r => setTimeout(r, 500));
-            } else if (profileSelect) {
-                profileSelect.value = profileId;
-                profileSelect.dispatchEvent(new Event('change'));
-                await new Promise(r => setTimeout(r, 500));
-            }
-        } catch (e) {
-            console.warn(`[${EXT}] withUtilityProfile: profile switch failed`, e);
-        }
-
-        // ── Run the utility generation ───────────────────────────────────────
-        try {
-            return await fn();
-        } finally {
-            // Restore original profile after a short delay so ST event handlers
-            // triggered by the profile switch have time to settle.
-            await new Promise(r => setTimeout(r, 500));
-            if (previousProfileId) {
-                try {
-                    if (typeof ctx.setConnectionProfile === 'function') {
-                        await ctx.setConnectionProfile(previousProfileId);
-                        await new Promise(r => setTimeout(r, 500));
-                    } else if (profileSelect) {
-                        profileSelect.value = previousProfileId;
-                        profileSelect.dispatchEvent(new Event('change'));
-                    }
-                } catch (e) {
-                    console.warn(`[${EXT}] withUtilityProfile: profile restore failed`, e);
-                }
-            }
-        }
-    };
-
-    const task = utilityProfileQueue.then(run, run);
-    utilityProfileQueue = task.catch(() => {});
-    return task;
+    return runWithConnectionProfile(settings.utilityConnectionProfile || '', fn, 'withUtilityProfile');
 }
 
 async function enrichQuestDraftIfNeeded(draft) {
@@ -3608,9 +3870,9 @@ function buildPhone() {
                     <div class="cx-icon-img cx-icon-map">🧭</div>
                     <div class="cx-icon-label">Map</div>
                 </div>
-                <div class="cx-app-icon" data-app="openclaw" role="button" tabindex="0" aria-label="Open OpenClaw app">
-                    <div class="cx-icon-img cx-icon-openclaw">🦞</div>
-                    <div class="cx-icon-label">OpenClaw</div>
+                <div class="cx-app-icon" data-app="overseer" role="button" tabindex="0" aria-label="Open Overseer app">
+                    <div class="cx-icon-img cx-icon-overseer">👁️</div>
+                    <div class="cx-icon-label">Overseer</div>
                 </div>
                 <div class="cx-app-icon" data-app="phone-settings" role="button" tabindex="0" aria-label="Open Settings">
                     <div class="cx-icon-img cx-icon-settings">⚙️</div>
@@ -3781,57 +4043,55 @@ function buildPhone() {
             </div>
         </div>
 
-        <!-- OpenClaw View -->
-        <div class="cx-view" data-view="openclaw">
-            <div class="cx-openclaw-header">
-                <div class="cx-openclaw-title">OpenClaw</div>
-                <div class="cx-openclaw-sub">Bridge console inside Command-X</div>
+        <!-- Overseer View -->
+        <div class="cx-view" data-view="overseer">
+            <div class="cx-overseer-header">
+                <div class="cx-overseer-title">Overseer</div>
+                <div class="cx-overseer-sub">Operator-side agent · its own Connection Profile · function tools</div>
             </div>
-            <div class="cx-openclaw-body">
-                <label class="cx-openclaw-field">
-                    <span>Mode</span>
-                    <select id="cx-ocb-mode">
-                        <option value="observe">observe</option>
-                        <option value="assist">assist</option>
-                        <option value="operate">operate</option>
-                    </select>
-                </label>
-                <div class="cx-openclaw-actions cx-openclaw-actions-tight">
-                    <button id="cx-ocb-health">Health</button>
-                    <button id="cx-ocb-session-btn">Session</button>
-                    <button id="cx-ocb-reset">Reset</button>
+            <div class="cx-overseer-body">
+                <div class="cx-overseer-controls">
+                    <label class="cx-overseer-field">
+                        <span>Mode</span>
+                        <select id="cx-ovr-mode">
+                            <option value="observe">observe</option>
+                            <option value="assist">assist</option>
+                            <option value="operate">operate</option>
+                        </select>
+                    </label>
+                    <label class="cx-overseer-field">
+                        <span>Connection Profile</span>
+                        <select id="cx-ovr-profile">
+                            <option value="">— use main chat model —</option>
+                            ${buildConnectionProfileOptions(settings.overseerConnectionProfile)}
+                        </select>
+                    </label>
                 </div>
-                <div class="cx-openclaw-status" id="cx-ocb-status">Ready.</div>
-                <div class="cx-openclaw-meta">
+                <div class="cx-overseer-status" id="cx-ovr-status">Ready.</div>
+                <div class="cx-overseer-conversation" id="cx-ovr-conversation">
+                    <div class="cx-overseer-empty">No conversation yet. Send a prompt to begin.</div>
+                </div>
+                <textarea id="cx-ovr-input" placeholder="Ask Overseer about the current chat, describe a task, or paste a slash command to run locally."></textarea>
+                <div class="cx-overseer-actions">
+                    <button id="cx-ovr-insert">Insert context</button>
+                    <button id="cx-ovr-send" class="cx-overseer-primary">Send</button>
+                </div>
+                <div class="cx-overseer-actions">
+                    <button id="cx-ovr-slash">Run slash locally</button>
+                    <button id="cx-ovr-clear">Clear input</button>
+                    <button id="cx-ovr-reset">Reset conversation</button>
+                </div>
+                <div class="cx-overseer-meta">
                     <div>
-                        <span class="cx-openclaw-meta-label">Session</span>
-                        <pre id="cx-ocb-session">(not used yet)</pre>
-                    </div>
-                    <div>
-                        <span class="cx-openclaw-meta-label">Last reply</span>
-                        <pre id="cx-ocb-reply">(no reply yet)</pre>
-                    </div>
-                </div>
-                <textarea id="cx-ocb-prompt" placeholder="Ask OpenClaw about the current chat, or paste a SillyTavern slash command to run locally."></textarea>
-                <div class="cx-openclaw-actions">
-                    <button id="cx-ocb-insert">Insert context</button>
-                    <button id="cx-ocb-send" class="cx-openclaw-primary">Send</button>
-                </div>
-                <div class="cx-openclaw-actions">
-                    <button id="cx-ocb-slash">Run slash locally</button>
-                    <button id="cx-ocb-clear">Clear</button>
-                </div>
-                <div class="cx-openclaw-meta">
-                    <div>
-                        <span class="cx-openclaw-meta-label">Proposed actions</span>
-                        <div class="cx-openclaw-action-state" id="cx-ocb-actions-state">Switch to operate mode to receive actionable proposals.</div>
-                        <div id="cx-ocb-actions-list"><div class="cx-openclaw-empty">No pending local actions.</div></div>
+                        <span class="cx-overseer-meta-label">Proposed actions</span>
+                        <div class="cx-overseer-action-state" id="cx-ovr-actions-state">Switch to operate mode to receive actionable proposals.</div>
+                        <div id="cx-ovr-actions-list"><div class="cx-overseer-empty">No pending local actions.</div></div>
                     </div>
                 </div>
-                <pre id="cx-ocb-log"></pre>
+                <pre id="cx-ovr-log"></pre>
             </div>
             <div class="cx-navbar">
-                <div class="cx-nav active"><div class="cx-nav-ico">🦞</div><div class="cx-nav-lbl">OpenClaw</div></div>
+                <div class="cx-nav active"><div class="cx-nav-ico">👁️</div><div class="cx-nav-lbl">Overseer</div></div>
                 <div class="cx-nav" data-goto="home" role="button" tabindex="0" aria-label="Go to home screen"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
             </div>
         </div>
@@ -4535,12 +4795,12 @@ function wirePhone() {
     phoneContainer.querySelectorAll('.cx-app-icon[data-app]').forEach(icon =>
         icon.addEventListener('click', () => {
             const app = icon.dataset.app;
-            if (app === 'cmdx' || app === 'profiles' || app === 'quests' || app === 'openclaw' || app === 'phone-settings' || app === 'map') {
+            if (app === 'cmdx' || app === 'profiles' || app === 'quests' || app === 'overseer' || app === 'phone-settings' || app === 'map') {
                 currentApp = app;
                 switchView(app);
-                if (app === 'openclaw') {
-                    syncOpenClawView();
-                    setOpenClawStatus('Ready.');
+                if (app === 'overseer') {
+                    syncOverseerView();
+                    setOverseerStatus('Ready.');
                 }
             }
         })
@@ -4623,27 +4883,32 @@ function wirePhone() {
             rebuildPhone();
         }
     });
-    phoneContainer.querySelector('#cx-ocb-mode')?.addEventListener('change', (e) => {
-        settings.openclawMode = e.target.value;
+    phoneContainer.querySelector('#cx-ovr-mode')?.addEventListener('change', (e) => {
+        settings.overseerMode = e.target.value;
         saveSettings();
-        setOpenClawStatus(`Mode set: ${settings.openclawMode}`);
+        setOverseerStatus(`Mode set: ${settings.overseerMode}`);
     });
-    phoneContainer.querySelector('#cx-ocb-health')?.addEventListener('click', () => checkOpenClawHealth().catch(error => setOpenClawStatus(String(error?.message || error))));
-    phoneContainer.querySelector('#cx-ocb-session-btn')?.addEventListener('click', () => refreshOpenClawSessionStatus().catch(error => setOpenClawStatus(String(error?.message || error))));
-    phoneContainer.querySelector('#cx-ocb-send')?.addEventListener('click', () => sendToOpenClaw().catch(error => setOpenClawStatus(String(error?.message || error))));
-    phoneContainer.querySelector('#cx-ocb-reset')?.addEventListener('click', () => resetOpenClawSession().catch(error => setOpenClawStatus(String(error?.message || error))));
-    phoneContainer.querySelector('#cx-ocb-insert')?.addEventListener('click', insertContextIntoOpenClawPrompt);
-    phoneContainer.querySelector('#cx-ocb-slash')?.addEventListener('click', runOpenClawSlashLocally);
-    phoneContainer.querySelector('#cx-ocb-clear')?.addEventListener('click', clearOpenClawPrompt);
-    phoneContainer.querySelector('#cx-ocb-actions-list')?.addEventListener('click', (event) => {
-        const approveId = event.target?.closest?.('[data-ocb-approve]')?.dataset?.ocbApprove;
-        const rejectId = event.target?.closest?.('[data-ocb-reject]')?.dataset?.ocbReject;
+    phoneContainer.querySelector('#cx-ovr-profile')?.addEventListener('change', (e) => {
+        settings.overseerConnectionProfile = e.target.value || '';
+        saveSettings();
+        setOverseerStatus(settings.overseerConnectionProfile
+            ? `Overseer profile: ${settings.overseerConnectionProfile}`
+            : 'Overseer profile cleared — using main chat model.');
+    });
+    phoneContainer.querySelector('#cx-ovr-send')?.addEventListener('click', () => sendToOverseer().catch(error => setOverseerStatus(String(error?.message || error))));
+    phoneContainer.querySelector('#cx-ovr-reset')?.addEventListener('click', () => resetOverseerSession().catch(error => setOverseerStatus(String(error?.message || error))));
+    phoneContainer.querySelector('#cx-ovr-insert')?.addEventListener('click', insertContextIntoOverseerPrompt);
+    phoneContainer.querySelector('#cx-ovr-slash')?.addEventListener('click', runOverseerSlashLocally);
+    phoneContainer.querySelector('#cx-ovr-clear')?.addEventListener('click', clearOverseerInput);
+    phoneContainer.querySelector('#cx-ovr-actions-list')?.addEventListener('click', (event) => {
+        const approveId = event.target?.closest?.('[data-ovr-approve]')?.dataset?.ovrApprove;
+        const rejectId = event.target?.closest?.('[data-ovr-reject]')?.dataset?.ovrReject;
         if (approveId) {
-            approveOpenClawAction(approveId).catch(error => setOpenClawStatus(String(error?.message || error)));
+            approveOverseerAction(approveId).catch(error => setOverseerStatus(String(error?.message || error)));
             return;
         }
         if (rejectId) {
-            rejectOpenClawAction(rejectId).catch(error => setOpenClawStatus(String(error?.message || error)));
+            rejectOverseerAction(rejectId).catch(error => setOverseerStatus(String(error?.message || error)));
         }
     });
     phoneContainer.querySelectorAll('[data-cx-edit]').forEach(btn =>
@@ -4939,7 +5204,7 @@ function createPanel() {
         }
     });
     wirePhone();
-    syncOpenClawView();
+    syncOverseerView();
     updateUnreadBadges();
 }
 
@@ -4955,12 +5220,13 @@ function rebuildPhone() {
         saveSettings();
     });
     wirePhone();
-    syncOpenClawView();
+    syncOverseerView();
     if (savedContact && savedApp) {
         openChat(savedContact, savedApp, true);
-    } else if (savedApp === 'openclaw') {
-        switchView('openclaw');
-        setOpenClawStatus('Ready.');
+    } else if (savedApp === 'overseer' || savedApp === 'openclaw') {
+        currentApp = 'overseer';
+        switchView('overseer');
+        setOverseerStatus('Ready.');
     } else if (savedApp) {
         switchView(savedApp);
     }
@@ -5013,9 +5279,14 @@ function loadSettings() {
     cb('cx_ext_track_locations', 'trackLocations', true);
     cb('cx_ext_auto_register_places', 'autoRegisterPlaces', true);
     cb('cx_ext_show_trails', 'showLocationTrails', true);
-    if (!["observe", "assist", "operate"].includes(settings.openclawMode)) settings.openclawMode = 'assist';
-    const openclawMode = document.getElementById('cx_ext_openclaw_mode');
-    if (openclawMode) openclawMode.value = settings.openclawMode || 'assist';
+    cb('cx_ext_overseer_tools_enabled', 'overseerToolsEnabled', false);
+    // ── Overseer mode (new key). Back-compat: migrate from legacy `openclawMode` on first load. ──
+    if (!settings.overseerMode && settings.openclawMode) settings.overseerMode = settings.openclawMode;
+    if (!["observe", "assist", "operate"].includes(settings.overseerMode)) settings.overseerMode = 'assist';
+    // Keep legacy mirror in sync so very old UI references still work until removed.
+    settings.openclawMode = settings.overseerMode;
+    const overseerModeEl = document.getElementById('cx_ext_overseer_mode');
+    if (overseerModeEl) overseerModeEl.value = settings.overseerMode || 'assist';
     const contactsN = document.getElementById('cx_ext_contacts_every_n');
     if (contactsN) contactsN.value = Math.max(1, Number(settings.contactsInjectEveryN) || 1);
     const questsN = document.getElementById('cx_ext_quests_every_n');
@@ -5039,6 +5310,20 @@ function loadSettings() {
         }
         utilityProfileEl.value = settings.utilityConnectionProfile || '';
     }
+    // Overseer connection profile — populate the ST side panel select if present
+    const overseerProfileEl = document.getElementById('cx_ext_overseer_profile');
+    if (overseerProfileEl) {
+        while (overseerProfileEl.options.length > 1) overseerProfileEl.remove(1);
+        const profileCtx = getContext();
+        const profiles = (typeof profileCtx.getConnectionProfiles === 'function') ? (profileCtx.getConnectionProfiles() || []) : [];
+        for (const p of profiles) {
+            const opt = document.createElement('option');
+            opt.value = p.id || p.name || '';
+            opt.textContent = p.name || p.id || 'Unknown';
+            overseerProfileEl.appendChild(opt);
+        }
+        overseerProfileEl.value = settings.overseerConnectionProfile || '';
+    }
 }
 
 function saveSettings() {
@@ -5048,7 +5333,9 @@ function saveSettings() {
     settings.batchMode = document.getElementById('cx_ext_batch_mode')?.checked ?? settings.batchMode ?? false;
     settings.autoDetectNpcs = document.getElementById('cx_ext_auto_detect_npcs')?.checked ?? settings.autoDetectNpcs ?? true;
     settings.manualHybridPrivateTexts = document.getElementById('cx_set_private_hybrid')?.checked ?? document.getElementById('cx-set-private-hybrid')?.checked ?? settings.manualHybridPrivateTexts ?? true;
-    settings.openclawMode = document.getElementById('cx_ext_openclaw_mode')?.value || settings.openclawMode || 'assist';
+    settings.overseerMode = document.getElementById('cx_ext_overseer_mode')?.value || settings.overseerMode || 'assist';
+    settings.openclawMode = settings.overseerMode; // legacy mirror
+    settings.overseerToolsEnabled = document.getElementById('cx_ext_overseer_tools_enabled')?.checked ?? settings.overseerToolsEnabled ?? false;
     settings.trackLocations = document.getElementById('cx_ext_track_locations')?.checked ?? document.getElementById('cx-set-track-locations')?.checked ?? settings.trackLocations ?? true;
     settings.autoRegisterPlaces = document.getElementById('cx_ext_auto_register_places')?.checked ?? document.getElementById('cx-set-auto-places')?.checked ?? settings.autoRegisterPlaces ?? true;
     settings.showLocationTrails = document.getElementById('cx_ext_show_trails')?.checked ?? document.getElementById('cx-set-trails')?.checked ?? settings.showLocationTrails ?? true;
@@ -5064,6 +5351,9 @@ function saveSettings() {
     // cx_ext_utility_profile = ST side panel; cx-set-utility-profile = in-phone settings view
     const utilityProfileRaw = document.getElementById('cx_ext_utility_profile')?.value ?? document.getElementById('cx-set-utility-profile')?.value;
     if (utilityProfileRaw !== undefined) settings.utilityConnectionProfile = utilityProfileRaw || '';
+    // cx_ext_overseer_profile = ST side panel; cx-ovr-profile = in-phone Overseer view
+    const overseerProfileRaw = document.getElementById('cx_ext_overseer_profile')?.value ?? document.getElementById('cx-ovr-profile')?.value;
+    if (overseerProfileRaw !== undefined) settings.overseerConnectionProfile = overseerProfileRaw || '';
     const ctx = getContext();
     ctx.extensionSettings[EXT] = { ...settings };
     ctx.saveSettingsDebounced();
@@ -5084,7 +5374,9 @@ jQuery(async () => {
 
         loadSettings();
         refreshPrivatePhonePrompt();
-        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_openclaw_mode, #cx_ext_contacts_every_n, #cx_ext_quests_every_n, #cx_ext_auto_private_poll_n, #cx_ext_track_locations, #cx_ext_auto_register_places, #cx_ext_show_trails, #cx_ext_map_every_n, #cx_ext_utility_profile').on('change', () => {
+        // Register Overseer native function-calling tools (once per page load).
+        try { registerOverseerTools(); } catch (e) { console.warn(`[${EXT}] registerOverseerTools failed`, e); }
+        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_overseer_mode, #cx_ext_overseer_profile, #cx_ext_overseer_tools_enabled, #cx_ext_contacts_every_n, #cx_ext_quests_every_n, #cx_ext_auto_private_poll_n, #cx_ext_track_locations, #cx_ext_auto_register_places, #cx_ext_show_trails, #cx_ext_map_every_n, #cx_ext_utility_profile').on('change', () => {
             saveSettings();
             if (settings.enabled) {
                 createPanel();

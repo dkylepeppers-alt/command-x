@@ -78,3 +78,31 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 _Newest entries first. Append a new entry here at the end of every PR._
 
 <!-- Add new entries above this line using the template in "How to Use This File". -->
+
+### 2026-04-22 — `copilot/overhaul-openclaw-app` · Overhauled OpenClaw → Overseer agent (v0.13.0)
+
+**What changed:**
+- Renamed the `openclaw` app → **`overseer`** everywhere (IDs, CSS classes, element IDs, app id, home icon, navbar label, view name, data-app key). New icon is 👁️.
+- Removed the `/api/plugins/openclaw-bridge` HTTP dependency entirely (`OPENCLAW_API_BASE`, `callOpenClawBridge`, `checkOpenClawHealth`, `refreshOpenClawSessionStatus` all gone).
+- Overseer now talks to its **own SillyTavern Connection Profile** via `ctx.generateQuietPrompt()` under a new `withOverseerProfile()` helper, which delegates to a shared `runWithConnectionProfile()` helper. `withUtilityProfile()` was refactored to delegate to the same helper, so both share a **single module-wide `connectionProfileQueue`** — they cannot race each other on the global ST profile.
+- Added a new `overseer` conversation UI: chat-style user↔agent bubbles, persisted per-chat in `chatMetadata[EXT].overseer.conversation[]` (cap 200).
+- Registered native ST function-calling tools via `ctx.registerFunctionTool` with a `shouldRegister` gate (`settings.enabled && settings.overseerToolsEnabled && currentApp === 'overseer'`): `overseer_get_recent_messages`, `overseer_list_contacts`, `overseer_list_quests`, `overseer_list_places`, `overseer_list_characters`, `overseer_run_slash`.
+- Kept the `[command-x-operate]` envelope loop (renamed `parseOverseerOperateEnvelope`) as the fallback path for models without native tool calling — still uses Approve/Reject cards and `executeSlashCommandsWithOptions`.
+- New settings: `overseerMode`, `overseerConnectionProfile`, `overseerToolsEnabled`. Legacy `openclawMode` is mirrored from `overseerMode` for forward/backward compatibility. Legacy `chatMetadata[EXT].openclaw` auto-migrates to `.overseer` on first read.
+- Updated `manifest.json` version `0.12.0` → `0.13.0` and rewrote the description.
+- Updated `README.md`, `CLAUDE.md`, `.github/copilot-instructions.md` for the rename + new architecture.
+- Added 6 new test cases for `parseOverseerOperateEnvelope` in `test/helpers.test.mjs` (72 tests total, all passing).
+
+**Non-obvious facts / gotchas:**
+- `escapeHtml()` was introduced in the new Overseer block; the repo already had distinct `escHtml()` and `escAttr()` helpers around line 3073 used by other renderers. Don't consolidate them — `escapeHtml()` only escapes characters, while `escHtml()` also converts `\n` → `<br>`. The Overseer conversation renderer intentionally does not replace newlines because it relies on CSS `white-space: pre-wrap`.
+- Function-calling tools are registered **once per page load** via `registerOverseerTools()`. They are not re-registered on settings change; the `shouldRegister` gate is re-evaluated by ST each turn, so toggling `overseerToolsEnabled` works without a reload.
+- `withOverseerProfile()` and `withUtilityProfile()` both delegate to `runWithConnectionProfile()`, which uses a single module-wide serialization queue (`connectionProfileQueue`). This is intentional: both swap the same global ST profile, and separate queues would let them race and restore each other's "previous" profile. Quest enrichment, auto-poll, contact scan, and Overseer turns therefore all serialize against each other when a profile switch is involved.
+- `overseerToolsEnabled` **defaults to `false`** (opt-in) because the `overseer_run_slash` tool can execute arbitrary ST slash commands with no approval UI in between. The `shouldRegister` gate compares `=== true` so undefined/missing values never accidentally turn it on.
+- The Overseer view's Connection Profile `<select>` exists in **two** places: inline in the ST side panel (`#cx_ext_overseer_profile`) and inside the phone's Overseer app (`#cx-ovr-profile`). Both write to `settings.overseerConnectionProfile` and both are rehydrated in `loadSettings()`.
+- Legacy `openclawMode` setting is kept in `DEFAULTS` and mirrored from `overseerMode` in both `loadSettings()` and `saveSettings()`. Safe to remove once users are past v0.13.
+
+**Follow-ups / open questions:**
+- **PR-2 (MCP filesystem integration):** Vendor (or require as prerequisite) `bmen25124/SillyTavern-MCP-Client` + `SillyTavern-MCP-Server`, wire `@modelcontextprotocol/server-filesystem` scoped to the ST install, then register `overseer_read_file` / `overseer_write_file` / `overseer_list_directory` tools behind an explicit per-chat allow-list + per-tool policy (`auto`/`confirm`/`deny`) with a destructive-action diff preview. Add an audit log pane that reuses the existing `#cx-ovr-log`.
+- Consider exposing `overseer_send_as_system` / `overseer_send_as_user` as write-back tools so the agent can inject messages into the current ST chat (currently it can only read and run slashes).
+- Consider a streaming variant of `sendToOverseer()` — `generateQuietPrompt()` is synchronous/awaited here, so long replies show up as a single bubble after the full generation completes.
+
