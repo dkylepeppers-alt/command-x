@@ -340,7 +340,7 @@
 .cx-pf-value { color: #ccc; flex: 1; }
 .cx-pf-italic { font-style: italic; color: #999; }
 .cx-icon-profiles { background: linear-gradient(135deg, #5856D6, #AF52DE) !important; }
-.cx-icon-openclaw { background: linear-gradient(135deg, #0ea5e9, #2563eb) !important; }
+.cx-icon-overseer { background: linear-gradient(135deg, #0ea5e9, #2563eb) !important; }
 
 /* ---- Settings view ---- */
 .cx-settings-header {
@@ -772,66 +772,66 @@
 
 
 /* ---- OpenClaw app ---- */
-.cx-openclaw-header {
+.cx-overseer-header {
     padding: 14px 16px 8px; flex-shrink: 0;
     background: rgba(20,20,25,.95);
     border-bottom: 1px solid rgba(255,255,255,.08);
 }
-.cx-openclaw-title { font-size: 20px; font-weight: 700; color: #fff; }
-.cx-openclaw-sub { font-size: 11px; color: #888; margin-top: 2px; }
-.cx-openclaw-body {
+.cx-overseer-title { font-size: 20px; font-weight: 700; color: #fff; }
+.cx-overseer-sub { font-size: 11px; color: #888; margin-top: 2px; }
+.cx-overseer-body {
     flex: 1; overflow-y: auto; min-height: 0; padding: 12px;
     display: flex; flex-direction: column; gap: 10px;
     -webkit-overflow-scrolling: touch;
 }
-.cx-openclaw-field {
+.cx-overseer-field {
     display: flex; flex-direction: column; gap: 6px;
     font-size: 12px; color: #aaa;
 }
-.cx-openclaw-field select,
-#cx-ocb-prompt,
-.cx-openclaw-actions button {
+.cx-overseer-field select,
+#cx-ovr-prompt,
+.cx-overseer-actions button {
     border-radius: 10px;
     border: 1px solid rgba(255,255,255,.08);
     background: rgba(30,30,35,.92);
     color: #ddd;
 }
-.cx-openclaw-field select {
+.cx-overseer-field select {
     padding: 10px 12px;
     font-size: 14px;
 }
-.cx-openclaw-actions {
+.cx-overseer-actions {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px;
 }
-.cx-openclaw-actions-tight {
+.cx-overseer-actions-tight {
     grid-template-columns: repeat(3, minmax(0, 1fr));
 }
-.cx-openclaw-actions button {
+.cx-overseer-actions button {
     padding: 10px 12px;
     font-size: 12px;
 }
-.cx-openclaw-primary {
+.cx-overseer-primary {
     background: linear-gradient(135deg, #0ea5e9, #2563eb) !important;
     color: #fff !important;
 }
-.cx-openclaw-status {
+.cx-overseer-status {
     font-size: 12px; color: #7dd3fc;
     background: rgba(14,165,233,.08);
     border-left: 3px solid #0ea5e9;
     padding: 8px 10px;
 }
-.cx-openclaw-meta {
+.cx-overseer-meta {
     display: grid; gap: 8px;
 }
-.cx-openclaw-meta > div {
+.cx-overseer-meta > div {
     background: rgba(30,30,35,.72);
     border: 1px solid rgba(255,255,255,.06);
     border-radius: 12px;
     padding: 10px;
 }
-.cx-openclaw-meta-label {
+.cx-overseer-meta-label {
     display: block;
     font-size: 10px;
     color: #888;
@@ -839,26 +839,26 @@
     letter-spacing: .8px;
     margin-bottom: 4px;
 }
-.cx-openclaw-meta pre,
-#cx-ocb-log {
+.cx-overseer-meta pre,
+#cx-ovr-log {
     margin: 0;
     white-space: pre-wrap;
     word-break: break-word;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
-.cx-openclaw-meta pre {
+.cx-overseer-meta pre {
     color: #ddd;
     font-size: 11px;
     max-height: 90px;
     overflow-y: auto;
 }
-#cx-ocb-prompt {
+#cx-ovr-prompt {
     min-height: 130px;
     padding: 10px 12px;
     resize: vertical;
     font: inherit;
 }
-#cx-ocb-log {
+#cx-ovr-log {
     min-height: 120px;
     max-height: 180px;
     overflow-y: auto;
@@ -867,23 +867,23 @@
     color: #9ca3af;
     background: rgba(10,10,15,.95);
 }
-.cx-openclaw-action-state {
+.cx-overseer-action-state {
     font-size: 12px;
     color: #cbd5e1;
     margin-bottom: 10px;
 }
-#cx-ocb-actions-list {
+#cx-ovr-actions-list {
     display: flex;
     flex-direction: column;
     gap: 10px;
 }
-.cx-openclaw-action-card {
+.cx-overseer-action-card {
     border: 1px solid rgba(255,255,255,.08);
     border-radius: 12px;
     background: rgba(10,10,15,.55);
     padding: 10px;
 }
-.cx-openclaw-action-head {
+.cx-overseer-action-head {
     display: flex;
     justify-content: space-between;
     gap: 8px;
@@ -891,13 +891,13 @@
     margin-bottom: 8px;
     color: #fff;
 }
-.cx-openclaw-action-type {
+.cx-overseer-action-type {
     font-size: 10px;
     letter-spacing: .7px;
     text-transform: uppercase;
     color: #7dd3fc;
 }
-.cx-openclaw-action-command {
+.cx-overseer-action-command {
     margin: 0 0 8px;
     padding: 8px 10px;
     border-radius: 10px;
@@ -905,21 +905,62 @@
     color: #e5e7eb;
     font-size: 11px;
 }
-.cx-openclaw-action-reason,
-.cx-openclaw-action-receipt,
-.cx-openclaw-empty {
+.cx-overseer-action-reason,
+.cx-overseer-action-receipt,
+.cx-overseer-empty {
     font-size: 11px;
     color: #cbd5e1;
     white-space: pre-wrap;
     word-break: break-word;
 }
-.cx-openclaw-action-receipt {
+.cx-overseer-action-receipt {
     margin: 8px 0 10px;
     color: #93c5fd;
 }
-.cx-openclaw-empty {
+.cx-overseer-empty {
     color: #94a3b8;
 }
+
+/* Overseer agent conversation (v0.13) */
+.cx-overseer-controls {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+}
+.cx-overseer-conversation {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 260px;
+    overflow-y: auto;
+    padding: 8px;
+    border-radius: 12px;
+    background: rgba(10,10,15,.55);
+    border: 1px solid rgba(255,255,255,.06);
+}
+.cx-overseer-turn {
+    padding: 8px 10px;
+    border-radius: 10px;
+    background: rgba(30,30,35,.72);
+    border: 1px solid rgba(255,255,255,.06);
+    font-size: 12px;
+    color: #ddd;
+}
+.cx-overseer-turn-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .6px;
+    color: #7dd3fc;
+    margin-bottom: 4px;
+}
+.cx-overseer-turn-body {
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.cx-overseer-turn-user { border-left: 3px solid #2563eb; }
+.cx-overseer-turn-agent { border-left: 3px solid #7c3aed; }
+.cx-overseer-turn-tool { border-left: 3px solid #0ea5e9; color: #93c5fd; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.cx-overseer-turn-system { border-left: 3px solid #94a3b8; color: #cbd5e1; }
 
 .cx-profiles-actions { margin-top: 10px; display: flex; justify-content: flex-end; }
 .cx-profile-actions { display: flex; gap: 6px; margin: 0 0 10px; flex-wrap: wrap; }

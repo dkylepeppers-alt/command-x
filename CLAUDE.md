@@ -4,7 +4,7 @@
 
 ## What This Is
 
-A SillyTavern third-party extension (v0.10.0) that adds a smartphone UI overlay to RP chats. Five apps: **Command-X** (neural commands + unified messaging), **Profiles** (NPC intel cards), **Quests** (persistent story tracker), **OpenClaw** (bridge console), and **Settings**. Messages flow through the RP — the extension injects system prompts so the LLM wraps phone replies in `[sms]` tags, which get extracted for the phone UI.
+A SillyTavern third-party extension (v0.13.0) that adds a smartphone UI overlay to RP chats. Six apps: **Command-X** (neural commands + unified messaging), **Profiles** (NPC intel cards), **Quests** (persistent story tracker), **Overseer** (in-phone agent with its own Connection Profile + registered function-calling tools — replaces the v0.10–0.12 OpenClaw bridge console), **Map** (contact locations), and **Settings**. Messages flow through the RP — the extension injects system prompts so the LLM wraps phone replies in `[sms]` tags, which get extracted for the phone UI.
 
 ## File Layout
 
@@ -74,8 +74,10 @@ LLM RESPONDS:
 ```javascript
 // --- Module-level ---
 settings            // {enabled, styleCommands, showLockscreen, panelOpen, batchMode,
-                    //  autoDetectNpcs, manualHybridPrivateTexts, openclawMode,
-                    //  contactsInjectEveryN, questsInjectEveryN}
+                    //  autoDetectNpcs, manualHybridPrivateTexts, overseerMode,
+                    //  overseerConnectionProfile, overseerToolsEnabled,
+                    //  contactsInjectEveryN, questsInjectEveryN,
+                    //  utilityConnectionProfile, ...legacy openclawMode mirror}
 phoneContainer      // HTMLElement | null — wrapper div injected into body
 clockIntervalId     // setInterval ID — cleared in destroyPanel() + wirePhone()
 commandMode         // null | 'COMMAND' | 'BELIEVE' | 'FORGET' | 'COMPEL'
@@ -90,7 +92,7 @@ _historyContactNamesCache // { chatId, names } — invalidated on write
 _lastMsgTsCache     // Map<`${chatId}::${name}` → timestamp>
 
 // --- Interaction-level (set in wirePhone / event handlers) ---
-currentApp          // 'cmdx' | 'profiles' | 'quests' | 'openclaw' | 'phone-settings' | null
+currentApp          // 'cmdx' | 'profiles' | 'quests' | 'overseer' | 'phone-settings' | 'map' | null
 currentContactName  // Name of the contact whose chat is open
 awaitingReply       // true after sending, false when [sms] received or timeout
 typingTimeout       // setTimeout ID for the 30s awaitingReply cleanup
@@ -140,20 +142,36 @@ Flow:
 
 Requires ST build that exposes `generateQuietPrompt`. Gated by `settings.manualHybridPrivateTexts`.
 
-## OpenClaw Operate Mode
+## Overseer Agent (v0.13+, replaces OpenClaw)
 
-OpenClaw is a bridge to a local `openclaw-bridge` ST server plugin. Three modes:
+Overseer is an in-phone interactive agent with **its own Connection Profile** and **native function-calling tools**. It talks to the LLM via `ctx.generateQuietPrompt()` under `withOverseerProfile()` (serialized profile switch/restore, mirroring `withUtilityProfile()`), then parses the reply and renders it as a chat bubble in the Overseer view.
+
+Three modes:
 - **observe** — Read-only context inspection
 - **assist** — Advice / planning over the current chat
-- **operate** — OpenClaw proposes `slash.run` actions; the user approves/rejects each before local execution
+- **operate** — Overseer proposes `slash.run` actions in a `[command-x-operate]` JSON envelope; the user approves/rejects each before local execution
 
-Operate flow (`settings.openclawMode === 'operate'`):
-1. User sends context to OpenClaw via the OpenClaw app
-2. `sendToOpenClaw()` POSTs to `/api/plugins/openclaw-bridge/operate`
-3. Response contains an `actions[]` array of proposed slash commands
-4. `applyOpenClawResponse()` renders each action as an approval card
-5. On approve: card calls `executeApprovedAction()` which runs the slash via ST `/run`
+Operate flow (`settings.overseerMode === 'operate'`):
+1. User types a prompt in the Overseer app
+2. `sendToOverseer()` calls `ctx.generateQuietPrompt({ quietPrompt, skipWIAN })` under `withOverseerProfile()`
+3. Reply is scanned for `[command-x-operate]...{"kind":"command-x/operate/v1","actions":[...]}...[/command-x-operate]` via `parseOverseerOperateEnvelope()`
+4. `renderOverseerActions()` renders each approved slash command as an approval card
+5. On approve: `approveOverseerAction()` executes via `ctx.executeSlashCommandsWithOptions()`
 6. On reject: action is discarded, no side effects
+
+Function tools registered via `ctx.registerFunctionTool` (gated by `overseerToolsShouldRegister`, which requires `settings.enabled && settings.overseerToolsEnabled && currentApp === 'overseer'`):
+- `overseer_get_recent_messages` — last ~12 ST chat messages
+- `overseer_list_contacts` / `overseer_list_quests` / `overseer_list_places` — phone state readers
+- `overseer_list_characters` — ST character-card names
+- `overseer_run_slash` — executes a slash command (string starting with `/`) and returns the receipt
+
+Per-chat state lives in `chatMetadata[EXT].overseer`:
+- `conversation: []` — array of `{role, text, timestamp, toolName?}` turns (capped at 200)
+- `lastReply: string`
+- `lastOperateEnvelope: {kind, summary, actions[]} | null`
+- `resetNonce: number` — bumped by **Reset conversation**
+
+Legacy: on first read, `chatMetadata[EXT].openclaw` is migrated into `.overseer`. Settings field `openclawMode` is kept as a mirror of `overseerMode` for backwards compat but is otherwise unused. The old `/api/plugins/openclaw-bridge` server plugin is **no longer required or called**.
 
 ## SillyTavern APIs Used
 
@@ -247,3 +265,5 @@ Manual integration testing (no automated browser tests):
 - **v0.8** — Unified Messages + Command-X, subliminal neural commands, user persona filter, neural toggle, `[sms from/to]` routing, swipe/regen handling
 - **v0.9** — Compose queue (batch mode), notification badges, `[status]` tag (replaces `[contacts]`), Profiles app, Settings app, toast notifications, recency sort, ST character avatars, dead app cleanup
 - **v0.10.0** — Quests app, OpenClaw app, `[quests]` tag, private polling, quest enrichment via `generateQuietPrompt`, per-chat metadata persistence, comprehensive code review (security escaping, CSP-safe avatar fallback, clock-leak fix, event-gate on `settings.enabled`, `MESSAGE_DELETED` mesId fix, `[sms]` routing tightened, caches, upload size cap, throttled injections, unit tests, accessibility, `cxAlert`/`cxConfirm`, toast improvements, send-button guard)
+- **v0.11.0 / v0.12.0** — Map app + `[place]` tag, utility Connection Profile for background utility generations
+- **v0.13.0** — **Overseer agent** replaces the OpenClaw bridge console. Overseer talks to its own Connection Profile via `generateQuietPrompt` and registers native ST function-calling tools (slash_run, recent messages, phone-state readers) through `ctx.registerFunctionTool`. Removed the `/api/plugins/openclaw-bridge` HTTP dependency. Persisted `chatMetadata[EXT].openclaw` auto-migrates to `.overseer`. Filesystem (read/write/list) tools via an MCP client integration are slated for the next release.

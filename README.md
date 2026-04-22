@@ -9,7 +9,7 @@ Messages flow through the RP naturally. The extension uses prompt injection so t
 ### 📱 Phone UI
 - **Realistic phone shell** — Notch, bezel, status bar, home indicator
 - **Lock screen → Home screen → Apps** — Navigate like a real phone
-- **Five apps:** Command-X (neural messaging), Profiles (contact intel), Quests (persistent story goals), OpenClaw (bridge console), Settings
+- **Five apps:** Command-X (neural messaging), Profiles (contact intel), Quests (persistent story goals), Overseer (in-phone agent with its own Connection Profile + tool calling), Map, Settings
 
 ### 💬 Messaging
 - **iMessage-style chat bubbles** — Sent (blue), received (dark gray), neural commands (pink/purple glow)
@@ -58,12 +58,20 @@ Messages flow through the RP naturally. The extension uses prompt injection so t
 6. Map images are stored locally per ST chat (`localStorage`) and are **never uploaded to the LLM** or any server.
 
 
-### 🦞 OpenClaw App
-- **Native bridge console** — Uses the existing `openclaw-bridge` backend from inside the Command-X phone UI
-- **Per-chat session controls** — Health, session inspect, reset, and send actions stay scoped to the current ST chat
-- **Context-aware prompts** — One tap inserts recent SillyTavern context before sending to OpenClaw
-- **Operate action loop (phase 1)** — OpenClaw can propose `slash.run` actions, which are then approved/rejected locally in Command-X before execution
-- **Local slash fallback** — Run SillyTavern slash commands locally from the same operator surface
+### 👁️ Overseer App (v0.13+)
+The Overseer app replaces the former `OpenClaw` bridge console. It is a first-class **interactive agent** embedded in the phone UI, with no external server-plugin dependency.
+
+- **Its own Connection Profile** — Set a dedicated SillyTavern Connection Profile for Overseer in either the ST side panel or the in-phone Overseer view. Every Overseer turn is generated under that profile (via `generateQuietPrompt`), then restored to your chat model; switches are serialized through an internal queue so they never interleave with the Utility profile.
+- **Native function-calling tools** — When used with a tool-capable model (OpenAI, Anthropic, Gemini, OpenRouter tool profiles, or local models with tool grammars) and with "Enable function calling" on in your sampler settings, the agent can call these ST-registered tools directly:
+  - `overseer_get_recent_messages` — read the last ~12 chat messages
+  - `overseer_list_contacts` — read the phone's contact intel
+  - `overseer_list_quests` — read the Quests app
+  - `overseer_list_places` — read the Map app
+  - `overseer_list_characters` — list loaded ST character cards
+  - `overseer_run_slash` — execute a SillyTavern slash command (use sparingly)
+- **Operate-mode fallback** — For models without native tool calling, the agent can still emit a `[command-x-operate]` JSON envelope proposing slash.run actions; each one appears in the UI as an Approve/Reject card before anything runs.
+- **Conversation history** — User↔agent turns are persisted per chat in `chatMetadata.command-x.overseer.conversation` (cap 200 turns).
+- **Filesystem access** — Read/write/list tools scoped to the ST install are planned for an upcoming PR that layers in an MCP (Model Context Protocol) client + filesystem server. Not in v0.13.
 
 ### 🔍 Profiles App (Contact Intel)
 - **Character state tracking** — The LLM reports present-character status via `[status]` tags (mood, location, relationship, inner monologue)
@@ -103,8 +111,8 @@ git clone https://github.com/dkylepeppers-alt/command-x.git
 ```
 Refresh SillyTavern.
 
-### OpenClaw app dependency
-The in-phone **OpenClaw** app requires the local `openclaw-bridge` SillyTavern server plugin/backend to be present and enabled. The Command-X repo contains the native phone UI for that bridge, but not the bridge backend itself.
+### Overseer app (no external dependencies)
+The in-phone **Overseer** app is self-contained — it uses SillyTavern's built-in `generateQuietPrompt` and `registerFunctionTool` APIs. The old `openclaw-bridge` server plugin is **no longer required or used**; if you have it installed you can safely disable or remove it.
 
 ## Usage
 
@@ -113,7 +121,7 @@ The in-phone **OpenClaw** app requires the local `openclaw-bridge` SillyTavern s
 3. Tap a contact to chat
 4. **Messages app** — Normal texting
 5. **Command-X app** — Neural commands (use the drawer buttons or the ⚡ toggle)
-6. **OpenClaw app** — Operator bridge tools for the current chat
+6. **Overseer app** — Operator-side agent tools for the current chat
    - **Observe** = read-only context inspection
    - **Assist** = advice/planning over current chat context
    - **Operate** = propose local `slash.run` actions for approval, then execute them locally if approved
@@ -147,19 +155,19 @@ Requirements:
 - A SillyTavern build that exposes `generateQuietPrompt()` (v1.12.10+)
 - **Private hybrid texts** enabled in the in-phone Settings app
 
-### OpenClaw Operate Mode
+### Overseer Operate Mode
 
-The OpenClaw app connects to an optional `openclaw-bridge` backend plugin and offers three escalating modes:
+The Overseer app offers three escalating modes:
 
 | Mode | What it does |
 |------|-------------|
-| **Observe** | Sends the current ST chat context to OpenClaw for read-only analysis |
-| **Assist** | OpenClaw responds with advice, plans, or narrative suggestions (streamed into the console) |
-| **Operate** | OpenClaw proposes a list of SillyTavern slash commands (`/echo`, `/setvar`, etc.); you see each proposed action as an **Approve / Reject** card before anything runs |
+| **Observe** | Passes recent ST chat context to the Overseer agent for read-only analysis |
+| **Assist** | Overseer responds with advice, plans, or narrative suggestions (shown as a chat bubble) |
+| **Operate** | Overseer proposes a list of SillyTavern slash commands (`/echo`, `/setvar`, etc.) in a `[command-x-operate]` envelope; each proposal becomes an **Approve / Reject** card before anything runs |
 
-The operate approval loop ensures no side-effects happen without user confirmation. Each approved action is executed locally via SillyTavern's slash-command runner.
+The operate approval loop ensures no side-effects happen without user confirmation. Each approved action is executed locally via SillyTavern's slash-command runner. Tool-capable models can also use the registered `overseer_*` function tools (including `overseer_run_slash`) directly, without going through the envelope.
 
-The **OpenClaw** app requires the `openclaw-bridge` server plugin. The Command-X repo ships the phone UI only; the backend is a separate component.
+Five apps: **Command-X** (neural messaging), **Profiles**, **Quests**, **Overseer** (agent), **Map**, **Settings**.
 
 ### Tag Reference
 

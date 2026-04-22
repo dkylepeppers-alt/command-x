@@ -365,3 +365,90 @@ describe('extractQuests', () => {
         assert.deepEqual(result, []);
     });
 });
+
+/* ===== Overseer operate-envelope parser ===== */
+
+function parseOverseerOperateEnvelope(reply, envelopeFromBridge = null) {
+    const raw = envelopeFromBridge || (() => {
+        const match = String(reply || '').match(/\[command-x-operate\]\s*([\s\S]*?)\s*\[\/command-x-operate\]/i);
+        if (!match) return null;
+        try { return JSON.parse(match[1]); } catch { return null; }
+    })();
+
+    if (!raw || raw.kind !== 'command-x/operate/v1' || !Array.isArray(raw.actions)) return null;
+    const actions = raw.actions
+        .map((action, index) => ({
+            id: String(action?.id || `action-${index + 1}`),
+            type: String(action?.type || ''),
+            title: String(action?.title || action?.type || `Action ${index + 1}`),
+            command: String(action?.command || '').trim(),
+            reason: String(action?.reason || '').trim(),
+            status: 'pending',
+            receipt: '',
+        }))
+        .filter(action => action.type === 'slash.run' && action.command.startsWith('/'));
+
+    if (!actions.length) return null;
+    return {
+        kind: raw.kind,
+        summary: String(raw.summary || '').trim(),
+        actions,
+    };
+}
+
+describe('parseOverseerOperateEnvelope', () => {
+    it('returns null when no envelope is present', () => {
+        assert.equal(parseOverseerOperateEnvelope('just a plain reply, nothing here'), null);
+    });
+    it('parses a valid envelope with a single slash.run action', () => {
+        const reply = [
+            'Here is my plan.',
+            '[command-x-operate]',
+            JSON.stringify({
+                kind: 'command-x/operate/v1',
+                summary: 'Echo hello',
+                actions: [
+                    { id: 'a1', type: 'slash.run', title: 'Echo', command: '/echo hello', reason: 'demo' },
+                ],
+            }),
+            '[/command-x-operate]',
+        ].join('\n');
+        const env = parseOverseerOperateEnvelope(reply);
+        assert.ok(env);
+        assert.equal(env.kind, 'command-x/operate/v1');
+        assert.equal(env.summary, 'Echo hello');
+        assert.equal(env.actions.length, 1);
+        assert.equal(env.actions[0].command, '/echo hello');
+        assert.equal(env.actions[0].status, 'pending');
+    });
+    it('drops actions that do not start with a slash', () => {
+        const env = parseOverseerOperateEnvelope('[command-x-operate]' +
+            JSON.stringify({
+                kind: 'command-x/operate/v1',
+                actions: [
+                    { id: 'a1', type: 'slash.run', command: 'echo hi' },
+                    { id: 'a2', type: 'slash.run', command: '/echo ok' },
+                ],
+            }) + '[/command-x-operate]');
+        assert.ok(env);
+        assert.equal(env.actions.length, 1);
+        assert.equal(env.actions[0].id, 'a2');
+    });
+    it('returns null when kind is wrong', () => {
+        const env = parseOverseerOperateEnvelope('[command-x-operate]' +
+            JSON.stringify({ kind: 'other', actions: [{ type: 'slash.run', command: '/echo' }] }) +
+            '[/command-x-operate]');
+        assert.equal(env, null);
+    });
+    it('returns null when all actions are filtered out', () => {
+        const env = parseOverseerOperateEnvelope('[command-x-operate]' +
+            JSON.stringify({
+                kind: 'command-x/operate/v1',
+                actions: [{ id: 'a1', type: 'http.get', command: 'https://example.com' }],
+            }) + '[/command-x-operate]');
+        assert.equal(env, null);
+    });
+    it('returns null on malformed JSON in the envelope', () => {
+        assert.equal(parseOverseerOperateEnvelope('[command-x-operate]not json[/command-x-operate]'), null);
+    });
+});
