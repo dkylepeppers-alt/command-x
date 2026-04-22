@@ -45,13 +45,13 @@ add project-specific text per profile rather than shipping it here.
 
 ## Installing
 
-### Option A — Install from the Command-X extension
+### Option A — Install from the Command-X extension *(planned, not yet shipped)*
 
-The Command-X settings panel ships an **"Install Command-X Chat Completion
-preset"** button (Nova rollout, §11). It calls
-`ctx.executeSlashCommandsWithOptions('/preset-import …')` when available, or
-falls back to `POST /api/presets/save`. After install, open **AI Response
-Configuration → Chat Completion presets** and select **Command-X**.
+A future Nova rollout (plan §11b) adds an **"Install Command-X Chat
+Completion preset"** button to the Command-X settings panel that will call
+`ctx.executeSlashCommandsWithOptions('/preset-import …')` — or fall back to
+`POST /api/presets/save` — and select the preset automatically. Until that
+button ships, use **Option B** below.
 
 ### Option B — Import manually
 

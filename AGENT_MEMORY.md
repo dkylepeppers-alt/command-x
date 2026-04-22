@@ -111,7 +111,10 @@ future Nova code has a stable settings shape; added `test/nova-preset.test.mjs`.
   with no plugin — that's the path Nova will use in Phase 6.
 - **Running tests**: `node --test test/helpers.test.mjs test/nova-preset.test.mjs`
   works reliably. `node --test 'test/*.test.mjs'` (with the glob quoted) works
-  as a one-liner. Bare `node --test test/` does something weird — avoid.
+  as a one-liner. **Do not** run bare `node --test test/` — passing a directory
+  arg causes node's test runner to misinterpret it as a single test entrypoint
+  and fail with a cryptic top-level `✖ test` before discovering any of the
+  actual `*.test.mjs` files. Always pass explicit filenames or a quoted glob.
 - **`DEFAULTS.nova` shape** is stable and documented in the plan §7b: `{
   profileName, defaultTier, maxToolCalls, turnTimeoutMs, pluginBaseUrl,
   rememberApprovalsSession, activeSkill }`. Phase 2+ code should read from
