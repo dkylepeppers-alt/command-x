@@ -160,4 +160,64 @@ future Nova code has a stable settings shape; added `test/nova-preset.test.mjs`.
 - Phase 8 (`nova-agent-bridge` server plugin) is fully independent and can
   land in parallel — nothing in the extension depends on it at init time.
 
+### 2026-04-23 — Nova phase 3a/6c pure-helper sprint (PR #16)
+
+**Context:** Shipped the pure-helper slice of Phase 3 (Agent Loop state
+schema) and Phase 6 (prompt composition) without touching turn lifecycle,
+tool registry, or LLM calls. Also fixed the `settings.nova` shallow-merge
+gap flagged in the previous review.
+
+**Notes for future agents:**
+- **`settings.nova` is now hydrated defensively** in `loadSettings()`:
+  ```js
+  settings.nova = { ...NOVA_DEFAULTS, ...(settings.nova || {}) };
+  ```
+  This runs right after the `LEGACY_KEYS` migration block. When Phase 3 adds
+  new keys to `NOVA_DEFAULTS`, existing users auto-pick them up without a
+  manual settings reset. Do **not** revert this to a shallow `Object.assign`.
+- **New `/* === NOVA AGENT === */` section in `index.js`** between the
+  command-styling block and the `SETTINGS` section (just above
+  `function loadSettings`). All pure Nova helpers go here. Turn-lifecycle
+  code (with DOM/LLM side effects) will land in the same section later.
+- **Nova state lives in `ctx.chatMetadata[EXT].nova`** under the key
+  `NOVA_STATE_KEY = 'nova'`. Shape is `{ sessions, activeSessionId,
+  auditLog }`. Caps are `NOVA_SESSION_CAP = 20` and `NOVA_AUDIT_CAP = 500`.
+  `getNovaState(ctx)` returns an empty ephemeral state if chatMetadata is
+  missing — callers can read from it safely even before the first chat
+  loads. It also heals legacy blobs missing individual fields (e.g.
+  `sessions: 'not-an-array'`).
+- **Persistence is through `ctx.saveMetadataDebounced()`**, wrapped by
+  `saveNovaState(ctx)`. Helpers mutate in place; callers must invoke
+  `saveNovaState` after mutations they want persisted.
+- **Audit-log entries must already be redacted** when passed in.
+  `appendNovaAuditLog` coerces to strings defensively but it is NOT
+  responsible for stripping raw file contents — that's the caller's
+  contract (Phase 10 will add a redact-enforcement test on tool handlers).
+- **`composeNovaSystemPrompt` is the single source of truth for prompt
+  order** (plan §6c). If you add a new section, update the helper, update
+  `test/nova-prompt-compose.test.mjs`, AND update the fenced block in
+  `docs/nova-agent-plan.md` §6c. All three must agree.
+- **Memory truncation is tail-keep.** We drop the HEAD of `memory.md` and
+  prefix `[…truncated head…]` so recent notes survive. `NOVA_MEMORY_CHARS_CAP
+  = 16 * 1024`. The truncation branch is covered by an explicit
+  head/tail-sentinel test.
+- **Tests inline-copy the helpers** (matches `helpers.test.mjs` pattern)
+  rather than import from `index.js`, because `index.js` imports ST runtime
+  modules that don't resolve in plain Node. When you edit a helper in
+  `index.js`, you MUST mirror the edit into the test copy or the tests go
+  stale-silently.
+
+**What's still deferred (explicitly):**
+- Phase 3b turn lifecycle (`sendNovaTurn`, streaming, tool dispatch, profile
+  swap) — needs `ConnectionManagerRequestService` probing + browser testing.
+- Phase 3c tool registration — blocked on the `NOVA_TOOLS` array, which
+  blocks on Phase 4 tool surface + Phase 9 plugin.
+- Phase 3d cancellation UI — needs 3b first.
+- Soul/memory RUNTIME loader (fetch + cache + "Reload" action) — will land
+  alongside the Phase 6b self-edit tools; composition helper is ready.
+
+**Validation this sprint:** `node --check index.js` clean;
+`node --test 'test/*.test.mjs'` → **96/96 pass** (+16 new: 9 state, 6
+compose, +1 coercion). No new DOM, no new LLM calls, no new event handlers.
+
 <!-- Add new entries above this line using the template in "How to Use This File". -->

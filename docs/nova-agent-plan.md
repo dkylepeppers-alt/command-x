@@ -128,10 +128,14 @@ Chat-style agent transcript. Layout (top → bottom):
 ## 3. Nova Agent Loop
 
 ### 3a. State
-- [ ] Per-chat state in `ctx.chatMetadata[EXT].nova`:
+- [x] Per-chat state in `ctx.chatMetadata[EXT].nova`:
   - `sessions: [{ id, skill, tier, profileName, messages, toolCalls, createdAt, updatedAt }]`, cap 20.
   - `activeSessionId`.
   - `auditLog: [{ ts, tool, argsSummary, outcome }]`, cap 500.
+  - **Shipped:** `getNovaState`, `saveNovaState`, `createNovaSession`,
+    `appendNovaAuditLog` helpers in `index.js` NOVA AGENT section;
+    `NOVA_STATE_KEY`, `NOVA_SESSION_CAP=20`, `NOVA_AUDIT_CAP=500` constants;
+    covered by `test/nova-state.test.mjs` (9 assertions).
 - [ ] Module-level: `novaTurnInFlight`, `novaAbortController`,
   `novaToolRegistryVersion`.
 
@@ -303,6 +307,11 @@ Always concatenated into the Nova system prompt regardless of skill.
 ---
 [Tool-use contract: how to call tools, stop conditions, safety]
 ```
+- [x] **Shipped:** `composeNovaSystemPrompt({ basePrompt, skillPrompt, soul,
+  memory, toolContract })` helper in `index.js` NOVA AGENT section. Memory
+  tail-truncates to `NOVA_MEMORY_CHARS_CAP = 16 KB` with an explicit
+  "…truncated" marker. Covered by `test/nova-prompt-compose.test.mjs`
+  (6 assertions).
 
 ### 6d. Starter content
 - [ ] `soul.md`: Nova voice/persona — curious, crisp, SillyTavern-native,

@@ -4470,6 +4470,124 @@ function styleCommandsInMessage(mesId) {
 }
 
 /* ======================================================================
+   NOVA AGENT — state + prompt-composition helpers (plan §3a, §6c)
+
+   Pure helpers only. Turn lifecycle, tool registry, and UI wiring land in a
+   later sprint once the `nova-agent-bridge` plugin + ConnectionManager probing
+   are ready for manual browser validation. The functions below are used
+   exclusively through `getContext()` chat metadata and never touch the DOM,
+   so they are safe to mirror in `test/nova-*.test.mjs`.
+   ====================================================================== */
+
+const NOVA_STATE_KEY = 'nova';                 // ctx.chatMetadata[EXT].nova
+const NOVA_SESSION_CAP = 20;                    // plan §3a
+const NOVA_AUDIT_CAP = 500;                     // plan §3a
+const NOVA_MEMORY_CHARS_CAP = 16 * 1024;        // plan §6c truncation budget
+
+/** Return the per-chat Nova state blob, lazily initialised. */
+function getNovaState(ctx) {
+    const root = ctx?.chatMetadata?.[EXT];
+    if (!root) return createEmptyNovaState();
+    if (!root[NOVA_STATE_KEY] || typeof root[NOVA_STATE_KEY] !== 'object') {
+        root[NOVA_STATE_KEY] = createEmptyNovaState();
+    }
+    const state = root[NOVA_STATE_KEY];
+    // Forward-compat: guarantee the documented shape even on older stored blobs.
+    if (!Array.isArray(state.sessions)) state.sessions = [];
+    if (!Array.isArray(state.auditLog)) state.auditLog = [];
+    if (!('activeSessionId' in state)) state.activeSessionId = null;
+    return state;
+}
+
+function createEmptyNovaState() {
+    return { sessions: [], activeSessionId: null, auditLog: [] };
+}
+
+/** Persist Nova state. Caller is responsible for mutating it first. */
+function saveNovaState(ctx) {
+    if (ctx?.saveMetadataDebounced) ctx.saveMetadataDebounced();
+}
+
+/**
+ * Create a new Nova session and push it onto the state, evicting oldest
+ * sessions once the cap is exceeded. Returns the new session object.
+ */
+function createNovaSession(state, { skill, tier, profileName }) {
+    const now = Date.now();
+    // Session IDs are not security-sensitive (they're collision keys for UI
+    // lookup, never exposed to untrusted code), but prefer the cryptographic
+    // UUID when available for better uniqueness guarantees and to keep static
+    // analysers happy.
+    const rand = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+        ? crypto.randomUUID().replace(/-/g, '').slice(0, 12)
+        : (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function'
+            ? Array.from(crypto.getRandomValues(new Uint8Array(6))).map(b => b.toString(16).padStart(2, '0')).join('')
+            : Date.now().toString(36) + 'xxxxxx');
+    const id = `nova-${now.toString(36)}-${rand}`;
+    const session = {
+        id,
+        skill: String(skill || 'freeform'),
+        tier: String(tier || 'read'),
+        profileName: String(profileName || ''),
+        messages: [],
+        toolCalls: [],
+        createdAt: now,
+        updatedAt: now,
+    };
+    state.sessions.push(session);
+    // Evict oldest first when over cap.
+    while (state.sessions.length > NOVA_SESSION_CAP) state.sessions.shift();
+    state.activeSessionId = id;
+    return session;
+}
+
+/**
+ * Append an audit log entry (tool invocation outcome) and trim to the cap.
+ * `argsSummary` should never include raw file contents — callers summarise
+ * before handing in (plan §13 redact test will enforce this for tool handlers).
+ */
+function appendNovaAuditLog(state, { tool, argsSummary, outcome }) {
+    const entry = {
+        ts: Date.now(),
+        tool: String(tool || 'unknown'),
+        argsSummary: String(argsSummary ?? ''),
+        outcome: String(outcome ?? ''),
+    };
+    state.auditLog.push(entry);
+    while (state.auditLog.length > NOVA_AUDIT_CAP) state.auditLog.shift();
+    return entry;
+}
+
+/**
+ * Compose the full Nova system prompt per plan §6c. Pure string helper so
+ * it can be covered by a unit test. Memory is truncated (tail-kept) to
+ * `NOVA_MEMORY_CHARS_CAP` with an explicit "…truncated" marker so the LLM
+ * doesn't silently receive partial content.
+ */
+function composeNovaSystemPrompt({ basePrompt = '', skillPrompt = '', soul = '', memory = '', toolContract = '' } = {}) {
+    const mem = String(memory || '');
+    const truncated = mem.length > NOVA_MEMORY_CHARS_CAP;
+    const memSlice = truncated
+        ? '[…truncated head…]\n' + mem.slice(mem.length - NOVA_MEMORY_CHARS_CAP)
+        : mem;
+    const sections = [
+        String(basePrompt || '').trim(),
+        String(skillPrompt || '').trim(),
+        '---',
+        '# Soul',
+        String(soul || '').trim(),
+        '---',
+        '# Memory',
+        memSlice.trim(),
+        '---',
+        String(toolContract || '').trim(),
+    ];
+    // Drop empty trimmed sections but always keep separators that sit between
+    // two non-empty blocks. Simpler: just filter empty strings.
+    return sections.filter(s => s.length > 0).join('\n');
+}
+
+/* ======================================================================
    SETTINGS
    ====================================================================== */
 
@@ -4488,6 +4606,11 @@ function loadSettings() {
         }
     }
     if (migrated) ctx.saveSettingsDebounced();
+    // Nested-default hydration: Object.assign above is a shallow merge, so a user
+    // who previously saved a partial `nova` object would lose any keys added to
+    // NOVA_DEFAULTS in a newer release. Re-merge NOVA_DEFAULTS under whatever is
+    // stored so every key in the documented shape is always readable.
+    settings.nova = { ...NOVA_DEFAULTS, ...(settings.nova || {}) };
     const cb = (id, key, fallback = false) => {
         const el = document.getElementById(id);
         if (el) el.checked = settings[key] ?? fallback;
