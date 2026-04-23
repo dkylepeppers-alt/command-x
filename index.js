@@ -4484,6 +4484,49 @@ const NOVA_SESSION_CAP = 20;                    // plan §3a
 const NOVA_AUDIT_CAP = 500;                     // plan §3a
 const NOVA_MEMORY_CHARS_CAP = 16 * 1024;        // plan §6c truncation budget
 
+/* ----------------------------------------------------------------------
+   NOVA AGENT — module-level turn state (plan §3a).
+
+   Three `let` bindings that the Phase 3b `sendNovaTurn` lifecycle mutates.
+   Declared here so §3b can land as a near-pure diff without also touching
+   the top of the section, and so `_getNovaTurnState()` can ship now as the
+   stable read-only hook Phase 3b tests will assert against.
+
+   - `novaTurnInFlight`: Boolean re-entrancy guard. `sendNovaTurn` sets it
+     true at the top of its happy-path, resets it in a `finally` block
+     (see §3b step 8). Second concurrent call bails with a "turn already
+     in flight" toast rather than stacking abort controllers.
+   - `novaAbortController`: The `AbortController` whose `.signal` is
+     forwarded to `ConnectionManagerRequestService.sendRequest` and to
+     `probeNovaBridge`. Non-null only while a turn is running. Phase 3c's
+     Cancel button calls `.abort()` on it.
+   - `novaToolRegistryVersion`: Monotonic counter bumped by future tool
+     re-registrations (e.g. Phase 4f discovers the bridge plugin
+     mid-session and adds `fs_read`/`shell_run`). Phase 3b reads it at
+     turn start to decide whether to rebuild the tool schema array from
+     `NOVA_TOOLS` (shipped in Phase 4a). 0 means "never registered".
+
+   `_getNovaTurnState()` returns a fresh snapshot on every call.
+   `hasAbort` is a boolean — deliberately NOT the `AbortController`
+   reference, so tests cannot mutate live state through the hook.
+   ---------------------------------------------------------------------- */
+
+let novaTurnInFlight = false;
+let novaAbortController = null;
+let novaToolRegistryVersion = 0;
+
+/**
+ * Read-only snapshot of the module-level Nova turn state. Safe to call
+ * from tests or diagnostics without leaking the live AbortController.
+ */
+function _getNovaTurnState() {
+    return {
+        inFlight: novaTurnInFlight,
+        hasAbort: novaAbortController !== null,
+        registryVersion: novaToolRegistryVersion,
+    };
+}
+
 /** Return the per-chat Nova state blob, lazily initialised. */
 function getNovaState(ctx) {
     const root = ctx?.chatMetadata?.[EXT];
@@ -4585,6 +4628,140 @@ function composeNovaSystemPrompt({ basePrompt = '', skillPrompt = '', soul = '',
     // Drop empty trimmed sections but always keep separators that sit between
     // two non-empty blocks. Simpler: just filter empty strings.
     return sections.filter(s => s.length > 0).join('\n');
+}
+
+/* ----------------------------------------------------------------------
+   NOVA AGENT — bridge-plugin capability probe (plan §4f).
+
+   Pings `GET <pluginBaseUrl>/manifest` with a short timeout to decide
+   whether the `nova-agent-bridge` server plugin is installed and which
+   tool surfaces it advertises. Callers (Phase 3c tool dispatcher) use
+   the returned `capabilities` map to decide whether to register the
+   fs/shell tools or fall back to phone/st-api-only mode.
+
+   Contract:
+   - Never throws. On 404 / non-200 / network error / timeout, resolves
+     to `{ present: false }`.
+   - On success, returns
+     `{ present: true, version, root, shellAllowList, capabilities }`
+     where `capabilities` is a plain object of booleans (unknown flags
+     coerced via `!!`; non-object manifest bodies drop it).
+   - Result is cached in a module-level cache for `NOVA_PROBE_TTL_MS`
+     (60s). `CHAT_CHANGED` invalidates it so switching chats re-probes
+     without requiring a full reload.
+   - `fetchImpl` / `nowImpl` are injectable so `test/nova-probe.test.mjs`
+     can drive the probe without a live network or real timers.
+   ---------------------------------------------------------------------- */
+
+const NOVA_PROBE_TTL_MS = 60_000;
+const NOVA_PROBE_TIMEOUT_MS = 3_000;
+
+// Module-level cache. Shape: `{ result, expiresAt }` or `null` when cold.
+let _novaBridgeProbeCache = null;
+
+function invalidateNovaBridgeProbeCache() {
+    _novaBridgeProbeCache = null;
+}
+
+/**
+ * Coerce a manifest `capabilities` payload into a plain `{ [key]: boolean }`
+ * map. Non-objects / arrays / nullish → `undefined` (caller drops the key
+ * from the returned shape). Strict `!!` coercion so "false"/0/"" all become
+ * `false`.
+ */
+function _coerceNovaCapabilities(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+    const out = {};
+    for (const k of Object.keys(raw)) out[k] = !!raw[k];
+    return out;
+}
+
+async function probeNovaBridge({
+    baseUrl,
+    fetchImpl,
+    nowImpl,
+    ttlMs = NOVA_PROBE_TTL_MS,
+    timeoutMs = NOVA_PROBE_TIMEOUT_MS,
+    force = false,
+} = {}) {
+    const now = typeof nowImpl === 'function' ? nowImpl : Date.now;
+    const doFetch = typeof fetchImpl === 'function'
+        ? fetchImpl
+        : (typeof fetch === 'function' ? fetch : null);
+
+    // Cache hit within TTL — return the cached result regardless of the
+    // (possibly different) baseUrl. Phase 3c reads settings.nova.pluginBaseUrl
+    // at steady state; switching it at runtime is rare and a chat reload
+    // clears the cache via CHAT_CHANGED.
+    if (!force && _novaBridgeProbeCache && _novaBridgeProbeCache.expiresAt > now()) {
+        return _novaBridgeProbeCache.result;
+    }
+
+    const url = String(baseUrl || NOVA_DEFAULTS.pluginBaseUrl).replace(/\/+$/, '') + '/manifest';
+
+    const miss = (reason) => {
+        const result = { present: false };
+        _novaBridgeProbeCache = { result, expiresAt: now() + ttlMs };
+        try { console.debug('[command-x] nova bridge probe →', reason, url); } catch (_) { /* noop */ }
+        return result;
+    };
+
+    if (!doFetch) return miss('no-fetch');
+
+    // AbortSignal.timeout is the documented way; fall back to a manual
+    // controller on older browsers that ship only AbortController.
+    let signal;
+    let manualTimeoutId;
+    let manualCtl;
+    try {
+        if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+            signal = AbortSignal.timeout(timeoutMs);
+        } else if (typeof AbortController === 'function') {
+            manualCtl = new AbortController();
+            manualTimeoutId = setTimeout(() => manualCtl.abort(), timeoutMs);
+            signal = manualCtl.signal;
+        }
+    } catch (_) { /* leave signal undefined */ }
+
+    let resp;
+    try {
+        resp = await doFetch(url, { method: 'GET', signal });
+    } catch (_err) {
+        return miss('network-error');
+    } finally {
+        // Prevent the fallback timer from aborting a stale controller and
+        // keeping an extra timer alive after the fetch resolves.
+        if (manualTimeoutId !== undefined) {
+            try { clearTimeout(manualTimeoutId); } catch (_) { /* noop */ }
+        }
+    }
+
+    if (!resp || !resp.ok) {
+        return miss(`status-${resp && resp.status}`);
+    }
+
+    let body;
+    try {
+        body = await resp.json();
+    } catch (_err) {
+        return miss('bad-json');
+    }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return miss('non-object-body');
+    }
+
+    const result = { present: true };
+    if (body.version !== undefined) result.version = String(body.version);
+    if (body.root !== undefined) result.root = String(body.root);
+    if (Array.isArray(body.shellAllowList)) {
+        result.shellAllowList = body.shellAllowList.map(String);
+    }
+    const caps = _coerceNovaCapabilities(body.capabilities);
+    if (caps) result.capabilities = caps;
+
+    _novaBridgeProbeCache = { result, expiresAt: now() + ttlMs };
+    try { console.debug('[command-x] nova bridge probe → present', url, result); } catch (_) { /* noop */ }
+    return result;
 }
 
 /* ----------------------------------------------------------------------
@@ -4741,6 +4918,65 @@ function migrateLegacyOpenClawMetadata(ctx) {
     delete root.openclaw;
     if (ctx?.saveMetadataDebounced) ctx.saveMetadataDebounced();
     return { migrated: true, reason: 'moved' };
+}
+
+/* ----------------------------------------------------------------------
+   NOVA AGENT — one-shot per-chat init (plan §1f).
+
+   `initNovaOnce(ctx)` is the single entry point wired from the Nova
+   `CHAT_CHANGED` listener (and called once at extension startup for the
+   initial chat that loaded before the listener was attached). It is
+   idempotent by design: the second call on the same chat is a cheap
+   constant-time check that returns `{ ran: false, reason: 'already-initialised' }`.
+
+   Gating: a `chatMetadata[EXT].nova._initVersion` stamp. If it already
+   equals (or exceeds) the current `NOVA_INIT_VERSION`, we short-circuit
+   so pre-Nova chats only pay the migration cost the first time they load
+   after upgrading. Bump `NOVA_INIT_VERSION` whenever a new one-shot
+   migration step is added to this function — existing chats will then
+   re-run `initNovaOnce` exactly once to pick up the new step.
+
+   Ordering: metadata migrations run BEFORE the stamp is written. If any
+   migration throws, we do not stamp — the next chat load will retry.
+   Callers should never `throw` from this function; it catches internally
+   and surfaces a `reason` instead so a misbehaving migration cannot break
+   the chat-switch handler.
+   ---------------------------------------------------------------------- */
+
+const NOVA_INIT_VERSION = 1;
+
+/**
+ * Run all one-shot per-chat Nova migrations exactly once, guarded by a
+ * version stamp persisted in chat metadata. Safe to call on every
+ * `CHAT_CHANGED`; the second call is a cheap noop.
+ */
+function initNovaOnce(ctx) {
+    const root = ctx?.chatMetadata?.[EXT];
+    if (!root || typeof root !== 'object') {
+        return { ran: false, reason: 'no-metadata' };
+    }
+    // `getNovaState` lazily creates `.nova` and heals malformed blobs.
+    // Using it here means the init-version stamp always lives on a well-
+    // formed nova blob, so downstream code can rely on the documented
+    // shape.
+    const state = getNovaState(ctx);
+    const stampedVersion = Number(state?._initVersion) || 0;
+    if (stampedVersion >= NOVA_INIT_VERSION) {
+        return { ran: false, reason: 'already-initialised', version: stampedVersion };
+    }
+
+    let migration;
+    try {
+        migration = migrateLegacyOpenClawMetadata(ctx);
+    } catch (err) {
+        // Do not stamp on failure — the next chat load will retry.
+        try { console.warn('[command-x] initNovaOnce: migration failed', err); } catch (_) { /* noop */ }
+        return { ran: false, reason: 'migration-error', error: String(err?.message || err) };
+    }
+
+    state._initVersion = NOVA_INIT_VERSION;
+    if (ctx?.saveMetadataDebounced) ctx.saveMetadataDebounced();
+    return { ran: true, reason: 'initialised', version: NOVA_INIT_VERSION, migration };
 }
 
 /* ----------------------------------------------------------------------
@@ -5461,6 +5697,10 @@ jQuery(async () => {
             commandMode = null;
             _turnCounter = 0;
             invalidateContactCaches();
+            // Phase 4f: force a fresh bridge probe on chat change so a user
+            // who installs / restarts the server plugin mid-session sees it
+            // without a full SillyTavern reload.
+            invalidateNovaBridgeProbeCache();
             clearSmsPrompt();
             clearTypingIndicator();
             // Re-inject contacts prompt for new chat
@@ -5474,11 +5714,32 @@ jQuery(async () => {
             if (phoneContainer) rebuildPhone();
         });
 
+        // Nova-specific CHAT_CHANGED hook (plan §1f). Kept separate from the
+        // handler above so a future Nova-disabled toggle (plan §7c) can
+        // short-circuit it independently of the phone UI reset logic.
+        // Gate precedence once §7c lands:
+        //   extension disabled (settings.enabled === false) → skip BOTH handlers.
+        //   extension enabled + Nova disabled → skip THIS handler only.
+        //   both enabled → both handlers run.
+        eventSource.on(event_types.CHAT_CHANGED, () => {
+            if (!settings.enabled) return;
+            try { initNovaOnce(getContext()); } catch (e) {
+                try { console.warn(`[${EXT}] initNovaOnce threw:`, e); } catch (_) { /* noop */ }
+            }
+        });
+
         if (settings.enabled) {
             createPanel();
             if (settings.autoDetectNpcs !== false) injectContactsPrompt();
             injectQuestPrompt();
             if (settings.trackLocations) injectMapPrompt();
+            // Phase 1f: run Nova's one-shot init for the chat that was
+            // already loaded when the listener above was attached. Without
+            // this, the very first chat of a session would skip migration
+            // until the user switched chats.
+            try { initNovaOnce(ctx); } catch (e) {
+                try { console.warn(`[${EXT}] initNovaOnce (startup) threw:`, e); } catch (_) { /* noop */ }
+            }
         }
         console.log(`[${EXT}] v${VERSION} Loaded OK`);
     } catch (err) {

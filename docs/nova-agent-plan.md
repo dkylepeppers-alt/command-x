@@ -148,8 +148,14 @@ Chat-style agent transcript. Layout (top → bottom):
     `appendNovaAuditLog` helpers in `index.js` NOVA AGENT section;
     `NOVA_STATE_KEY`, `NOVA_SESSION_CAP=20`, `NOVA_AUDIT_CAP=500` constants;
     covered by `test/nova-state.test.mjs` (9 assertions).
-- [ ] Module-level: `novaTurnInFlight`, `novaAbortController`,
+- [x] Module-level: `novaTurnInFlight`, `novaAbortController`,
   `novaToolRegistryVersion`.
+  - Shipped in Phase 3a (second slice). `_getNovaTurnState()` snapshot
+    helper exposes `{ inFlight, hasAbort, registryVersion }` as the
+    stable read-only hook Phase 3b tests assert against. `hasAbort` is a
+    boolean (not the live `AbortController` reference) so tests can't
+    mutate live state through the hook. Covered by
+    `test/nova-turn-state.test.mjs` (9 assertions).
 
 ### 3b. Turn lifecycle
 - [ ] `sendNovaTurn(userText)`:

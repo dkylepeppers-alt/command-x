@@ -77,6 +77,103 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-23 — Next-session hand-off: after Phase 3a turn-state scaffolding
+
+**Scope of this PR (#18) — cumulative, three Nova phases on one branch:**
+1. **Phase 4f — capability probe** (commit `dccb3ed`): `probeNovaBridge` + `invalidateNovaBridgeProbeCache`, cache invalidation added to the existing `CHAT_CHANGED` listener, `test/nova-probe.test.mjs`.
+2. **Phase 1f — init wiring** (commits `fba6dde` / `52009f5`): `NOVA_INIT_VERSION` + `initNovaOnce(ctx)`, **new dedicated Nova `CHAT_CHANGED` listener** (separate from the phone-UI one), startup call in `jQuery(async () => ...)`, `test/nova-init-once.test.mjs`.
+3. **Phase 3a — turn-state scaffolding** (commit `fe9eff7`, this hand-off's headline): three `let` bindings (`novaTurnInFlight = false`, `novaAbortController = null`, `novaToolRegistryVersion = 0`) + `_getNovaTurnState()` snapshot helper in the NOVA AGENT section of `index.js`, plus `test/nova-turn-state.test.mjs` (9 tests).
+4. **PR review follow-ups** (commit `da1b7cc`): cleared a `setTimeout` leak in `probeNovaBridge`'s manual-fallback path, fixed `test/nova-init-once.test.mjs`'s inline `EXT` constant from `'command_x'` → `'command-x'`, clarified this memory entry.
+
+**Behavioural impact of the cumulative PR:** one new `CHAT_CHANGED` listener (for `initNovaOnce`; runs a one-shot `chatMetadata[EXT].openclaw` → `.legacy_openclaw` migration on first load per chat); one additional side-effect on the pre-existing `CHAT_CHANGED` listener (probe cache invalidation); no new LLM calls; no new DOM. Phase 3a alone is pure declarations + one diagnostic helper.
+
+**Notes for future agents:**
+- **`_getNovaTurnState()` is the stable read-only test hook.** `hasAbort` is a boolean (`novaAbortController !== null`), deliberately NOT the live reference, so test code can't mutate the active controller via the snapshot. Snapshots are fresh objects on every call — mutating one doesn't affect internal state. If §3b needs a richer hook (e.g. `abortReason`), add fields to the return object but keep all values structured-cloneable primitives.
+- **Placement is load-bearing.** The bindings live in the NOVA AGENT section right after `NOVA_MEMORY_CHARS_CAP` and BEFORE `getNovaState`. `test/nova-turn-state.test.mjs` asserts `turn-state section index > NOVA_STATE_KEY index && < initNovaOnce index` — if you reorganise the section, keep those relative orderings or update the test.
+- **Don't merge these into `getNovaState`.** The per-chat state blob (`chatMetadata[EXT].nova`) is persisted. The module-level turn state is NOT persisted — a turn-in-flight across a page reload is impossible by construction, and persisting `AbortController` is meaningless. Keep them separate.
+- **Re-entrancy contract (§3b preview):** `sendNovaTurn` must check `novaTurnInFlight` at entry. If `true`, show a toast and return without stacking abort controllers. The `finally` block MUST reset `novaTurnInFlight = false` AND `novaAbortController = null` (both, in that order), even on thrown errors. Lock this in `test/nova-turn.test.mjs` with a test that throws from the mock `sendRequest` and asserts `_getNovaTurnState()` reports `{ inFlight: false, hasAbort: false }` afterward.
+- **`novaToolRegistryVersion` semantics:** 0 = "never registered". Phase 3c bumps it after building the initial tool schema from `NOVA_TOOLS`. Phase 4f re-bumps when the bridge probe flips from absent → present (discovers new `fs_*` / `shell_run` tools). `sendNovaTurn` reads it once per turn to decide "do I need to rebuild the `tools` array for `sendRequest`?" — cache the built array at the last observed version.
+
+**What to do next (in order — each is a single reviewable PR):**
+1. **Phase 3b — turn lifecycle** (biggest slice; split if it grows past ~300 LOC).
+   Follow the 8-step contract in `docs/nova-agent-plan.md` §3b. Profile-snapshot/restore in a `try…finally` — lock this with a test that throws from the mock `sendRequest` and asserts the restore slash fired. Must mutate the Phase 3a bindings and must call `_getNovaTurnState()`-visible state back to initial in `finally`.
+2. **Phase 3c — tool handler dispatch + approval modal DOM.** Only after 3b is green. This is where `probeNovaBridge(...)` from Phase 4f finally gets consumed + `novaToolRegistryVersion` gets its first bump.
+3. **Phase 6a/6b — `/nova` slash + settings UI bindings.** Small, independent, can be picked up while 3b is in review.
+
+**Hard constraints still active (copy-forward):**
+- `EXT === "command-x"` with a hyphen. Bracket-access only on `extension_settings`.
+- `buildNovaUnifiedDiff` auto-detect is nullish-only. Pass `isNewFile: true` explicitly when wiring `fs_write` previews against `fs_stat` → ENOENT.
+- `normalizeNovaPath` containment predicate: `relNative === '..' || startsWith('..' + path.sep)`.
+- Plugin `/manifest.version` comes from `package.json` via `resolvePluginVersion()`.
+- Inline-copy test convention: when editing a helper in `index.js`, edit the matching inline copy in `test/nova-*.test.mjs` or tests silently test the wrong function. `test/nova-init-once.test.mjs` inline-copies **three** helpers (getNovaState, migrateLegacyOpenClawMetadata, initNovaOnce); `test/nova-turn-state.test.mjs` mirrors `_getNovaTurnState` via a closure capsule (per-closure `let` bindings reproduce the module-level semantics).
+- Run tests via `node --test test/helpers.test.mjs test/nova-*.test.mjs` (explicit filenames, not `'test/*.test.mjs'`).
+
+**Validation this sprint:**
+- `node --check index.js` clean.
+- `node --test test/helpers.test.mjs test/nova-*.test.mjs` → **216/216 pass** (+21 probe tests from 4f, +12 init-once tests from 1f, +9 turn-state tests from 3a; baseline at branch start was 174).
+- Manual in-ST: none required — all four commits are pure scaffolding / test-hooks, no UI wiring yet.
+- PR review comments on `fe9eff7` all resolved in `da1b7cc` (clearTimeout-in-finally, `EXT` namespace fix, scope-clarity notes in this entry).
+
+### 2026-04-23 — Next-session hand-off: after Phase 1f init wiring
+
+**Context:** This PR shipped **Phase 1f — init wiring** per the prior hand-off. Added `NOVA_INIT_VERSION = 1` + `initNovaOnce(ctx)` to the NOVA AGENT section, wired a dedicated Nova `CHAT_CHANGED` listener (separate from the phone-UI-reset one already there), and call it once at extension startup so the initial chat also migrates. Added `test/nova-init-once.test.mjs` (12 new tests, 207/207 total). No behavioural change beyond moving `chatMetadata[EXT].openclaw` → `.legacy_openclaw` on first load.
+
+**Notes for future agents:**
+- **`NOVA_INIT_VERSION` is a forward-migration pivot.** Bump it when you add a new one-shot step to `initNovaOnce`. Existing chats stamped at the previous version will re-run `initNovaOnce` exactly once to pick up the new step. The test `re-runs when _initVersion is lower than current` locks this contract in — don't relax the `<` check to `!==` or a future release can't force-migrate older chats.
+- **`initNovaOnce` never throws.** If a migration step throws, we catch, emit `{ ran: false, reason: 'migration-error' }`, and DO NOT stamp — so the next chat load retries. The top-level listener also wraps the call in try/catch as a belt-and-braces guard. Preserve this: the chat-switch event path must not be able to kill other listeners downstream.
+- **Two `CHAT_CHANGED` listeners are intentional.** The first (existing) resets phone UI state; the second (new) runs Nova init. Per hand-off: "Hook from `CHAT_CHANGED` inside the NOVA AGENT section — not from the top-level chat handler — so disabling Nova via settings (when §7c lands) short-circuits cleanly." When §7c adds a `settings.nova.enabled` toggle, only the second listener needs an additional gate. **Don't merge them.**
+- **Startup call is mandatory.** The Nova listener is attached inside `jQuery(async () => { ... })` so it misses the initial `CHAT_CHANGED` that ST fires during page load. The explicit `initNovaOnce(ctx)` after `if (settings.enabled) { ... }` covers that gap. If you reorganise init, keep this call and keep it after the listener registration (if you move it before, you get the stamp but not the listener — which isn't broken but is confusing).
+- **`getNovaState(ctx)` is the right way to reach `.nova`.** It lazy-creates + heals malformed blobs. `initNovaOnce` uses it so the stamp always lives on a well-formed state. The "heals malformed nova blob when stamping" test exercises this — a pre-existing `nova: 'not-an-object'` gets replaced with a fresh empty state.
+- **Save-count contract:** first-run-no-legacy = 1 save (stamp only); first-run-with-legacy = 2 saves (migrate + stamp); second-run = 0 saves (short-circuit). The test file asserts all three — keep them accurate when adding more steps.
+
+**What to do next (in order — each is a single reviewable PR):**
+1. **Phase 3a — module-level turn state.** Add `let novaTurnInFlight = false; let novaAbortController = null; let novaToolRegistryVersion = 0;` near the other NOVA constants. Expose read-only getters via a test hook so Phase 3b tests can assert state without module internals. No behavioural change yet — these are the variables §3b will mutate.
+2. **Phase 3b — turn lifecycle.** Biggest slice; split if it grows past ~300 LOC. Follow the 8-step contract in `docs/nova-agent-plan.md` §3b. Profile-snapshot/restore in a `try…finally` — lock this with a test that throws from the mock `sendRequest` and asserts the restore slash fired.
+3. **Phase 3c — tool handler dispatch + approval modal DOM.** Only after 3b is green. This is where `probeNovaBridge(...)` from Phase 4f finally gets consumed.
+
+**Hard constraints still active (copy-forward):**
+- `EXT === "command-x"` with a hyphen. Bracket-access only on `extension_settings`.
+- `buildNovaUnifiedDiff` auto-detect is nullish-only. Pass `isNewFile: true` explicitly when wiring `fs_write` previews against `fs_stat` → ENOENT.
+- `normalizeNovaPath` containment predicate: `relNative === '..' || startsWith('..' + path.sep)`.
+- Plugin `/manifest.version` comes from `package.json` via `resolvePluginVersion()`.
+- Inline-copy test convention: when editing a helper in `index.js`, edit the matching inline copy in `test/nova-*.test.mjs` or tests silently test the wrong function. `test/nova-init-once.test.mjs` inline-copies **three** helpers (getNovaState, migrateLegacyOpenClawMetadata, initNovaOnce) — remember to update all three if their production copies change.
+- Run tests via `node --test test/helpers.test.mjs test/nova-*.test.mjs` (explicit filenames, not `'test/*.test.mjs'` — the latter glob doesn't expand under the current Node version).
+
+**Validation this sprint:**
+- `node --check index.js` clean.
+- `node --test test/helpers.test.mjs test/nova-*.test.mjs` → **207/207 pass** (+12 new init-once tests; baseline was 195).
+- New DOM: none. New LLM calls: none. New event handlers: one (dedicated Nova `CHAT_CHANGED` listener, alongside the existing one).
+
+### 2026-04-23 — Next-session hand-off: after Phase 4f probe lands
+
+**Context:** This PR shipped **Phase 4f — capability probe** per the prior hand-off plan. Added `probeNovaBridge({ baseUrl, fetchImpl, nowImpl, ttlMs, timeoutMs, force })` + `invalidateNovaBridgeProbeCache()` to the NOVA AGENT section of `index.js`, hooked invalidation into `CHAT_CHANGED`, and added `test/nova-probe.test.mjs` (21 new tests, 195/195 total). **No behavioural change** — the probe is exposed but not yet consumed. Phase 3c will gate fs/shell tool registration on the result.
+
+**Notes for future agents:**
+- **The probe is cache-first, never-throws.** Returns `{ present: true, version?, root?, shellAllowList?, capabilities? }` on 200, or `{ present: false }` on anything else (404, 500, malformed JSON, non-object body, network error, timeout). Capability flags are strictly `!!`-coerced so `0`/`""`/`"false"` all become `false`. Drop-on-malformed is the contract for `shellAllowList` (must be array) and `capabilities` (must be plain object) — do not relax this without updating the test copy.
+- **Both hits and misses are cached for `NOVA_PROBE_TTL_MS` (60s)** so a missing plugin doesn't get hammered. `CHAT_CHANGED` invalidates, and callers can pass `force: true` to bypass (Phase 3c will want this for a manual "Re-probe" button in settings).
+- **`fetchImpl` / `nowImpl` injection is the test contract.** Production callers leave them undefined and fall through to global `fetch` / `Date.now`. The test file inline-copies the helper (same convention as `nova-diff.test.mjs` etc.) — edit both copies in lockstep. There is a comment header on `test/nova-probe.test.mjs` calling this out.
+- **Timeout path is covered by a real abort.** The test uses `timeoutMs: 5` + a fetch mock that awaits the signal's `abort` event and throws a named `AbortError`. This exercises the `AbortSignal.timeout` branch end-to-end (Node 18+). The helper's fallback to a manual `AbortController` is for very old browsers only.
+- **`console.debug` is fire-and-forget.** The probe wraps both the hit and miss log lines in `try/catch` so a broken console (seen once in ST's headless test harness) cannot take the probe down. Don't change to `console.log` — debug-level keeps it out of the default console filter.
+- **The probe does NOT read `settings.nova.pluginBaseUrl` itself.** Callers pass `baseUrl` explicitly so the helper stays pure. Phase 3c should do `probeNovaBridge({ baseUrl: settings.nova?.pluginBaseUrl })`.
+
+**What to do next (in order — each is a single reviewable PR):**
+1. **Phase 1f — wire `migrateLegacyOpenClawMetadata` into init.** Still pending from the prior hand-off. Create `initNovaOnce(ctx)` gated by `chatMetadata[EXT].nova?._initVersion`; hook from the NOVA AGENT section's own `CHAT_CHANGED` listener (don't add to the existing top-level one). Test: fake ctx with unmigrated + already-migrated metadata; assert idempotency across two calls.
+2. **Phase 3a — module-level turn state.** Add `let novaTurnInFlight = false; let novaAbortController = null; let novaToolRegistryVersion = 0;` near the other NOVA constants. Expose read-only getters via a test hook so Phase 3b tests can assert state without module internals.
+3. **Phase 3b — turn lifecycle.** Biggest slice; split if it grows past ~300 LOC. Follow the 8-step contract in `docs/nova-agent-plan.md` §3b. Profile-snapshot/restore in a `try…finally` — lock this with a test that throws from the mock `sendRequest` and asserts the restore slash fired.
+
+**Hard constraints still active (copy-forward from prior hand-off):**
+- `EXT === "command-x"` with a hyphen. Bracket-access only on `extension_settings`.
+- `buildNovaUnifiedDiff` auto-detect is nullish-only. Pass `isNewFile: true` explicitly when wiring `fs_write` previews against `fs_stat` → ENOENT.
+- `normalizeNovaPath` containment predicate: `relNative === '..' || startsWith('..' + path.sep)`. Don't touch without re-running `..foo` regression tests.
+- Plugin `/manifest.version` comes from `package.json` via `resolvePluginVersion()`. Bump `package.json` when the plugin version changes.
+- Inline-copy test convention: when editing a helper in `index.js`, edit the matching inline copy in `test/nova-*.test.mjs` or tests silently test the wrong function.
+- Run tests via `node --test test/helpers.test.mjs test/nova-*.test.mjs` (explicit filenames). The `'test/*.test.mjs'` glob appears to not expand under the current Node version — got "Could not find" from the runner. Use explicit filenames or the `helpers.test.mjs test/nova-*.test.mjs` form.
+
+**Validation this sprint:**
+- `node --check index.js` clean.
+- `node --test test/helpers.test.mjs test/nova-*.test.mjs` → **195/195 pass** (+21 new probe tests; baseline was 174).
+- No new DOM, no new LLM calls, no new event handlers beyond the one-line invalidation inside the existing `CHAT_CHANGED`.
+
 ### 2026-04-23 — Next-session hand-off: pick up after PR #17 merges
 
 **Context:** PR #17 shipped three pure-helper / scaffold slices (diff preview, legacy metadata migration, `nova-agent-bridge` scaffold with discovery routes + 501 stubs). Review feedback was addressed in 6e53843. **This entry is instructions to the next agent / next-me for the first commit after merge.** Read it before anything else, then re-read `docs/nova-agent-plan.md` and the 2026-04-23 review-feedback entry further down.
