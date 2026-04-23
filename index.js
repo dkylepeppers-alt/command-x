@@ -4601,36 +4601,67 @@ function composeNovaSystemPrompt({ basePrompt = '', skillPrompt = '', soul = '',
    ---------------------------------------------------------------------- */
 
 const NOVA_DIFF_MAX_LINES_DEFAULT = 2000;
+// Hard cap on the LCS DP-cell budget to prevent the approval modal from
+// freezing or OOMing on pathologically large inputs. At 4M cells the table
+// is ~16 MB of Uint32 (plus row object overhead). Anything above this
+// short-circuits to a "diff too large" sentinel rather than attempting the
+// O(m·n) pass. Raise with care — this runs on the UI thread.
+const NOVA_DIFF_MAX_DP_CELLS = 4_000_000;
+const NOVA_DIFF_MAX_LINES_HARD = 10_000;
 
 /**
  * Build a preview unified-diff between `oldContent` and `newContent`.
  *
- * @param {string|null|undefined} oldContent Previous file contents, or nullish
- *     / empty string to signal "new file" (emits `/dev/null` from-header and
- *     `+`-only body).
+ * @param {string|null|undefined} oldContent Previous file contents. `null`
+ *     or `undefined` means "no prior file" (new-file create) and emits a
+ *     `--- /dev/null` from-header. An empty string is treated as an
+ *     existing empty file being modified (still `--- a/<path>`) — callers
+ *     that want the create semantics for an empty old must pass `null`
+ *     or set `isNewFile: true` explicitly.
  * @param {string} newContent Proposed new file contents.
- * @param {{ path?: string, maxLines?: number }} [opts]
+ * @param {{ path?: string, maxLines?: number, isNewFile?: boolean }} [opts]
+ *     `isNewFile` overrides auto-detection for callers that know the prior
+ *     file state (e.g. `fs_stat` returned ENOENT).
  * @returns {string} Empty string when contents are identical; otherwise a
- *     multi-line unified-diff-style preview.
+ *     multi-line unified-diff-style preview. For inputs that exceed the
+ *     DP-cell budget, returns a short "diff too large" sentinel with
+ *     headers so the approval modal still shows path context.
  */
-function buildNovaUnifiedDiff(oldContent, newContent, { path = '', maxLines = NOVA_DIFF_MAX_LINES_DEFAULT } = {}) {
+function buildNovaUnifiedDiff(oldContent, newContent, { path = '', maxLines = NOVA_DIFF_MAX_LINES_DEFAULT, isNewFile: isNewFileOpt } = {}) {
     const safePath = String(path || 'file').replace(/[\r\n]/g, ' ');
     const newStr = String(newContent ?? '');
-    const isNewFile = oldContent === null || oldContent === undefined || oldContent === '';
-    const oldStr = isNewFile ? '' : String(oldContent);
+    // Auto-detect "new file" from nullish old only. An existing empty file
+    // (oldContent === '') is a modify, not a create. Explicit `isNewFile`
+    // option wins when provided.
+    const isNewFile = typeof isNewFileOpt === 'boolean'
+        ? isNewFileOpt
+        : (oldContent === null || oldContent === undefined);
+    const oldStr = isNewFile && (oldContent === null || oldContent === undefined)
+        ? ''
+        : String(oldContent ?? '');
 
     if (oldStr === newStr) return '';
 
     const oldLines = oldStr === '' ? [] : oldStr.split('\n');
     const newLines = newStr.split('\n');
-
-    // LCS table on lines — O(m*n) memory. With the `maxLines` cap below we
-    // still do the full LCS pass on the raw content because the cap only
-    // trims the output, not the comparison. That is intentional: a 1k-line
-    // file with a small change should render correctly even if the file is
-    // long. For pathological inputs (>10k lines) callers should short-circuit
-    // upstream before calling this helper.
     const m = oldLines.length, n = newLines.length;
+
+    const fromHeader = isNewFile ? '--- /dev/null' : `--- a/${safePath}`;
+    const toHeader = `+++ b/${safePath}`;
+
+    // Size guard (plan §4c follow-up). Returns a bounded sentinel instead of
+    // attempting the O(m·n) LCS pass on inputs that would tie up the UI
+    // thread or exhaust memory. The approval modal still gets path context
+    // so the user can reject the write rather than seeing an empty preview.
+    if (m > NOVA_DIFF_MAX_LINES_HARD || n > NOVA_DIFF_MAX_LINES_HARD || m * n > NOVA_DIFF_MAX_DP_CELLS) {
+        return [
+            fromHeader,
+            toHeader,
+            `… diff too large to preview (old=${m} line${m === 1 ? '' : 's'}, new=${n} line${n === 1 ? '' : 's'}) …`,
+        ].join('\n');
+    }
+
+    // LCS table on lines — O(m*n) memory, bounded by the guard above.
     const dp = Array.from({ length: m + 1 }, () => new Uint32Array(n + 1));
     for (let i = m - 1; i >= 0; i--) {
         for (let j = n - 1; j >= 0; j--) {
@@ -4660,8 +4691,6 @@ function buildNovaUnifiedDiff(oldContent, newContent, { path = '', maxLines = NO
         bodyOut = body;
     }
 
-    const fromHeader = isNewFile ? '--- /dev/null' : `--- a/${safePath}`;
-    const toHeader = `+++ b/${safePath}`;
     return [fromHeader, toHeader, ...bodyOut].join('\n');
 }
 
@@ -4670,7 +4699,9 @@ function buildNovaUnifiedDiff(oldContent, newContent, { path = '', maxLines = NO
 
    One-shot, idempotent mutator. The OpenClaw app was removed in Phase 1,
    but users who ran earlier versions still have
-   `ctx.chatMetadata[command_x].openclaw` blobs in their per-chat metadata.
+   `ctx.chatMetadata[EXT].openclaw` blobs (where `EXT === "command-x"`, the
+   module-level namespace constant — see index.js:21) in their per-chat
+   metadata.
    The plan requires we move them to `.legacy_openclaw` (preserving the
    data for forensics / user recovery) and never read them again. The
    settings-side migration (`settings.openclawMode`) is already handled by

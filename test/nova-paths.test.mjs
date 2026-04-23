@@ -35,7 +35,9 @@ function normalizeNovaPath({ root, requestPath, denyList } = {}) {
 
     const relNative = path.relative(rootAbs, absolute);
     if (relNative === '') return { ok: true, absolute, relative: '' };
-    if (relNative.startsWith('..') || path.isAbsolute(relNative)) {
+    if (relNative === '..'
+        || relNative.startsWith('..' + path.sep)
+        || path.isAbsolute(relNative)) {
         return { ok: false, reason: 'escape' };
     }
 
@@ -142,6 +144,28 @@ describe('normalizeNovaPath — escape detection', () => {
         const r = normalizeNovaPath({ root: ROOT, requestPath: '/../other' });
         assert.equal(r.ok, false);
         assert.equal(r.reason, 'escape');
+    });
+
+    it('allows a filename that merely starts with ".." (e.g. "..foo")', () => {
+        // Regression lock: earlier versions used `relNative.startsWith('..')`
+        // which incorrectly rejected legitimate children whose first segment
+        // began with two dots (dotfile-style naming) even though they do
+        // not escape the root.
+        const r = normalizeNovaPath({ root: ROOT, requestPath: '..foo' });
+        assert.equal(r.ok, true);
+        assert.equal(r.relative, '..foo');
+    });
+
+    it('allows a nested "..foo" filename', () => {
+        const r = normalizeNovaPath({ root: ROOT, requestPath: 'data/..foo.txt' });
+        assert.equal(r.ok, true);
+        assert.equal(r.relative, 'data/..foo.txt');
+    });
+
+    it('allows a directory named "..bar" with children', () => {
+        const r = normalizeNovaPath({ root: ROOT, requestPath: '..bar/inside.txt' });
+        assert.equal(r.ok, true);
+        assert.equal(r.relative, '..bar/inside.txt');
     });
 });
 

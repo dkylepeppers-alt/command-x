@@ -78,7 +78,14 @@ function normalizeNovaPath({ root, requestPath, denyList } = {}) {
     if (relNative === '') {
         return { ok: true, absolute, relative: '' };
     }
-    if (relNative.startsWith('..') || path.isAbsolute(relNative)) {
+    // Containment check. Treat relative path as an escape only when the
+    // first segment is exactly `..` — a filename that merely *starts* with
+    // `..` (e.g. `..foo`) is a legitimate child of the root. Also bail if
+    // `path.relative` returns an absolute path, which on Windows happens
+    // when the request crosses a drive letter (belt-and-braces).
+    if (relNative === '..'
+        || relNative.startsWith('..' + path.sep)
+        || path.isAbsolute(relNative)) {
         return { ok: false, reason: 'escape' };
     }
 

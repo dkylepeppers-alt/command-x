@@ -16,7 +16,28 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const PLUGIN_ID = 'nova-agent-bridge';
-const PLUGIN_VERSION = '0.1.0';
+
+/**
+ * Single-source the plugin version from `package.json` so `/manifest.version`
+ * can never drift from the installed package. Falls back to '0.0.0' with a
+ * warning if the manifest is somehow unreadable — the plugin should still
+ * load in that case, just without a meaningful version string.
+ */
+function resolvePluginVersion() {
+    try {
+        const pkgPath = path.join(__dirname, 'package.json');
+        const raw = fs.readFileSync(pkgPath, 'utf8');
+        const pkg = JSON.parse(raw);
+        if (typeof pkg.version === 'string' && pkg.version.trim().length > 0) {
+            return pkg.version.trim();
+        }
+    } catch (e) {
+        console.warn(`[${PLUGIN_ID}] package.json version read failed:`, e?.message || e);
+    }
+    return '0.0.0';
+}
+
+const PLUGIN_VERSION = resolvePluginVersion();
 
 // Plan §4b — shell allow-list. Kept as a static list here; a future config
 // loader (§8a config.yaml) will override via `NOVA_SHELL_ALLOW` or equivalent.
@@ -134,5 +155,5 @@ module.exports = {
         description: 'Filesystem and shell bridge for the Command-X Nova agent. Scaffold — routes wired, fs/shell handlers pending.',
     },
     // Exposed for unit tests / other modules. Not part of the plugin contract.
-    _internal: { resolveRoot, PLUGIN_VERSION, DEFAULT_SHELL_ALLOW, CAPABILITIES },
+    _internal: { resolveRoot, resolvePluginVersion, PLUGIN_VERSION, DEFAULT_SHELL_ALLOW, CAPABILITIES },
 };

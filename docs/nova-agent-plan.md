@@ -73,16 +73,20 @@ Out of scope / explicitly rejected by user:
 
 ### 1f. Storage / metadata migration
 - [x] On Nova init, move `ctx.chatMetadata[EXT].openclaw` →
-  `ctx.chatMetadata[EXT].legacy_openclaw` and save metadata. Do not read it
-  afterwards. Delete `settings.openclawMode` if present and persist settings.
+  `ctx.chatMetadata[EXT].legacy_openclaw` and save metadata. Here `EXT`
+  matches the implementation constant `EXT = "command-x"` in `index.js`, so
+  this migration targets `ctx.chatMetadata["command-x"]` (not
+  `ctx.chatMetadata.command_x`). Do not read it afterwards. Delete
+  `settings.openclawMode` if present and persist settings.
   - **Shipped (pure helper):** `migrateLegacyOpenClawMetadata(ctx)` in
     `index.js` NOVA AGENT section. Idempotent, preserves any
-    previously-moved `legacy_openclaw` blob, triggers
-    `saveMetadataDebounced` only when state actually changed. Covered by
-    `test/nova-migration.test.mjs` (9 assertions). Settings-side migration
-    (`settings.openclawMode`) is already handled by the `LEGACY_KEYS` list
-    in `loadSettings()`. Init wiring (calling the helper from Nova init /
-    `CHAT_CHANGED`) lands with the Phase 3b turn lifecycle sprint.
+    previously-moved `legacy_openclaw` blob under the same `command-x`
+    namespace, triggers `saveMetadataDebounced` only when state actually
+    changed. Covered by `test/nova-migration.test.mjs` (9 assertions).
+    Settings-side migration (`settings.openclawMode`) is already handled by
+    the `LEGACY_KEYS` list in `loadSettings()`. Init wiring (calling the
+    helper from Nova init / `CHAT_CHANGED`) lands with the Phase 3b turn
+    lifecycle sprint.
 
 ---
 
@@ -348,7 +352,7 @@ Always concatenated into the Nova system prompt regardless of skill.
 ### 7b. In-phone Settings additions
 - [ ] "Nova" section: same fields as 7a + Soul & Memory editor + "View audit
   log".
-- [ ] Persist under `extension_settings.command_x.nova = { profileName,
+- [ ] Persist under `extension_settings["command-x"].nova = { profileName,
   defaultTier, maxToolCalls, turnTimeoutMs, pluginBaseUrl,
   rememberApprovalsSession: false, activeSkill }`.
 

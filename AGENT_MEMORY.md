@@ -302,6 +302,19 @@ so the next agent doesn't re-add it.
 
 <!-- Add new entries above this line using the template in "How to Use This File". -->
 
+### 2026-04-23 — Review feedback on Phase 4c + 8 scaffold (this PR, follow-up)
+
+**Context:** Applied six review-suggestion fixes from `@copilot-pull-request-reviewer` on the same PR. All are small correctness / single-source-of-truth improvements.
+
+**Notes for future agents:**
+- **Diff helper: `isNewFile` is now nullish-only by default.** `buildNovaUnifiedDiff('', newStr)` renders with `--- a/<path>` (existing empty file being modified), not `--- /dev/null`. Callers that truly mean "no prior file" must pass `null`/`undefined` or set `isNewFile: true` explicitly. The `opts.isNewFile` boolean is the escape hatch for callers that know the prior state (fs_stat ENOENT → force create; permission-denied → force modify). Tests lock all three code paths.
+- **Diff helper: LCS is guarded.** `m > 10_000 || n > 10_000 || m*n > 4_000_000` short-circuits to a bounded "diff too large to preview (old=X, new=Y)" sentinel with headers intact. The approval modal still gets path context so the user can reject the write. If you raise the cap, remember this runs on the UI thread — the existing 4M-cell budget is ~16 MB of Uint32 plus row overhead.
+- **Paths helper: `..foo` is a legitimate child.** The containment check is now `relNative === '..' || relNative.startsWith('..' + path.sep)`, not `relNative.startsWith('..')`. Three regression tests lock this. When auditing, remember `path.relative` always returns native separator, so a single `'..' + path.sep` check covers POSIX and Windows.
+- **Plugin version: single source of truth.** `PLUGIN_VERSION` is now derived from `server-plugin/nova-agent-bridge/package.json` via `resolvePluginVersion()` (synchronous `fs.readFileSync` at module init — this file is tiny and only loaded once). Fallback is `'0.0.0'` with a `console.warn`. A test asserts `/manifest.version === pkg.version` so drift is caught immediately.
+- **Plan doc ns consistency:** `docs/nova-agent-plan.md` now uses `EXT`/`"command-x"` (hyphen) everywhere it references the extension's settings or metadata namespace. Two places had `command_x` (underscore) which would not actually work as a JS property access against `extension_settings["command-x"]`. Watch for this on future doc edits — the extension manifest id uses a hyphen, so every persistence key does too.
+
+**Validation:** 174/174 tests pass (+9 new).
+
 ### 2026-04-23 — Nova Phase 8 server plugin scaffold (this PR, follow-up commit)
 
 **Context:** Stood up `server-plugin/nova-agent-bridge/` — the companion ST

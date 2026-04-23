@@ -12,19 +12,36 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 const NOVA_DIFF_MAX_LINES_DEFAULT = 2000;
+const NOVA_DIFF_MAX_DP_CELLS = 4_000_000;
+const NOVA_DIFF_MAX_LINES_HARD = 10_000;
 
-function buildNovaUnifiedDiff(oldContent, newContent, { path = '', maxLines = NOVA_DIFF_MAX_LINES_DEFAULT } = {}) {
+function buildNovaUnifiedDiff(oldContent, newContent, { path = '', maxLines = NOVA_DIFF_MAX_LINES_DEFAULT, isNewFile: isNewFileOpt } = {}) {
     const safePath = String(path || 'file').replace(/[\r\n]/g, ' ');
     const newStr = String(newContent ?? '');
-    const isNewFile = oldContent === null || oldContent === undefined || oldContent === '';
-    const oldStr = isNewFile ? '' : String(oldContent);
+    const isNewFile = typeof isNewFileOpt === 'boolean'
+        ? isNewFileOpt
+        : (oldContent === null || oldContent === undefined);
+    const oldStr = isNewFile && (oldContent === null || oldContent === undefined)
+        ? ''
+        : String(oldContent ?? '');
 
     if (oldStr === newStr) return '';
 
     const oldLines = oldStr === '' ? [] : oldStr.split('\n');
     const newLines = newStr.split('\n');
-
     const m = oldLines.length, n = newLines.length;
+
+    const fromHeader = isNewFile ? '--- /dev/null' : `--- a/${safePath}`;
+    const toHeader = `+++ b/${safePath}`;
+
+    if (m > NOVA_DIFF_MAX_LINES_HARD || n > NOVA_DIFF_MAX_LINES_HARD || m * n > NOVA_DIFF_MAX_DP_CELLS) {
+        return [
+            fromHeader,
+            toHeader,
+            `… diff too large to preview (old=${m} line${m === 1 ? '' : 's'}, new=${n} line${n === 1 ? '' : 's'}) …`,
+        ].join('\n');
+    }
+
     const dp = Array.from({ length: m + 1 }, () => new Uint32Array(n + 1));
     for (let i = m - 1; i >= 0; i--) {
         for (let j = n - 1; j >= 0; j--) {
@@ -54,8 +71,6 @@ function buildNovaUnifiedDiff(oldContent, newContent, { path = '', maxLines = NO
         bodyOut = body;
     }
 
-    const fromHeader = isNewFile ? '--- /dev/null' : `--- a/${safePath}`;
-    const toHeader = `+++ b/${safePath}`;
     return [fromHeader, toHeader, ...bodyOut].join('\n');
 }
 
@@ -82,9 +97,27 @@ describe('buildNovaUnifiedDiff', () => {
         assert.match(diff, /^--- \/dev\/null\n\+\+\+ b\/x\.txt\n\+x$/);
     });
 
-    it('emits /dev/null from-header when old content is empty string (new file)', () => {
+    it('treats empty-string old content as an existing empty file being modified (NOT a new file)', () => {
+        // Semantic fix from review: an existing 0-byte file is a modify,
+        // not a create. Callers that truly mean "no prior file" must pass
+        // `null` / `undefined` or set `isNewFile: true` explicitly.
         const diff = buildNovaUnifiedDiff('', 'x', { path: 'x.txt' });
+        assert.match(diff, /^--- a\/x\.txt\n\+\+\+ b\/x\.txt\n\+x$/);
+    });
+
+    it('respects an explicit isNewFile: true override', () => {
+        // If caller knows the file did not exist (e.g. fs_stat ENOENT) they
+        // can force the /dev/null header even when they happen to hand us
+        // the empty string for the "old" side.
+        const diff = buildNovaUnifiedDiff('', 'x', { path: 'x.txt', isNewFile: true });
         assert.match(diff, /^--- \/dev\/null\n\+\+\+ b\/x\.txt\n\+x$/);
+    });
+
+    it('respects an explicit isNewFile: false override against null old', () => {
+        // Inverse case: caller knows the file existed but just can't read
+        // it (permission denied). Force modify headers.
+        const diff = buildNovaUnifiedDiff(null, 'x', { path: 'x.txt', isNewFile: false });
+        assert.match(diff, /^--- a\/x\.txt\n\+\+\+ b\/x\.txt\n\+x$/);
     });
 
     it('emits a/<path> from-header for modified files', () => {
@@ -163,5 +196,35 @@ describe('buildNovaUnifiedDiff', () => {
         assert.notEqual(diff, '');
         // Old split: ['a', '']; New split: ['a']. The empty trailing line is removed.
         assert.ok(diff.includes('-'));
+    });
+
+    it('returns a bounded "diff too large" sentinel when line count exceeds hard cap', () => {
+        // Exceeds NOVA_DIFF_MAX_LINES_HARD on the new side. Building the
+        // strings with a simple `.repeat()` keeps the test cheap — we're
+        // verifying the guard fires, not LCS correctness for huge inputs.
+        const oldC = 'a';
+        const newC = (`line\n`).repeat(10_001) + 'last';
+        const diff = buildNovaUnifiedDiff(oldC, newC, { path: 'huge.txt' });
+        const lines = diff.split('\n');
+        assert.equal(lines.length, 3, 'expected 3 lines (2 headers + 1 sentinel)');
+        assert.equal(lines[0], '--- a/huge.txt');
+        assert.equal(lines[1], '+++ b/huge.txt');
+        assert.match(lines[2], /^… diff too large to preview \(old=1 line, new=\d+ lines\) …$/);
+    });
+
+    it('returns "diff too large" sentinel when m*n exceeds the DP-cell budget', () => {
+        // Both sides individually under the per-side hard cap (10k), but
+        // their product exceeds NOVA_DIFF_MAX_DP_CELLS (4M). 2500 * 2500 =
+        // 6.25M — over the budget.
+        const oldC = Array.from({ length: 2500 }, (_, i) => `o${i}`).join('\n');
+        const newC = Array.from({ length: 2500 }, (_, i) => `n${i}`).join('\n');
+        const diff = buildNovaUnifiedDiff(oldC, newC, { path: 'med.txt' });
+        assert.match(diff, /^--- a\/med\.txt\n\+\+\+ b\/med\.txt\n… diff too large to preview \(old=2500 lines, new=2500 lines\) …$/);
+    });
+
+    it('large-diff sentinel still uses /dev/null header for new-file creates', () => {
+        const newC = 'line\n'.repeat(10_001) + 'last';
+        const diff = buildNovaUnifiedDiff(null, newC, { path: 'huge.txt' });
+        assert.match(diff, /^--- \/dev\/null\n\+\+\+ b\/huge\.txt\n… diff too large to preview/);
     });
 });

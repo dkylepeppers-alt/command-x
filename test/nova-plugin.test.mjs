@@ -79,6 +79,18 @@ describe('nova-agent-bridge init()', () => {
         }
     });
 
+    it('/manifest version matches the version in package.json (single source of truth)', async () => {
+        const fs = await import('node:fs/promises');
+        const raw = await fs.readFile(path.resolve(__dirname, '../server-plugin/nova-agent-bridge/package.json'), 'utf8');
+        const pkg = JSON.parse(raw);
+        const r = mockRouter();
+        await plugin.init(r);
+        const manifestRoute = r.routes.find(x => x.method === 'GET' && x.path === '/manifest');
+        const res = mockRes();
+        manifestRoute.handler({}, res);
+        assert.equal(res._state.body.version, pkg.version);
+    });
+
     it('/manifest returns the advertised shape', async () => {
         const r = mockRouter();
         await plugin.init(r);
