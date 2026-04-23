@@ -105,7 +105,11 @@ _Newest entries first. Append a new entry here at the end of every PR._
 **Validation this sprint:**
 - `node --check index.js` clean.
 - `node --test test/helpers.test.mjs test/nova-*.test.mjs` → **216/216 pass** (+9 new turn-state tests; baseline was 207).
-- New DOM: none. New LLM calls: none. New event handlers: none. Pure declarations + one diagnostic helper.
+- **This commit alone:** New DOM: none. New LLM calls: none. New event handlers: none. Pure declarations + one diagnostic helper. (The prior commits on this same branch — Phases 4f and 1f — do add a `CHAT_CHANGED` handler for `initNovaOnce` and a probe-cache invalidator; the cumulative branch diff reflects those.)
+
+**Follow-ups from PR review (applied in the final commit of this branch):**
+- `probeNovaBridge` manual-timeout fallback now stores the `setTimeout` handle and `clearTimeout`s it in a `finally` block so the fallback timer can't abort a stale controller or keep an extra timer alive after the fetch resolves. `AbortSignal.timeout(...)` path is unchanged (self-clearing).
+- `test/nova-init-once.test.mjs` corrected its inline `EXT` constant from `'command_x'` → `'command-x'` to match the production namespace so the chat-metadata tests exercise the real key.
 
 ### 2026-04-23 — Next-session hand-off: after Phase 1f init wiring
 

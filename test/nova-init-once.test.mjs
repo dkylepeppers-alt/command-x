@@ -11,7 +11,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-const EXT = 'command_x';
+const EXT = 'command-x';
 const NOVA_STATE_KEY = 'nova';
 const NOVA_INIT_VERSION = 1;
 

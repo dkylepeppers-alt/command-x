@@ -4711,13 +4711,15 @@ async function probeNovaBridge({
     // AbortSignal.timeout is the documented way; fall back to a manual
     // controller on older browsers that ship only AbortController.
     let signal;
+    let manualTimeoutId;
+    let manualCtl;
     try {
         if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
             signal = AbortSignal.timeout(timeoutMs);
         } else if (typeof AbortController === 'function') {
-            const ctl = new AbortController();
-            setTimeout(() => ctl.abort(), timeoutMs);
-            signal = ctl.signal;
+            manualCtl = new AbortController();
+            manualTimeoutId = setTimeout(() => manualCtl.abort(), timeoutMs);
+            signal = manualCtl.signal;
         }
     } catch (_) { /* leave signal undefined */ }
 
@@ -4726,6 +4728,12 @@ async function probeNovaBridge({
         resp = await doFetch(url, { method: 'GET', signal });
     } catch (_err) {
         return miss('network-error');
+    } finally {
+        // Prevent the fallback timer from aborting a stale controller and
+        // keeping an extra timer alive after the fetch resolves.
+        if (manualTimeoutId !== undefined) {
+            try { clearTimeout(manualTimeoutId); } catch (_) { /* noop */ }
+        }
     }
 
     if (!resp || !resp.ok) {
