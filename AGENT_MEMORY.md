@@ -775,3 +775,162 @@ Nova goes live). No DOM, no LLM calls, no event handlers.
 **Validation:** `node --check index.js` clean;
 `node --test 'test/*.test.mjs'` → **136/136 pass** (+26 new: 17 diff,
 9 migration).
+
+---
+
+## 2026-04-23 — v0.13.0 **Nova Goes Live** (Phases 2c / 6b / 7 / 9 / 10)
+
+**Context:** Previous sessions built out the Nova agent backend —
+tool registry, skills, dispatch loop, approval modal, diff preview,
+soul/memory loader, profile-swap lifecycle — but the view was pure
+scaffolding. All composer controls and pills rendered with `disabled`.
+A user loading the phone and tapping the ✴︎ Nova tile hit a dead end.
+This session shipped the end-to-end wiring so Nova is usable today.
+
+**Shipped in this PR:**
+
+- **Version bump** `manifest.json` + `index.js` `VERSION` → `0.13.0`.
+  Tests assert both agree (`nova-ui-wiring.test.mjs`).
+- **Nova view wiring** (`index.js`, ~400 new lines in a fresh
+  `NOVA AGENT — UI wiring` section just above `wirePhone()`):
+  - `wireNovaView()` attaches all handlers; called from `wirePhone()`
+    after the clock interval so every rebuild re-wires.
+  - `refreshNovaPills()` syncs the three pill labels from `settings.nova`.
+  - `renderNovaTranscript()` renders `session.messages` from the active
+    Nova session; empty-state renders a "Pick a connection profile"
+    setup card when `settings.nova.profileName` is empty.
+  - `appendNovaTranscriptLine(text, variant)` for ad-hoc lines
+    (🔌 swap / ⚠︎ notice / 🛑 cancel).
+  - `novaHandleSend()` serialises through `withNovaProfileMutex`,
+    calls `sendNovaTurn`, surfaces `result.swappedProfile.from` as a
+    "🔌 Restored profile to …" transcript line.
+  - `novaHandleCancel()` fires `novaAbortController?.abort()`.
+  - `setNovaInFlight(bool)` disables the composer and reveals Cancel.
+  - `buildNovaSendRequest(ctx)` adapter — prefers
+    `ctx.ConnectionManagerRequestService.sendRequest` (full tool-calling),
+    falls back to `ctx.generateRaw` (text-only, surfaces a
+    "⚠︎ Text-only mode" transcript warning and passes `tools: []`).
+- **Picker modals** — new generic `cxPickList(title, options)` helper
+  (re-uses `cx-modal-overlay`, `cx-modal-box`). Three Nova-specific
+  wrappers: `novaPickProfile` (probes `/profile-list`), `novaPickSkill`
+  (static `NOVA_SKILLS`), `novaPickTier` (read/write/full). Each
+  persists to `settings.nova.*`, re-renders pills, and adds a
+  transcript line for user feedback.
+- **Profile-swap helpers** — `listNovaProfiles({ executeSlash })` +
+  `parseNovaProfileListPipe(pipe)` + `withNovaProfileMutex(fn)` (tail-
+  chained, non-poisoning). `_novaProfileSwapMutex` is the module-level
+  chain used by production callers.
+- **Soul/memory self-edit tools (Phase 6b)** — five new `NOVA_TOOLS`
+  schemas (`nova_read_soul`, `nova_write_soul`, `nova_read_memory`,
+  `nova_append_memory`, `nova_overwrite_memory`) + the
+  `buildNovaSoulMemoryHandlers({ fetchImpl, loadSoulMemory,
+  invalidateCache, pluginBaseUrl })` factory. Writes POST to
+  `<pluginBaseUrl>/fs/write`; every successful write calls
+  `invalidateNovaSoulMemoryCache()` so the next turn re-reads fresh
+  content. Handlers never throw — failures resolve to
+  `{ error: '<reason>' }`. `nova_append_memory` read-modify-writes under
+  `force:true` so it never appends to a stale cache; single trailing
+  newline is preserved.
+- **Settings — Phase 7** — new Nova block in `settings.html` (profile,
+  default tier select, max-tool-calls, turn timeout, plugin base URL,
+  "Install Command-X preset" button). Mirror in-phone `NOVA` section
+  in the Settings view with `cx-set-nova-*` IDs. `loadSettings` /
+  `saveSettings` accept both ID sets via the `??`-chain pattern already
+  used for other in-phone settings. "Install preset" fetches
+  `presets/openai/Command-X.json`, logs it to DevTools, and shows a
+  `cxAlert` with paste instructions — ST has no slash command to save
+  presets server-side, so a manual paste into the UI is the supported
+  path for now.
+- **Transcript message styling** — `.cx-nova-msg`, `.cx-nova-msg-user`,
+  `.cx-nova-msg-assistant`, `.cx-nova-msg-system`, `.cx-nova-msg-notice`
+  CSS added. Picker-modal CSS (`.cx-pick-box`, `.cx-pick-row`,
+  `.cx-pick-active`, `.cx-settings-text-input`) added. The nova-ui
+  scaffolding test was **updated** to assert Nova is now live (composer
+  is NOT `disabled`, pills are NOT `disabled`) — previous assertion
+  that the view was "inert" would flag the wire-up as a regression.
+
+**New tests:**
+
+- `test/nova-self-edit-tools.test.mjs` — 21 assertions covering the
+  5-handler factory: read forces cache bypass, write → POST body shape,
+  cache invalidation on success but NOT on failure, `nova_append_memory`
+  newline discipline (3 variants), empty/whitespace/non-string
+  rejection, bridge-unreachable path, non-2xx path (body truncated to
+  400 chars), trailing-slash stripping, all 5 handler names present.
+- `test/nova-profile-swap.test.mjs` — 16 assertions covering
+  `parseNovaProfileListPipe` (JSON + fallback + dedup),
+  `listNovaProfiles` (ok / no-executor / executor-failed), and
+  `withNovaProfileMutex` (serialisation, non-poisoning after failure,
+  sequential-failure ordering).
+- `test/nova-ui-wiring.test.mjs` — 11 static source-contract
+  assertions: VERSION agreement, helper declarations,
+  `wirePhone → wireNovaView` call, self-edit tool handler keys,
+  `novaHandleSend` calls `withNovaProfileMutex`, settings IDs present
+  in both surfaces, saveSettings reads both ID flavours,
+  `_novaRenderMessageNode` handles all 6 roles,
+  `buildNovaSendRequest` tries both dispatch paths.
+
+**Architectural notes for the next agent:**
+
+- **`sendRequest` dep surface is decoupled from ST APIs.** The Nova
+  dispatch loop (`sendNovaTurn`) consumes
+  `({messages, tools, tool_choice, signal}) => Promise<{content, tool_calls}>`.
+  The new `buildNovaSendRequest(ctx)` adapter is the ONLY place that
+  knows about ST's specific generation APIs. If ST changes its public
+  surface (e.g. renames `ConnectionManagerRequestService`), only this
+  adapter needs updating — the loop and its ~20 tests stay unchanged.
+- **Tool-calling availability is a runtime property, not a setting.**
+  `buildNovaSendRequest` returns `null` when neither
+  `ConnectionManagerRequestService` nor `generateRaw` is available;
+  `novaHandleSend` bails with a `cxAlert` in that case. When only
+  `generateRaw` is available, we still let Nova run but pass
+  `tools: []` and surface a `⚠︎ Text-only mode` transcript notice.
+  The dispatcher test suite is unchanged — text-only mode is
+  indistinguishable from a tool-less configuration upstream.
+- **Inline-copy test pattern still applies** for the two new pure
+  helpers. When you edit `buildNovaSoulMemoryHandlers`,
+  `_novaBridgeWrite`, `listNovaProfiles`, `parseNovaProfileListPipe`,
+  or `withNovaProfileMutex` in `index.js`, mirror the edit into the
+  matching test — there is no JSDOM / ST runtime harness yet.
+- **Pill persistence uses `getContext().extensionSettings[EXT]` +
+  `saveSettingsDebounced()`** — same channel as every other phone
+  setting. Do NOT stash profile/skill/tier in `chatMetadata`;
+  they're per-user preferences, not per-chat.
+- **Profile-list probe only fires on pill-click**, not on Nova init.
+  Reason: we want the probe to reflect the CURRENT profile list at the
+  moment the user picks, not a stale snapshot. If a later agent wants
+  to badge the profile pill with "list unavailable", probe on Nova
+  view enter and cache the result — just don't hide pickProfile behind
+  it; the user might type a name manually once that UI lands.
+- **Profile-swap mutex is module-level.** A page with two Nova views
+  open (shouldn't happen, but) would still serialise profile swaps.
+  Tests prove the chain is non-poisoning, so a failed swap on one
+  caller never blocks the next.
+
+**What's still deferred (explicit, not forgotten):**
+
+- **Phase 8 `nova-agent-bridge` server plugin.** Soul/memory write
+  tools POST to `<pluginBaseUrl>/fs/write`; until the plugin lands,
+  every write resolves to `{ error: 'nova-bridge-unreachable' }`. Reads
+  still work because `loadNovaSoulMemory` hits the extension-bundled
+  path via ST's static handler.
+- **No real tool handlers for `fs_*`, `shell_*`, `st_*`, `phone_*`.**
+  The dispatcher surfaces `no-handler` for any tool name not in the
+  soul/memory set. Wire additional handler maps when their backends
+  ship.
+- **Setup card is informational** — it prompts the user to tap the
+  Profile pill but doesn't auto-open the picker. If user research
+  shows people miss it, auto-opening on Nova view enter when
+  `!profileName` is a one-liner.
+- **Preset install is manual.** The button fetches + logs the JSON +
+  shows paste instructions. A future ST release may add a
+  `/preset-save` slash; when it does, swap the alert for a direct
+  `executeSlashCommandsWithOptions('/preset-save …')` call.
+- **Tool calls have no transcript tool-card yet.** When
+  `sendNovaTurn` persists a `role: 'tool'` message, the renderer
+  shows it as a `.cx-nova-toolcard` with a compact JSON preview. Rich
+  collapsible per-call cards (plan §3c) are deferred.
+
+**Validation:** `node --check index.js` clean; `node --test test/` →
+**369/369 pass** (+48 new: 21 self-edit, 16 profile-swap, 11 wiring;
+the existing scaffolding test was updated, not deleted, so net = +48).
