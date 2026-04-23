@@ -77,6 +77,72 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-23 — Next-session hand-off: pick up after PR #17 merges
+
+**Context:** PR #17 shipped three pure-helper / scaffold slices (diff preview, legacy metadata migration, `nova-agent-bridge` scaffold with discovery routes + 501 stubs). Review feedback was addressed in 6e53843. **This entry is instructions to the next agent / next-me for the first commit after merge.** Read it before anything else, then re-read `docs/nova-agent-plan.md` and the 2026-04-23 review-feedback entry further down.
+
+**Where we are right now (ground truth — `git log --oneline` after merge will show these):**
+- Phase 1f (metadata migration) — **pure helper shipped, init wiring NOT done.**
+- Phase 4c (diff preview helper) — **shipped, no UI caller yet.**
+- Phase 8a (plugin discovery routes) — **shipped.**
+- Phase 8b (fs/shell handlers) — **stubbed 501, no real handlers.**
+- Phase 8c (path safety) — **shipped (`normalizeNovaPath`).**
+- Phase 8d (config loader) — **shipped (single-key regex parser).**
+- Phase 3a state helpers (`getNovaState`, `createNovaSession`, etc.) — **shipped in an earlier PR**; still need module-level `novaTurnInFlight` / `novaAbortController` / `novaToolRegistryVersion`.
+- Everything else in Phase 3, 4f, 6, 7, 9 — **not started.**
+
+**What to do first (in order). Each bullet is a single reviewable PR. Do not batch.**
+
+1. **Phase 4f — capability probe on the extension side (smallest; do first).**
+   - Add `async function probeNovaBridge()` in the NOVA AGENT section of `index.js`.
+   - Fetches `GET /api/plugins/nova-agent-bridge/manifest` with a short `AbortSignal.timeout(3000)`.
+   - Returns `{ present: boolean, version?, root?, shellAllowList?, capabilities? }`. On any network error or non-200, return `{ present: false }` — never throw.
+   - Cache the result in a module-level `_novaBridgeProbeCache` with a 60-second TTL; invalidate on `CHAT_CHANGED` so switching chats re-probes without a full reload.
+   - **Do not** gate anything on the probe yet — just expose the function and a console debug log. Phase 3c will consume it when tool handlers land.
+   - Tests: `test/nova-probe.test.mjs` with a mock `global.fetch` (or dependency-injected fetch so the helper takes `{ fetchImpl }`). Cover: success, 404, network error, timeout, cache hit within TTL, cache miss after TTL, capability-flag coercion.
+   - Plan checkbox: §4f.
+
+2. **Phase 1f — wire the migration helper into init.**
+   - `migrateLegacyOpenClawMetadata(ctx)` exists but is unreachable. Wire it from a new `initNovaOnce(ctx)` that runs exactly once per chat load, gated by a `chatMetadata[EXT].nova?._initVersion` stamp so pre-Nova chats only pay the migration cost the first time.
+   - Hook from `CHAT_CHANGED` inside the NOVA AGENT section — **not** from the top-level chat handler — so disabling Nova via settings (when §7c lands) short-circuits cleanly.
+   - Unit test with a fake ctx that has both unmigrated and already-migrated metadata; assert idempotency across two `initNovaOnce` calls on the same ctx.
+   - Plan checkbox: §1f "Init wiring".
+
+3. **Phase 3a — finish module-level state.**
+   - Add `let novaTurnInFlight = false; let novaAbortController = null; let novaToolRegistryVersion = 0;` near the other NOVA constants in `index.js`.
+   - Expose read-only getters via the existing test hook (or add one) so tests can assert state without reaching into module internals.
+   - No behavioural change yet — these are just the variables §3b will mutate.
+
+4. **Phase 3b — turn lifecycle (biggest slice; split if it gets past ~300 LOC).**
+   - Follow the 8-step contract in `docs/nova-agent-plan.md` §3b exactly.
+   - Profile-snapshot-and-restore is the subtlest part: wrap steps 3–7 in a `try` and put `/profile <snapshot>` in the `finally` so an abort or exception cannot leave the user on the Nova profile. **Lock this in with a test that throws from the mock `sendRequest` and asserts the restore slash fired.**
+   - `ctx.ConnectionManagerRequestService` probe: cache at init time, not per-turn.
+   - Token / tool-call / wall-clock caps all live in the same loop; emit an audit-log entry (§3a `appendNovaAuditLog`) on every cap hit so the user can see why the turn stopped.
+
+5. **Phase 3c — tool handler dispatch + approval modal DOM.** Only after 3b is green.
+
+**Hard constraints that will bite you if you forget:**
+- `EXT === "command-x"` with a hyphen everywhere — **never** `command_x`. `extension_settings["command-x"]` is bracket-access only.
+- `buildNovaUnifiedDiff` auto-detect is nullish-only. Empty-string old = modify. Use the explicit `isNewFile: true` option when wiring `fs_write` approval previews against `fs_stat` → ENOENT.
+- The LCS helper runs on the UI thread with a 4M-cell cap. If you ever need to diff really large files, either raise the cap deliberately + move to a worker, or pre-truncate upstream — don't just bump the constant.
+- `normalizeNovaPath` containment is `relNative === '..' || startsWith('..' + path.sep)`. If you touch this predicate, the `..foo` regression tests must still pass.
+- The plugin's `/manifest.version` is sourced from `package.json` via `resolvePluginVersion()`. When you bump the plugin version, bump `package.json` — the constant does not exist anymore.
+- Plugin stubs return 501 intentionally. The capability probe (§4f, item 1 above) is what distinguishes "plugin present, handler pending" from "plugin missing". Don't flip the `capabilities` map booleans to `true` until the real handlers land **and** have tests.
+- Inline-copy test convention: `test/nova-*.test.mjs` re-declares the helpers under test because `index.js` can't be imported from Node. When you edit a helper, edit **both** copies in lockstep or the tests silently test the wrong function. This is called out in each test file's header comment.
+
+**Validation checklist before opening the next PR:**
+- `node --test test/*.test.mjs` green (baseline: 174/174 after PR #17).
+- `parallel_validation` with a fresh prTitle + prDescription; address CodeQL alerts even if the Code Review pass is silent — path-safety changes especially get flagged.
+- Update this file (AGENT_MEMORY) at the **top of History** with a new "Next-session hand-off" entry that supersedes this one.
+
+**What NOT to do:**
+- Do not start Phase 6 (Soul & Memory loader) before Phase 3b ships — it imports turn-lifecycle hooks that don't exist yet.
+- Do not start Phase 9 (profile swap) without Phase 3b's snapshot-restore code — you'd duplicate state machines.
+- Do not add a YAML dependency to the plugin for one config key. Extend the regex parser if you need more keys.
+- Do not move or edit old `AGENT_MEMORY.md` entries; the file is append-only newest-first by convention. If a note becomes obsolete, write a new entry that supersedes it rather than editing the old one.
+
+---
+
 ### 2026-04-22 — Nova Phase 2 UI scaffolding (PR #16, later commit)
 
 **Context:** Landed the Nova app shell — home-screen tile, `data-view="nova"`
@@ -301,3 +367,142 @@ Left an inline comment on the `defaultTools` line explaining the rationale
 so the next agent doesn't re-add it.
 
 <!-- Add new entries above this line using the template in "How to Use This File". -->
+
+### 2026-04-23 — Review feedback on Phase 4c + 8 scaffold (this PR, follow-up)
+
+**Context:** Applied six review-suggestion fixes from `@copilot-pull-request-reviewer` on the same PR. All are small correctness / single-source-of-truth improvements.
+
+**Notes for future agents:**
+- **Diff helper: `isNewFile` is now nullish-only by default.** `buildNovaUnifiedDiff('', newStr)` renders with `--- a/<path>` (existing empty file being modified), not `--- /dev/null`. Callers that truly mean "no prior file" must pass `null`/`undefined` or set `isNewFile: true` explicitly. The `opts.isNewFile` boolean is the escape hatch for callers that know the prior state (fs_stat ENOENT → force create; permission-denied → force modify). Tests lock all three code paths.
+- **Diff helper: LCS is guarded.** `m > 10_000 || n > 10_000 || m*n > 4_000_000` short-circuits to a bounded "diff too large to preview (old=X, new=Y)" sentinel with headers intact. The approval modal still gets path context so the user can reject the write. If you raise the cap, remember this runs on the UI thread — the existing 4M-cell budget is ~16 MB of Uint32 plus row overhead.
+- **Paths helper: `..foo` is a legitimate child.** The containment check is now `relNative === '..' || relNative.startsWith('..' + path.sep)`, not `relNative.startsWith('..')`. Three regression tests lock this. When auditing, remember `path.relative` always returns native separator, so a single `'..' + path.sep` check covers POSIX and Windows.
+- **Plugin version: single source of truth.** `PLUGIN_VERSION` is now derived from `server-plugin/nova-agent-bridge/package.json` via `resolvePluginVersion()` (synchronous `fs.readFileSync` at module init — this file is tiny and only loaded once). Fallback is `'0.0.0'` with a `console.warn`. A test asserts `/manifest.version === pkg.version` so drift is caught immediately.
+- **Plan doc ns consistency:** `docs/nova-agent-plan.md` now uses `EXT`/`"command-x"` (hyphen) everywhere it references the extension's settings or metadata namespace. Two places had `command_x` (underscore) which would not actually work as a JS property access against `extension_settings["command-x"]`. Watch for this on future doc edits — the extension manifest id uses a hyphen, so every persistence key does too.
+
+**Validation:** 174/174 tests pass (+9 new).
+
+### 2026-04-23 — Nova Phase 8 server plugin scaffold (this PR, follow-up commit)
+
+**Context:** Stood up `server-plugin/nova-agent-bridge/` — the companion ST
+server plugin that will back Nova's `fs_*` and `shell_run` tools. Scaffold
+only: the ST plugin contract (`init`/`exit`/`info`), the two discovery
+routes (`/manifest`, `/health`), and the pure path-safety helper
+(`paths.js`) are real. The eight fs/shell routes are wired as explicit
+`501 not-implemented` stubs so the extension's Phase 4f capability probe
+can distinguish "plugin present, handler pending" from "plugin missing
+entirely".
+
+**Notes for future agents:**
+- **Plugin loads as CommonJS.** ST's plugin loader (`st-docs/For_Contributors/
+  Server-Plugins.md`) prefers `package.json.main`, then `index.js`, then
+  `index.mjs`. We ship `package.json` with `"main": "index.js"` so the
+  CJS entry is always picked up. Don't convert this to ESM — ST's loader
+  is tested primarily against CJS plugins.
+- **`/manifest.capabilities` is the source of truth for what's actually
+  wired.** Every fs/shell key starts at `false` and flips to `true` only
+  when the real handler lands. Do NOT flip a key to `true` just because
+  the route exists — the extension Phase 4f probe uses this to decide
+  whether to register the corresponding `NOVA_TOOLS` entry, and a
+  too-optimistic flag will let the LLM call a tool that always 501s.
+- **`paths.js` is intentionally zero-dep** (only `node:path`). The
+  deny-list distinguishes single-segment bans (`.git`, `node_modules` —
+  any depth) from two-segment pair bans (`plugins/nova-agent-bridge`
+  specifically). This matters: a blanket `plugins/` ban would lock out
+  every other ST plugin directory, and a single-segment `nova-agent-bridge`
+  ban could hit unrelated folders. Keep the split.
+- **Symlink-escape protection is explicitly deferred.** `normalizeNovaPath`
+  is lexical — it does not call `fs.realpath`. The plan requires the
+  realpath check; it lands at request time in the fs-handler sprint
+  because (a) it's async and (b) an unreadable symlink path on startup
+  shouldn't block route wiring.
+- **Config loader is a single-line regex parser** (`/^\s*root\s*:\s*(.+?)\s*$/m`
+  with quote-stripping). Intentional — adding a real YAML dep for one
+  key would violate the "zero runtime deps" rule in §8a. When config
+  grows past 2-3 keys, add the YAML dep then, not sooner.
+- **Tests use `createRequire` to load the CJS plugin from ESM.** The
+  `test/nova-plugin.test.mjs` pattern (build a mock router, assert the
+  recorded route list) is cheap and catches route-contract regressions
+  without spinning up Express. The `/manifest` + `/health` + stub-501
+  handlers are exercised directly through a mock `res` object. Reuse
+  this pattern for future route handlers.
+- **`test/nova-paths.test.mjs` inline-copies `normalizeNovaPath`** per
+  the existing test convention (AGENT_MEMORY 2026-04-22 entry on pure
+  helpers). When you change `paths.js`, mirror the edit into the test
+  file in the same PR.
+- **Not yet wired:** the extension-side capability probe (plan §4f) still
+  needs the `fetch('/api/plugins/nova-agent-bridge/manifest')` call plus
+  the `NOVA_TOOLS` filter step. Fully separate PR.
+
+**What's still deferred (explicitly):**
+- Phase 3b turn lifecycle (and `migrateLegacyOpenClawMetadata` init wiring).
+- Phase 3c tool handlers + approval modal DOM (will consume `buildNovaUnifiedDiff`).
+- Phase 3d cancellation UI.
+- Phase 4f capability-probe wiring on the extension side.
+- Phase 6a/6b soul/memory runtime loader.
+- Phase 7a/7b settings surface.
+- Phase 8b real fs/shell handlers + symlink-realpath + audit log + CSRF
+  (next plugin sprint).
+- Phase 9 profile swap.
+
+**Validation:** `node --check` clean on all three JS files;
+`node --test test/*.test.mjs` → **165/165 pass** (+29 new: 19 paths, 10
+plugin). `require('./server-plugin/nova-agent-bridge/index.js')` succeeds
+under plain Node with no ST present.
+
+### 2026-04-23 — Nova Phase 4c + Phase 1f/§10 pure-helper sprint (this PR)
+
+**Context:** Landed two more pure helpers before the agent loop lands:
+`buildNovaUnifiedDiff` (plan §4c — drives the `fs_write` approval modal in
+Phase 3c) and `migrateLegacyOpenClawMetadata` (plan §1f / §10 — moves any
+remaining `chatMetadata[EXT].openclaw` blobs into `legacy_openclaw` before
+Nova goes live). No DOM, no LLM calls, no event handlers.
+
+**Notes for future agents:**
+- **`buildNovaUnifiedDiff` is a preview helper, not a patch generator.**
+  It emits a linear `-` / `+` / ` ` line sequence with `--- a/<path>` and
+  `+++ b/<path>` headers (or `--- /dev/null` for new files). It does NOT
+  emit `@@` hunk headers and does NOT collapse unchanged context; the
+  approval modal is expected to scroll. Keep it that way — switching to
+  real hunks would require context-radius tuning that is a separate design
+  decision.
+- **Truncation marker text is locked by a test.** Sentinel is `"… diff
+  truncated (N more lines) …"` with singular `"1 more line"`. Changing
+  that text breaks `test/nova-diff.test.mjs`. If you reword it, update the
+  test in the same PR.
+- **LCS memory is O(m·n) as `Uint32Array`.** Fine up to a few thousand
+  lines per file; that's the envelope Nova is meant to edit. If you ever
+  need to diff very large files, short-circuit *before* calling the
+  helper — don't try to make the helper lazy, it'll bit-rot the shape
+  invariants.
+- **`migrateLegacyOpenClawMetadata` is idempotent and touches metadata
+  only.** The settings-side `openclawMode` retirement is already wired
+  via the `LEGACY_KEYS` list in `loadSettings()` (see 2026-04-22 entry);
+  this helper is the chatMetadata companion. When a legacy blob exists
+  but `legacy_openclaw` was already written by a prior session, the raw
+  `openclaw` key is dropped without overwriting the preserved copy — so
+  users' recovery data stays intact.
+- **Helper is not yet wired into init.** Deliberate. The plan says
+  migration runs on "first Nova init"; that init path doesn't exist yet
+  (lands with Phase 3b turn lifecycle). Calling it from the existing
+  `CHAT_CHANGED` handler today would run it against every pre-Nova chat
+  load for zero benefit. Wire it alongside the Nova turn bootstrap.
+- **Inline-copy test pattern still applies.** Both new tests embed a copy
+  of the helper — `index.js` can't be imported from plain Node because of
+  ST runtime deps. When you edit either helper in `index.js`, mirror the
+  edit into `test/nova-diff.test.mjs` / `test/nova-migration.test.mjs` or
+  they go stale-silently.
+
+**What's still deferred (explicitly):**
+- Phase 3b turn lifecycle (and the init wiring for
+  `migrateLegacyOpenClawMetadata`).
+- Phase 3c tool handlers + approval modal DOM (will consume
+  `buildNovaUnifiedDiff`).
+- Phase 3d cancellation UI.
+- Phase 6a/6b soul/memory runtime loader + self-edit tools.
+- Phase 7a/7b settings surface.
+- Phase 8 `nova-agent-bridge` server plugin.
+- Phase 9 profile swap.
+
+**Validation:** `node --check index.js` clean;
+`node --test 'test/*.test.mjs'` → **136/136 pass** (+26 new: 17 diff,
+9 migration).

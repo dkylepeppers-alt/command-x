@@ -72,9 +72,21 @@ Out of scope / explicitly rejected by user:
 - [ ] Replace with a new "Nova Agent" section.
 
 ### 1f. Storage / metadata migration
-- [ ] On Nova init, move `ctx.chatMetadata[EXT].openclaw` →
-  `ctx.chatMetadata[EXT].legacy_openclaw` and save metadata. Do not read it
-  afterwards. Delete `settings.openclawMode` if present and persist settings.
+- [x] On Nova init, move `ctx.chatMetadata[EXT].openclaw` →
+  `ctx.chatMetadata[EXT].legacy_openclaw` and save metadata. Here `EXT`
+  matches the implementation constant `EXT = "command-x"` in `index.js`, so
+  this migration targets `ctx.chatMetadata["command-x"]` (not
+  `ctx.chatMetadata.command_x`). Do not read it afterwards. Delete
+  `settings.openclawMode` if present and persist settings.
+  - **Shipped (pure helper):** `migrateLegacyOpenClawMetadata(ctx)` in
+    `index.js` NOVA AGENT section. Idempotent, preserves any
+    previously-moved `legacy_openclaw` blob under the same `command-x`
+    namespace, triggers `saveMetadataDebounced` only when state actually
+    changed. Covered by `test/nova-migration.test.mjs` (9 assertions).
+    Settings-side migration (`settings.openclawMode`) is already handled by
+    the `LEGACY_KEYS` list in `loadSettings()`. Init wiring (calling the
+    helper from Nova init / `CHAT_CHANGED`) lands with the Phase 3b turn
+    lifecycle sprint.
 
 ---
 
@@ -197,9 +209,14 @@ own plugin folder by default.
   "Remember approvals this session" is on — enforced in Phase 3c.
 
 ### 4c. Diff preview helper
-- [ ] For every `fs_write` approval: fetch current file, render unified diff
+- [x] For every `fs_write` approval: fetch current file, render unified diff
   vs `content`. New files show raw content. Modal blocks the loop until
   accept/reject.
+  - **Shipped (pure helper):** `buildNovaUnifiedDiff(oldContent, newContent,
+    { path, maxLines })` in `index.js` NOVA AGENT section. LCS-based line
+    diff, `--- /dev/null` header for new files, bounded output with
+    "N more lines" truncation sentinel. Covered by `test/nova-diff.test.mjs`
+    (17 assertions). Modal wiring lands with Phase 3c.
 
 ### 4d. SillyTavern API tools (no plugin)
 - [x] `st_list_characters`, `st_read_character`, `st_write_character` — schemas shipped.
@@ -335,7 +352,7 @@ Always concatenated into the Nova system prompt regardless of skill.
 ### 7b. In-phone Settings additions
 - [ ] "Nova" section: same fields as 7a + Soul & Memory editor + "View audit
   log".
-- [ ] Persist under `extension_settings.command_x.nova = { profileName,
+- [ ] Persist under `extension_settings["command-x"].nova = { profileName,
   defaultTier, maxToolCalls, turnTimeoutMs, pluginBaseUrl,
   rememberApprovalsSession: false, activeSkill }`.
 
@@ -347,24 +364,40 @@ Always concatenated into the Nova system prompt regardless of skill.
 ## 8. `nova-agent-bridge` Server Plugin
 
 ### 8a. Layout
-- [ ] `server-plugin/nova-agent-bridge/index.js` — CJS `init`/`exit`/`info`.
-- [ ] `server-plugin/nova-agent-bridge/package.json` — zero runtime deps;
+- [x] `server-plugin/nova-agent-bridge/index.js` — CJS `init`/`exit`/`info`.
+- [x] `server-plugin/nova-agent-bridge/package.json` — zero runtime deps;
   use Node built-ins (`fs/promises`, `path`, `child_process`, `crypto`).
-- [ ] `server-plugin/nova-agent-bridge/config.example.yaml`.
-- [ ] `server-plugin/nova-agent-bridge/README.md` — install steps.
+- [x] `server-plugin/nova-agent-bridge/config.example.yaml`.
+- [x] `server-plugin/nova-agent-bridge/README.md` — install steps.
+- [x] `server-plugin/nova-agent-bridge/paths.js` — pure path-safety helper
+  (not in original plan; extracted from §8c for unit testability).
 
 ### 8b. Routes (`/api/plugins/nova-agent-bridge/*`)
-- [ ] `GET /manifest` → `{ version, root, shellAllowList, capabilities }`.
-- [ ] `GET /health`.
+- [x] `GET /manifest` → `{ id, version, root, shellAllowList, capabilities }`.
+  `capabilities` is `{ fs_list, fs_read, fs_write, fs_delete, fs_move,
+  fs_stat, fs_search, shell_run }`, each `true|false`. Scaffold ships all
+  `false` — extension Phase 4f reads this to decide which tools to
+  register.
+- [x] `GET /health` → `{ ok: true, id, version }`.
 - [ ] `GET /fs/list`, `GET /fs/read`, `POST /fs/write`, `POST /fs/delete`,
   `POST /fs/move`, `GET /fs/stat`, `POST /fs/search` (NDJSON).
+  **Routes wired as `501 not-implemented` stubs**; real handlers land in the
+  Phase 8b handler sprint (blocked on audit-log infra + CSRF wiring).
 - [ ] `POST /shell/run` (NDJSON streaming `stdout`/`stderr`/`exit`).
+  **Route wired as `501 not-implemented` stub**; real handler blocked on
+  same.
 
 ### 8c. Security
-- [ ] Root = `process.cwd()` by default; override via `config.yaml: root:`.
-- [ ] Normalise every request path; reject escapes; reject symlink escapes
-  (`fs.realpath` check).
-- [ ] Deny-list: `.git/**`, `node_modules/**`, `plugins/nova-agent-bridge/**`.
+- [x] Root = `process.cwd()` by default; override via `config.yaml: root:`.
+  (Simple `key: value` parse for now; no YAML dep.)
+- [x] Normalise every request path; reject escapes (pure helper in
+  `paths.js`; covered by `test/nova-paths.test.mjs`, 19 assertions).
+  Reject symlink escapes (`fs.realpath` check) — **pending**, lands with
+  the fs handler sprint.
+- [x] Deny-list: `.git/**`, `node_modules/**`, `plugins/nova-agent-bridge/**`
+  — enforced by `normalizeNovaPath`. Single-segment vs two-segment pair
+  distinction avoids locking out unrelated directories that happen to be
+  named `plugins`.
 - [ ] Max file size read/write: 20 MB.
 - [ ] Shell: no `shell: true`; binaries resolved via allow-list at startup.
 - [ ] CSRF protection mirroring ST's header check.
@@ -373,7 +406,8 @@ Always concatenated into the Nova system prompt regardless of skill.
   `{ ts, user, route, argsSummary, outcome, bytes }`. Never log `content`.
 
 ### 8d. Lifecycle
-- [ ] `exit()` flushes audit log and releases file handles.
+- [x] `exit()` flushes audit log and releases file handles. (Stub today —
+  scaffold has nothing to flush. Shape ready for the audit-log sprint.)
 
 ---
 
@@ -472,18 +506,27 @@ on ST's own `default/content/presets/openai/Default.json` schema.
 ## 13. Tests
 
 All under `test/` using Node `--test`.
-- [ ] `nova-paths.test.mjs` — path-normalisation helper.
-- [ ] `nova-tool-args.test.mjs` — JSON-schema validation of each
+- [x] `nova-paths.test.mjs` — path-normalisation helper.
+- [x] `nova-tool-args.test.mjs` — JSON-schema validation of each
   `NOVA_TOOLS[].parameters` against sample args.
 - [ ] `nova-profile-swap.test.mjs` — mocks `executeSlashCommandsWithOptions`;
   verifies swap/restore on throw and mutex serialisation.
-- [ ] `nova-prompt-compose.test.mjs` — soul+memory concatenation, truncation,
+- [x] `nova-prompt-compose.test.mjs` — soul+memory concatenation, truncation,
   skill ordering.
 - [ ] `nova-audit-redact.test.mjs` — audit entries never include raw content.
-- [ ] `nova-preset.test.mjs` — validates the shipped preset JSON parses,
+- [x] `nova-preset.test.mjs` — validates the shipped preset JSON parses,
   contains required top-level fields, has all marker prompts present, and
   `prompt_order` references only defined identifiers.
-- [ ] Keep `helpers.test.mjs` green.
+- [x] `nova-state.test.mjs` — per-chat state helpers (not in original list;
+  shipped with Phase 3a).
+- [x] `nova-ui-scaffolding.test.mjs` — Phase 2 static source-text assertions.
+- [x] `nova-diff.test.mjs` — unified-diff preview (Phase 4c).
+- [x] `nova-migration.test.mjs` — legacy OpenClaw chatMetadata migration
+  (Phase 1f / §10).
+- [x] `nova-plugin.test.mjs` — nova-agent-bridge plugin exports + route
+  wiring + /manifest shape (not in original list; shipped with Phase 8a/b
+  scaffold).
+- [x] Keep `helpers.test.mjs` green.
 
 ---
 
