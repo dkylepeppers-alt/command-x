@@ -4484,6 +4484,49 @@ const NOVA_SESSION_CAP = 20;                    // plan §3a
 const NOVA_AUDIT_CAP = 500;                     // plan §3a
 const NOVA_MEMORY_CHARS_CAP = 16 * 1024;        // plan §6c truncation budget
 
+/* ----------------------------------------------------------------------
+   NOVA AGENT — module-level turn state (plan §3a).
+
+   Three `let` bindings that the Phase 3b `sendNovaTurn` lifecycle mutates.
+   Declared here so §3b can land as a near-pure diff without also touching
+   the top of the section, and so `_getNovaTurnState()` can ship now as the
+   stable read-only hook Phase 3b tests will assert against.
+
+   - `novaTurnInFlight`: Boolean re-entrancy guard. `sendNovaTurn` sets it
+     true at the top of its happy-path, resets it in a `finally` block
+     (see §3b step 8). Second concurrent call bails with a "turn already
+     in flight" toast rather than stacking abort controllers.
+   - `novaAbortController`: The `AbortController` whose `.signal` is
+     forwarded to `ConnectionManagerRequestService.sendRequest` and to
+     `probeNovaBridge`. Non-null only while a turn is running. Phase 3c's
+     Cancel button calls `.abort()` on it.
+   - `novaToolRegistryVersion`: Monotonic counter bumped by future tool
+     re-registrations (e.g. Phase 4f discovers the bridge plugin
+     mid-session and adds `fs_read`/`shell_run`). Phase 3b reads it at
+     turn start to decide whether to rebuild the tool schema array from
+     `NOVA_TOOLS` (shipped in Phase 4a). 0 means "never registered".
+
+   `_getNovaTurnState()` returns a fresh snapshot on every call.
+   `hasAbort` is a boolean — deliberately NOT the `AbortController`
+   reference, so tests cannot mutate live state through the hook.
+   ---------------------------------------------------------------------- */
+
+let novaTurnInFlight = false;
+let novaAbortController = null;
+let novaToolRegistryVersion = 0;
+
+/**
+ * Read-only snapshot of the module-level Nova turn state. Safe to call
+ * from tests or diagnostics without leaking the live AbortController.
+ */
+function _getNovaTurnState() {
+    return {
+        inFlight: novaTurnInFlight,
+        hasAbort: novaAbortController !== null,
+        registryVersion: novaToolRegistryVersion,
+    };
+}
+
 /** Return the per-chat Nova state blob, lazily initialised. */
 function getNovaState(ctx) {
     const root = ctx?.chatMetadata?.[EXT];

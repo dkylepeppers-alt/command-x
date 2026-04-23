@@ -77,6 +77,36 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-23 — Next-session hand-off: after Phase 3a turn-state scaffolding
+
+**Context:** This PR shipped **Phase 3a's remaining item — module-level turn state** per the prior hand-off. Added three `let` bindings (`novaTurnInFlight = false`, `novaAbortController = null`, `novaToolRegistryVersion = 0`) and a `_getNovaTurnState()` snapshot helper to the NOVA AGENT section of `index.js`, plus `test/nova-turn-state.test.mjs` (9 tests, 216/216 total). No behavioural change — these are the variables §3b will mutate.
+
+**Notes for future agents:**
+- **`_getNovaTurnState()` is the stable read-only test hook.** `hasAbort` is a boolean (`novaAbortController !== null`), deliberately NOT the live reference, so test code can't mutate the active controller via the snapshot. Snapshots are fresh objects on every call — mutating one doesn't affect internal state. If §3b needs a richer hook (e.g. `abortReason`), add fields to the return object but keep all values structured-cloneable primitives.
+- **Placement is load-bearing.** The bindings live in the NOVA AGENT section right after `NOVA_MEMORY_CHARS_CAP` and BEFORE `getNovaState`. `test/nova-turn-state.test.mjs` asserts `turn-state section index > NOVA_STATE_KEY index && < initNovaOnce index` — if you reorganise the section, keep those relative orderings or update the test.
+- **Don't merge these into `getNovaState`.** The per-chat state blob (`chatMetadata[EXT].nova`) is persisted. The module-level turn state is NOT persisted — a turn-in-flight across a page reload is impossible by construction, and persisting `AbortController` is meaningless. Keep them separate.
+- **Re-entrancy contract (§3b preview):** `sendNovaTurn` must check `novaTurnInFlight` at entry. If `true`, show a toast and return without stacking abort controllers. The `finally` block MUST reset `novaTurnInFlight = false` AND `novaAbortController = null` (both, in that order), even on thrown errors. Lock this in `test/nova-turn.test.mjs` with a test that throws from the mock `sendRequest` and asserts `_getNovaTurnState()` reports `{ inFlight: false, hasAbort: false }` afterward.
+- **`novaToolRegistryVersion` semantics:** 0 = "never registered". Phase 3c bumps it after building the initial tool schema from `NOVA_TOOLS`. Phase 4f re-bumps when the bridge probe flips from absent → present (discovers new `fs_*` / `shell_run` tools). `sendNovaTurn` reads it once per turn to decide "do I need to rebuild the `tools` array for `sendRequest`?" — cache the built array at the last observed version.
+
+**What to do next (in order — each is a single reviewable PR):**
+1. **Phase 3b — turn lifecycle** (biggest slice; split if it grows past ~300 LOC).
+   Follow the 8-step contract in `docs/nova-agent-plan.md` §3b. Profile-snapshot/restore in a `try…finally` — lock this with a test that throws from the mock `sendRequest` and asserts the restore slash fired. Must mutate the Phase 3a bindings and must call `_getNovaTurnState()`-visible state back to initial in `finally`.
+2. **Phase 3c — tool handler dispatch + approval modal DOM.** Only after 3b is green. This is where `probeNovaBridge(...)` from Phase 4f finally gets consumed + `novaToolRegistryVersion` gets its first bump.
+3. **Phase 6a/6b — `/nova` slash + settings UI bindings.** Small, independent, can be picked up while 3b is in review.
+
+**Hard constraints still active (copy-forward):**
+- `EXT === "command-x"` with a hyphen. Bracket-access only on `extension_settings`.
+- `buildNovaUnifiedDiff` auto-detect is nullish-only. Pass `isNewFile: true` explicitly when wiring `fs_write` previews against `fs_stat` → ENOENT.
+- `normalizeNovaPath` containment predicate: `relNative === '..' || startsWith('..' + path.sep)`.
+- Plugin `/manifest.version` comes from `package.json` via `resolvePluginVersion()`.
+- Inline-copy test convention: when editing a helper in `index.js`, edit the matching inline copy in `test/nova-*.test.mjs` or tests silently test the wrong function. `test/nova-init-once.test.mjs` inline-copies **three** helpers (getNovaState, migrateLegacyOpenClawMetadata, initNovaOnce); `test/nova-turn-state.test.mjs` mirrors `_getNovaTurnState` via a closure capsule (per-closure `let` bindings reproduce the module-level semantics).
+- Run tests via `node --test test/helpers.test.mjs test/nova-*.test.mjs` (explicit filenames, not `'test/*.test.mjs'`).
+
+**Validation this sprint:**
+- `node --check index.js` clean.
+- `node --test test/helpers.test.mjs test/nova-*.test.mjs` → **216/216 pass** (+9 new turn-state tests; baseline was 207).
+- New DOM: none. New LLM calls: none. New event handlers: none. Pure declarations + one diagnostic helper.
+
 ### 2026-04-23 — Next-session hand-off: after Phase 1f init wiring
 
 **Context:** This PR shipped **Phase 1f — init wiring** per the prior hand-off. Added `NOVA_INIT_VERSION = 1` + `initNovaOnce(ctx)` to the NOVA AGENT section, wired a dedicated Nova `CHAT_CHANGED` listener (separate from the phone-UI-reset one already there), and call it once at extension startup so the initial chat also migrates. Added `test/nova-init-once.test.mjs` (12 new tests, 207/207 total). No behavioural change beyond moving `chatMetadata[EXT].openclaw` → `.legacy_openclaw` on first load.
