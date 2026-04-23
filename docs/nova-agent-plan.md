@@ -319,15 +319,30 @@ Skill = named system-prompt pack + default tier + default tool subset. Single
 Always concatenated into the Nova system prompt regardless of skill.
 
 ### 6a. Location
-- [ ] Default: extension folder —
+- [x] Default: extension folder —
   `SillyTavern/public/scripts/extensions/third-party/command-x/nova/soul.md`
   and `.../nova/memory.md`. Served by ST's static handler so `fetch('./nova/…')`
   works with no plugin.
-- [ ] Seed both files in the repo with starter content (see §6d).
+  - **Shipped:** `defaultNovaSoulMemoryBaseUrl()` returns
+    `/scripts/extensions/third-party/${EXT}/nova` — interpolates `EXT` so
+    a rename lives in one place.
+- [x] Seed both files in the repo with starter content (see §6d).
 
 ### 6b. Load/save
-- [ ] On Nova init, fetch both files; cache in memory. Cache-bust on explicit
+- [x] On Nova init, fetch both files; cache in memory. Cache-bust on explicit
   "Reload soul/memory" and after any self-edit.
+  - **Shipped (read path):** `loadNovaSoulMemory({ baseUrl, fetchImpl,
+    nowImpl, ttlMs, force })` pure helper in `index.js` NOVA AGENT section.
+    Never throws — 404 / network error / non-string body all become an
+    empty string for that file. Both files fetched in parallel via
+    `Promise.all`. Module-level cache with TTL = 5 min; explicit
+    `invalidateNovaSoulMemoryCache()` drops it. Failure results are
+    cached too to prevent hot-loop refetching. Covered by
+    `test/nova-soul-memory.test.mjs` (16 assertions).
+    **Not yet wired from Nova init** — `sendNovaTurn` already accepts
+    `soul` / `memory` params; the Phase 3c composer will pass the loader
+    result. Also not yet invalidated on `nova_write_soul` — Phase 6b
+    self-edit tools land with the Phase 3c handler sprint.
 - [ ] Self-edit tools:
   - `nova_read_soul`, `nova_write_soul` (Write).
   - `nova_read_memory`, `nova_append_memory({ note, tags? })`,
@@ -356,11 +371,12 @@ Always concatenated into the Nova system prompt regardless of skill.
   (6 assertions).
 
 ### 6d. Starter content
-- [ ] `soul.md`: Nova voice/persona — curious, crisp, SillyTavern-native,
+- [x] `soul.md`: Nova voice/persona — curious, crisp, SillyTavern-native,
   confirms destructive ops, explains intent before acting, references the
-  current chat by name.
-- [ ] `memory.md`: empty template with section headers
+  current chat by name. **Shipped:** `nova/soul.md`.
+- [x] `memory.md`: empty template with section headers
   ("User preferences", "Project notes", "Recent wins/failures", "Do not do").
+  **Shipped:** `nova/memory.md`.
 
 ---
 

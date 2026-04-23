@@ -4765,6 +4765,120 @@ async function probeNovaBridge({
 }
 
 /* ----------------------------------------------------------------------
+   NOVA AGENT — soul.md / memory.md loader (plan §6a, §6b).
+
+   Fetches Nova's `soul.md` (persona) and `memory.md` (durable notes)
+   from the extension folder so they can be inlined into the system
+   prompt by `sendNovaTurn`. Both files are served by ST's static
+   handler at `/scripts/extensions/third-party/<EXT>/nova/*.md` — the
+   same path pattern used for `settings.html` at init time — so no
+   plugin is required for the read path. The write path (editing
+   soul/memory via `nova_write_soul` etc.) lands with Phase 6b via
+   the `fs_write` tool or ST's `/api/files/*` fallback; this helper
+   is read-only.
+
+   Contract:
+   - Never throws. A 404, network error, non-text body, or missing
+     global `fetch` resolves to an empty string for that file.
+   - Both files are fetched in parallel via `Promise.all`. A failure
+     on one does not take down the other.
+   - Result is cached in a module-level cache for
+     `NOVA_SOUL_MEMORY_TTL_MS` (5 min). `invalidateNovaSoulMemoryCache()`
+     drops the cache; callers should invoke it after a `nova_write_soul`
+     / `nova_write_memory` / "Reload soul/memory" action.
+   - `fetchImpl` / `nowImpl` are injectable so
+     `test/nova-soul-memory.test.mjs` can drive the helper without a
+     live network or real timers.
+   ---------------------------------------------------------------------- */
+
+const NOVA_SOUL_MEMORY_TTL_MS = 5 * 60_000; // 5 min
+const NOVA_SOUL_FILENAME = 'soul.md';
+const NOVA_MEMORY_FILENAME = 'memory.md';
+
+// Default URL builder — Phase 6b may override `baseUrl` to read from
+// `SillyTavern/data/<user>/user/files/nova/` via `/api/files/*` once
+// the "user-owned soul/memory" flow lands. For the default read path,
+// the extension-bundled copies are served by ST's static handler.
+function defaultNovaSoulMemoryBaseUrl() {
+    // Mirrors the settings.html path in `jQuery(async () => ...)` — uses
+    // the same `EXT` constant so a rename of the extension folder only
+    // has to happen in one place.
+    return `/scripts/extensions/third-party/${EXT}/nova`;
+}
+
+// Module-level cache. Shape: `{ result: { soul, memory }, expiresAt }` or `null` when cold.
+let _novaSoulMemoryCache = null;
+
+function invalidateNovaSoulMemoryCache() {
+    _novaSoulMemoryCache = null;
+}
+
+/**
+ * Fetch one file, coerce to a string, swallow every error. Used as the
+ * per-file primitive inside `loadNovaSoulMemory`. Never throws.
+ */
+async function _fetchNovaMarkdown(url, { fetchImpl }) {
+    const doFetch = typeof fetchImpl === 'function'
+        ? fetchImpl
+        : (typeof fetch === 'function' ? fetch : null);
+    if (!doFetch) return '';
+    let resp;
+    try {
+        resp = await doFetch(url, { method: 'GET' });
+    } catch (_) {
+        return '';
+    }
+    if (!resp || !resp.ok) return '';
+    let text;
+    try {
+        text = await resp.text();
+    } catch (_) {
+        return '';
+    }
+    return typeof text === 'string' ? text : '';
+}
+
+/**
+ * Load Nova's `soul.md` + `memory.md`. See header comment for contract.
+ *
+ * @param {object} [opts]
+ * @param {string}   [opts.baseUrl]   - URL folder containing the two files. Default: extension-bundled path.
+ * @param {function} [opts.fetchImpl] - Test-injectable `fetch` replacement.
+ * @param {function} [opts.nowImpl]   - Test-injectable `Date.now` replacement.
+ * @param {number}   [opts.ttlMs]     - Cache TTL. Default 5 min.
+ * @param {boolean}  [opts.force]     - Bypass the cache. Default false.
+ * @returns {Promise<{ soul: string, memory: string }>}
+ */
+async function loadNovaSoulMemory({
+    baseUrl,
+    fetchImpl,
+    nowImpl,
+    ttlMs = NOVA_SOUL_MEMORY_TTL_MS,
+    force = false,
+} = {}) {
+    const now = typeof nowImpl === 'function' ? nowImpl : Date.now;
+
+    if (!force && _novaSoulMemoryCache && _novaSoulMemoryCache.expiresAt > now()) {
+        return _novaSoulMemoryCache.result;
+    }
+
+    const root = String(baseUrl || defaultNovaSoulMemoryBaseUrl()).replace(/\/+$/, '');
+    const soulUrl = `${root}/${NOVA_SOUL_FILENAME}`;
+    const memoryUrl = `${root}/${NOVA_MEMORY_FILENAME}`;
+
+    // Fetch in parallel. A failure on one file must not take down the
+    // other — each primitive is independently swallowed.
+    const [soul, memory] = await Promise.all([
+        _fetchNovaMarkdown(soulUrl, { fetchImpl }),
+        _fetchNovaMarkdown(memoryUrl, { fetchImpl }),
+    ]);
+
+    const result = { soul, memory };
+    _novaSoulMemoryCache = { result, expiresAt: now() + ttlMs };
+    return result;
+}
+
+/* ----------------------------------------------------------------------
    NOVA AGENT — unified-diff preview helper (plan §4c).
 
    Pure string function used by the `fs_write` approval modal (Phase 3c)

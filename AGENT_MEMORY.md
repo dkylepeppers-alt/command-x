@@ -77,6 +77,45 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-23 — Next-session hand-off: after Phase 6a soul/memory loader
+
+**Scope of this PR:** Phase 6a (read path). Added `loadNovaSoulMemory(...)` pure helper to `index.js` NOVA AGENT section, placed between the `probeNovaBridge` block and the `buildNovaUnifiedDiff` block. Supporting pieces: `NOVA_SOUL_MEMORY_TTL_MS = 5 * 60_000`, `NOVA_SOUL_FILENAME`, `NOVA_MEMORY_FILENAME`, `defaultNovaSoulMemoryBaseUrl()`, `_fetchNovaMarkdown()` per-file primitive, `invalidateNovaSoulMemoryCache()`. New `test/nova-soul-memory.test.mjs` (16 assertions). Full suite **255/255 pass** (+16 vs prior 239).
+
+**What §6a ships (and what remains):**
+- ✅ Pure DI helper (`{ baseUrl, fetchImpl, nowImpl, ttlMs, force }`) that never throws. 404 / network error / decode error / non-string body all coerce to an empty string for that file. Both files fetched in parallel via `Promise.all`; a failure on one does not take down the other.
+- ✅ Module-level cache with TTL (5 min default) + explicit invalidation. **Failure results are cached too** — otherwise a missing `soul.md` would cause the composer to hot-loop fetch on every turn. If that ever becomes undesirable (e.g. user drops the file in live), Phase 6b's "Reload soul/memory" button must call `invalidateNovaSoulMemoryCache()`.
+- ✅ `defaultNovaSoulMemoryBaseUrl()` uses `EXT` interpolation so an extension-folder rename only lives in one place (matches the pattern `settings.html` already uses at init time).
+- ✅ Starter content (`nova/soul.md`, `nova/memory.md`) was already in the repo from an earlier phase; §6d checkboxes now ticked to reflect reality.
+- ⏳ **Not yet wired from Nova init.** `sendNovaTurn` already accepts `soul` / `memory` parameters (added in Phase 3b). Phase 3c's composer wiring is the first caller — it should `await loadNovaSoulMemory({ fetchImpl: fetch })` then forward the result. Don't call it from `initNovaOnce` — the read is lazy by design (5-min TTL handles the steady state).
+- ⏳ **Not yet invalidated on self-edit.** The `nova_write_soul` / `nova_overwrite_memory` tool handlers (Phase 6b) must call `invalidateNovaSoulMemoryCache()` after a successful write so the next turn picks up the change.
+
+**Notes for future agents:**
+- **Failure caching is the right default.** The test `caches failure results too` locks this in. Rationale: `loadNovaSoulMemory` runs once per turn in the Phase 3c path; if `soul.md` is missing, re-hitting a 404 every turn is waste. The TTL (5 min) bounds the staleness for users who drop a new file. If you ever relax this, update the test and document the change in this memory file.
+- **`_fetchNovaMarkdown` is the per-file primitive** — it's the one place that knows how to coerce non-text bodies. `loadNovaSoulMemory` only orchestrates the two parallel calls + caches. Keep them separate; Phase 6b's `nova_read_soul` tool handler will call `_fetchNovaMarkdown` directly with a per-file URL.
+- **`fetchImpl` / `nowImpl` injection is mandatory for tests.** The production path falls through to global `fetch` / `Date.now`. The test file uses a small `makeFetchMock` factory that records `calls[]` for assertion — reuse the pattern if you add more fetch-backed helpers.
+- **Cache shape is `{ result, expiresAt }` or `null`.** Matches the `_novaBridgeProbeCache` convention in `probeNovaBridge`. If Phase 6b adds a separate "user-owned soul/memory" read path (under `SillyTavern/data/<user>/user/files/nova/`), keep them on the same cache key — the baseUrl isn't in the key, so switching `baseUrl` between calls within the TTL returns the first URL's cached result. That matches the probe's semantics and is the right trade-off for the expected usage (users pick a root and stick with it).
+- **Don't merge `loadNovaSoulMemory` into `sendNovaTurn` or `initNovaOnce`.** It's a single-purpose pure helper. The Phase 3c composer calls it; nobody else does. Wiring it into init would force the fetch at chat-change time, which is the wrong timing (users may never open Nova in a given chat).
+- **Source-text tests are brittle by design.** `test/nova-soul-memory.test.mjs` asserts the loader lives strictly between `probeNovaBridge` and `buildNovaUnifiedDiff` (both already had this relative position for §4f / §4c). If you reorganise the section, keep the ordering or update both relative-position asserts.
+
+**What to do next (in order — each is a single reviewable PR):**
+1. **Phase 3c — tool handler dispatch + approval modal DOM.** Still the biggest remaining slice. Replace the `toolCallsDeferred` branch in `sendNovaTurn` with a real dispatch loop. Gate Write/Full tool calls on a `cxConfirm` approval modal using `buildNovaUnifiedDiff` (§4c) for `fs_write`. This is the phase that consumes `probeNovaBridge` (§4f) AND `loadNovaSoulMemory` (§6a) — the composer passes the loader result into `sendNovaTurn`'s `soul` / `memory` args.
+2. **Phase 2c — approval modal DOM + connection-profile picker + skill picker.** Lands alongside 3c since the dispatch loop needs the approval modal.
+3. **Phase 6b — self-edit tools** (`nova_write_soul`, `nova_append_memory`, `nova_overwrite_memory`). Each handler must call `invalidateNovaSoulMemoryCache()` after a successful write.
+4. **Phase 7 — settings surface.** Profile picker, tier radio, caps, plugin URL, "Install preset" button.
+
+**Hard constraints still active (copy-forward):**
+- `EXT === "command-x"` with a hyphen. Bracket-access only on `extension_settings`.
+- `buildNovaUnifiedDiff` auto-detect is nullish-only. Pass `isNewFile: true` explicitly when wiring `fs_write` previews against `fs_stat` → ENOENT.
+- `normalizeNovaPath` containment predicate: `relNative === '..' || startsWith('..' + path.sep)`.
+- Plugin `/manifest.version` comes from `package.json` via `resolvePluginVersion()`.
+- Inline-copy test convention: when editing a helper in `index.js`, edit the matching inline copy in `test/nova-*.test.mjs` or tests silently test the wrong function. `test/nova-soul-memory.test.mjs` inline-copies `loadNovaSoulMemory` + `_fetchNovaMarkdown` + `invalidateNovaSoulMemoryCache` via a `makeCapsule()` closure (needed so the module-level `_novaSoulMemoryCache` binding has per-test isolation — reusing a single capsule would leak cache across tests).
+- Run tests via `node --test test/helpers.test.mjs test/nova-*.test.mjs` (explicit filenames, not `'test/*.test.mjs'`).
+
+**Validation this sprint:**
+- `node --check index.js` clean.
+- `node --test test/helpers.test.mjs test/nova-*.test.mjs` → **255/255 pass** (+16 new soul/memory tests; baseline was 239).
+- No new DOM, no new LLM calls, no new event listeners. Cache invalidation is explicit (callers opt in) rather than tied to `CHAT_CHANGED` — soul/memory are extension-bundled, not per-chat.
+
 ### 2026-04-23 — Next-session hand-off: after Phase 3b turn-lifecycle skeleton
 
 **Scope of this PR:** Phase 3b skeleton. Added `sendNovaTurn` to the NOVA AGENT section of `index.js` (dependency-injected async helper that never throws), plus four small supporting pure helpers: `resolveNovaSkill`, `buildNovaRequestMessages`, `parseNovaProfilePipe`, `getActiveNovaProfile`. Added `NOVA_BASE_PROMPT`, `NOVA_TOOL_CONTRACT`, `NOVA_DEFAULT_MAX_TOOL_CALLS`, `NOVA_DEFAULT_TURN_TIMEOUT_MS` constants. New test file `test/nova-turn.test.mjs` (23 assertions). Full suite: **239/239 pass** (+23 vs baseline 216).
