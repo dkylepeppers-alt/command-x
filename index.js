@@ -5666,6 +5666,10 @@ jQuery(async () => {
         // Nova-specific CHAT_CHANGED hook (plan §1f). Kept separate from the
         // handler above so a future Nova-disabled toggle (plan §7c) can
         // short-circuit it independently of the phone UI reset logic.
+        // Gate precedence once §7c lands:
+        //   extension disabled (settings.enabled === false) → skip BOTH handlers.
+        //   extension enabled + Nova disabled → skip THIS handler only.
+        //   both enabled → both handlers run.
         eventSource.on(event_types.CHAT_CHANGED, () => {
             if (!settings.enabled) return;
             try { initNovaOnce(getContext()); } catch (e) {
