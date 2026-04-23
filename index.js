@@ -4870,6 +4870,65 @@ function migrateLegacyOpenClawMetadata(ctx) {
 }
 
 /* ----------------------------------------------------------------------
+   NOVA AGENT — one-shot per-chat init (plan §1f).
+
+   `initNovaOnce(ctx)` is the single entry point wired from the Nova
+   `CHAT_CHANGED` listener (and called once at extension startup for the
+   initial chat that loaded before the listener was attached). It is
+   idempotent by design: the second call on the same chat is a cheap
+   constant-time check that returns `{ ran: false, reason: 'already-initialised' }`.
+
+   Gating: a `chatMetadata[EXT].nova._initVersion` stamp. If it already
+   equals (or exceeds) the current `NOVA_INIT_VERSION`, we short-circuit
+   so pre-Nova chats only pay the migration cost the first time they load
+   after upgrading. Bump `NOVA_INIT_VERSION` whenever a new one-shot
+   migration step is added to this function — existing chats will then
+   re-run `initNovaOnce` exactly once to pick up the new step.
+
+   Ordering: metadata migrations run BEFORE the stamp is written. If any
+   migration throws, we do not stamp — the next chat load will retry.
+   Callers should never `throw` from this function; it catches internally
+   and surfaces a `reason` instead so a misbehaving migration cannot break
+   the chat-switch handler.
+   ---------------------------------------------------------------------- */
+
+const NOVA_INIT_VERSION = 1;
+
+/**
+ * Run all one-shot per-chat Nova migrations exactly once, guarded by a
+ * version stamp persisted in chat metadata. Safe to call on every
+ * `CHAT_CHANGED`; the second call is a cheap noop.
+ */
+function initNovaOnce(ctx) {
+    const root = ctx?.chatMetadata?.[EXT];
+    if (!root || typeof root !== 'object') {
+        return { ran: false, reason: 'no-metadata' };
+    }
+    // `getNovaState` lazily creates `.nova` and heals malformed blobs.
+    // Using it here means the init-version stamp always lives on a well-
+    // formed nova blob, so downstream code can rely on the documented
+    // shape.
+    const state = getNovaState(ctx);
+    const stampedVersion = Number(state?._initVersion) || 0;
+    if (stampedVersion >= NOVA_INIT_VERSION) {
+        return { ran: false, reason: 'already-initialised', version: stampedVersion };
+    }
+
+    let migration;
+    try {
+        migration = migrateLegacyOpenClawMetadata(ctx);
+    } catch (err) {
+        // Do not stamp on failure — the next chat load will retry.
+        try { console.warn('[command-x] initNovaOnce: migration failed', err); } catch (_) { /* noop */ }
+        return { ran: false, reason: 'migration-error', error: String(err?.message || err) };
+    }
+
+    state._initVersion = NOVA_INIT_VERSION;
+    if (ctx?.saveMetadataDebounced) ctx.saveMetadataDebounced();
+    return { ran: true, reason: 'initialised', version: NOVA_INIT_VERSION, migration };
+}
+
+/* ----------------------------------------------------------------------
    NOVA AGENT — tool registry (plan §4) + skills (plan §5).
 
    These arrays are PURE DATA — no handlers, no skill dispatch, no
@@ -5604,11 +5663,28 @@ jQuery(async () => {
             if (phoneContainer) rebuildPhone();
         });
 
+        // Nova-specific CHAT_CHANGED hook (plan §1f). Kept separate from the
+        // handler above so a future Nova-disabled toggle (plan §7c) can
+        // short-circuit it independently of the phone UI reset logic.
+        eventSource.on(event_types.CHAT_CHANGED, () => {
+            if (!settings.enabled) return;
+            try { initNovaOnce(getContext()); } catch (e) {
+                try { console.warn(`[${EXT}] initNovaOnce threw:`, e); } catch (_) { /* noop */ }
+            }
+        });
+
         if (settings.enabled) {
             createPanel();
             if (settings.autoDetectNpcs !== false) injectContactsPrompt();
             injectQuestPrompt();
             if (settings.trackLocations) injectMapPrompt();
+            // Phase 1f: run Nova's one-shot init for the chat that was
+            // already loaded when the listener above was attached. Without
+            // this, the very first chat of a session would skip migration
+            // until the user switched chats.
+            try { initNovaOnce(ctx); } catch (e) {
+                try { console.warn(`[${EXT}] initNovaOnce (startup) threw:`, e); } catch (_) { /* noop */ }
+            }
         }
         console.log(`[${EXT}] v${VERSION} Loaded OK`);
     } catch (err) {
