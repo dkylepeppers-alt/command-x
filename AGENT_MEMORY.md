@@ -301,3 +301,61 @@ Left an inline comment on the `defaultTools` line explaining the rationale
 so the next agent doesn't re-add it.
 
 <!-- Add new entries above this line using the template in "How to Use This File". -->
+
+### 2026-04-23 — Nova Phase 4c + Phase 1f/§10 pure-helper sprint (this PR)
+
+**Context:** Landed two more pure helpers before the agent loop lands:
+`buildNovaUnifiedDiff` (plan §4c — drives the `fs_write` approval modal in
+Phase 3c) and `migrateLegacyOpenClawMetadata` (plan §1f / §10 — moves any
+remaining `chatMetadata[EXT].openclaw` blobs into `legacy_openclaw` before
+Nova goes live). No DOM, no LLM calls, no event handlers.
+
+**Notes for future agents:**
+- **`buildNovaUnifiedDiff` is a preview helper, not a patch generator.**
+  It emits a linear `-` / `+` / ` ` line sequence with `--- a/<path>` and
+  `+++ b/<path>` headers (or `--- /dev/null` for new files). It does NOT
+  emit `@@` hunk headers and does NOT collapse unchanged context; the
+  approval modal is expected to scroll. Keep it that way — switching to
+  real hunks would require context-radius tuning that is a separate design
+  decision.
+- **Truncation marker text is locked by a test.** Sentinel is `"… diff
+  truncated (N more lines) …"` with singular `"1 more line"`. Changing
+  that text breaks `test/nova-diff.test.mjs`. If you reword it, update the
+  test in the same PR.
+- **LCS memory is O(m·n) as `Uint32Array`.** Fine up to a few thousand
+  lines per file; that's the envelope Nova is meant to edit. If you ever
+  need to diff very large files, short-circuit *before* calling the
+  helper — don't try to make the helper lazy, it'll bit-rot the shape
+  invariants.
+- **`migrateLegacyOpenClawMetadata` is idempotent and touches metadata
+  only.** The settings-side `openclawMode` retirement is already wired
+  via the `LEGACY_KEYS` list in `loadSettings()` (see 2026-04-22 entry);
+  this helper is the chatMetadata companion. When a legacy blob exists
+  but `legacy_openclaw` was already written by a prior session, the raw
+  `openclaw` key is dropped without overwriting the preserved copy — so
+  users' recovery data stays intact.
+- **Helper is not yet wired into init.** Deliberate. The plan says
+  migration runs on "first Nova init"; that init path doesn't exist yet
+  (lands with Phase 3b turn lifecycle). Calling it from the existing
+  `CHAT_CHANGED` handler today would run it against every pre-Nova chat
+  load for zero benefit. Wire it alongside the Nova turn bootstrap.
+- **Inline-copy test pattern still applies.** Both new tests embed a copy
+  of the helper — `index.js` can't be imported from plain Node because of
+  ST runtime deps. When you edit either helper in `index.js`, mirror the
+  edit into `test/nova-diff.test.mjs` / `test/nova-migration.test.mjs` or
+  they go stale-silently.
+
+**What's still deferred (explicitly):**
+- Phase 3b turn lifecycle (and the init wiring for
+  `migrateLegacyOpenClawMetadata`).
+- Phase 3c tool handlers + approval modal DOM (will consume
+  `buildNovaUnifiedDiff`).
+- Phase 3d cancellation UI.
+- Phase 6a/6b soul/memory runtime loader + self-edit tools.
+- Phase 7a/7b settings surface.
+- Phase 8 `nova-agent-bridge` server plugin.
+- Phase 9 profile swap.
+
+**Validation:** `node --check index.js` clean;
+`node --test 'test/*.test.mjs'` → **136/136 pass** (+26 new: 17 diff,
+9 migration).

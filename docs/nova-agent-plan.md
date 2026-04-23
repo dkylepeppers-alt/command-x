@@ -72,9 +72,17 @@ Out of scope / explicitly rejected by user:
 - [ ] Replace with a new "Nova Agent" section.
 
 ### 1f. Storage / metadata migration
-- [ ] On Nova init, move `ctx.chatMetadata[EXT].openclaw` →
+- [x] On Nova init, move `ctx.chatMetadata[EXT].openclaw` →
   `ctx.chatMetadata[EXT].legacy_openclaw` and save metadata. Do not read it
   afterwards. Delete `settings.openclawMode` if present and persist settings.
+  - **Shipped (pure helper):** `migrateLegacyOpenClawMetadata(ctx)` in
+    `index.js` NOVA AGENT section. Idempotent, preserves any
+    previously-moved `legacy_openclaw` blob, triggers
+    `saveMetadataDebounced` only when state actually changed. Covered by
+    `test/nova-migration.test.mjs` (9 assertions). Settings-side migration
+    (`settings.openclawMode`) is already handled by the `LEGACY_KEYS` list
+    in `loadSettings()`. Init wiring (calling the helper from Nova init /
+    `CHAT_CHANGED`) lands with the Phase 3b turn lifecycle sprint.
 
 ---
 
@@ -197,9 +205,14 @@ own plugin folder by default.
   "Remember approvals this session" is on — enforced in Phase 3c.
 
 ### 4c. Diff preview helper
-- [ ] For every `fs_write` approval: fetch current file, render unified diff
+- [x] For every `fs_write` approval: fetch current file, render unified diff
   vs `content`. New files show raw content. Modal blocks the loop until
   accept/reject.
+  - **Shipped (pure helper):** `buildNovaUnifiedDiff(oldContent, newContent,
+    { path, maxLines })` in `index.js` NOVA AGENT section. LCS-based line
+    diff, `--- /dev/null` header for new files, bounded output with
+    "N more lines" truncation sentinel. Covered by `test/nova-diff.test.mjs`
+    (17 assertions). Modal wiring lands with Phase 3c.
 
 ### 4d. SillyTavern API tools (no plugin)
 - [x] `st_list_characters`, `st_read_character`, `st_write_character` — schemas shipped.
@@ -473,17 +486,23 @@ on ST's own `default/content/presets/openai/Default.json` schema.
 
 All under `test/` using Node `--test`.
 - [ ] `nova-paths.test.mjs` — path-normalisation helper.
-- [ ] `nova-tool-args.test.mjs` — JSON-schema validation of each
+- [x] `nova-tool-args.test.mjs` — JSON-schema validation of each
   `NOVA_TOOLS[].parameters` against sample args.
 - [ ] `nova-profile-swap.test.mjs` — mocks `executeSlashCommandsWithOptions`;
   verifies swap/restore on throw and mutex serialisation.
-- [ ] `nova-prompt-compose.test.mjs` — soul+memory concatenation, truncation,
+- [x] `nova-prompt-compose.test.mjs` — soul+memory concatenation, truncation,
   skill ordering.
 - [ ] `nova-audit-redact.test.mjs` — audit entries never include raw content.
-- [ ] `nova-preset.test.mjs` — validates the shipped preset JSON parses,
+- [x] `nova-preset.test.mjs` — validates the shipped preset JSON parses,
   contains required top-level fields, has all marker prompts present, and
   `prompt_order` references only defined identifiers.
-- [ ] Keep `helpers.test.mjs` green.
+- [x] `nova-state.test.mjs` — per-chat state helpers (not in original list;
+  shipped with Phase 3a).
+- [x] `nova-ui-scaffolding.test.mjs` — Phase 2 static source-text assertions.
+- [x] `nova-diff.test.mjs` — unified-diff preview (Phase 4c).
+- [x] `nova-migration.test.mjs` — legacy OpenClaw chatMetadata migration
+  (Phase 1f / §10).
+- [x] Keep `helpers.test.mjs` green.
 
 ---
 

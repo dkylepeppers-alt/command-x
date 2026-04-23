@@ -4588,6 +4588,131 @@ function composeNovaSystemPrompt({ basePrompt = '', skillPrompt = '', soul = '',
 }
 
 /* ----------------------------------------------------------------------
+   NOVA AGENT — unified-diff preview helper (plan §4c).
+
+   Pure string function used by the `fs_write` approval modal (Phase 3c)
+   to render a "you are about to change X" preview before the user clicks
+   Approve. Not a full patch generator — does not emit `@@` hunk headers,
+   does not collapse unchanged context, does not try to be `diff -u` byte
+   compatible. The goal is a legible, bounded, easily-reviewed list of
+   `-` / `+` / ` ` lines for the modal. Truncates large diffs to a
+   configurable line cap with an explicit "N more lines" sentinel so the
+   LLM and the user both know content was hidden.
+   ---------------------------------------------------------------------- */
+
+const NOVA_DIFF_MAX_LINES_DEFAULT = 2000;
+
+/**
+ * Build a preview unified-diff between `oldContent` and `newContent`.
+ *
+ * @param {string|null|undefined} oldContent Previous file contents, or nullish
+ *     / empty string to signal "new file" (emits `/dev/null` from-header and
+ *     `+`-only body).
+ * @param {string} newContent Proposed new file contents.
+ * @param {{ path?: string, maxLines?: number }} [opts]
+ * @returns {string} Empty string when contents are identical; otherwise a
+ *     multi-line unified-diff-style preview.
+ */
+function buildNovaUnifiedDiff(oldContent, newContent, { path = '', maxLines = NOVA_DIFF_MAX_LINES_DEFAULT } = {}) {
+    const safePath = String(path || 'file').replace(/[\r\n]/g, ' ');
+    const newStr = String(newContent ?? '');
+    const isNewFile = oldContent === null || oldContent === undefined || oldContent === '';
+    const oldStr = isNewFile ? '' : String(oldContent);
+
+    if (oldStr === newStr) return '';
+
+    const oldLines = oldStr === '' ? [] : oldStr.split('\n');
+    const newLines = newStr.split('\n');
+
+    // LCS table on lines — O(m*n) memory. With the `maxLines` cap below we
+    // still do the full LCS pass on the raw content because the cap only
+    // trims the output, not the comparison. That is intentional: a 1k-line
+    // file with a small change should render correctly even if the file is
+    // long. For pathological inputs (>10k lines) callers should short-circuit
+    // upstream before calling this helper.
+    const m = oldLines.length, n = newLines.length;
+    const dp = Array.from({ length: m + 1 }, () => new Uint32Array(n + 1));
+    for (let i = m - 1; i >= 0; i--) {
+        for (let j = n - 1; j >= 0; j--) {
+            dp[i][j] = oldLines[i] === newLines[j]
+                ? dp[i + 1][j + 1] + 1
+                : Math.max(dp[i + 1][j], dp[i][j + 1]);
+        }
+    }
+
+    const body = [];
+    let i = 0, j = 0;
+    while (i < m && j < n) {
+        if (oldLines[i] === newLines[j]) { body.push(' ' + oldLines[i]); i++; j++; }
+        else if (dp[i + 1][j] >= dp[i][j + 1]) { body.push('-' + oldLines[i]); i++; }
+        else { body.push('+' + newLines[j]); j++; }
+    }
+    while (i < m) body.push('-' + oldLines[i++]);
+    while (j < n) body.push('+' + newLines[j++]);
+
+    const cap = Math.max(1, Number.isFinite(maxLines) ? Math.floor(maxLines) : NOVA_DIFF_MAX_LINES_DEFAULT);
+    let bodyOut;
+    if (body.length > cap) {
+        const hidden = body.length - cap;
+        bodyOut = body.slice(0, cap);
+        bodyOut.push(`… diff truncated (${hidden} more line${hidden === 1 ? '' : 's'}) …`);
+    } else {
+        bodyOut = body;
+    }
+
+    const fromHeader = isNewFile ? '--- /dev/null' : `--- a/${safePath}`;
+    const toHeader = `+++ b/${safePath}`;
+    return [fromHeader, toHeader, ...bodyOut].join('\n');
+}
+
+/* ----------------------------------------------------------------------
+   NOVA AGENT — legacy OpenClaw metadata migration (plan §1f / §10).
+
+   One-shot, idempotent mutator. The OpenClaw app was removed in Phase 1,
+   but users who ran earlier versions still have
+   `ctx.chatMetadata[command_x].openclaw` blobs in their per-chat metadata.
+   The plan requires we move them to `.legacy_openclaw` (preserving the
+   data for forensics / user recovery) and never read them again. The
+   settings-side migration (`settings.openclawMode`) is already handled by
+   `LEGACY_KEYS` inside `loadSettings()` — this helper only touches
+   `chatMetadata`.
+
+   Idempotency contract:
+   - No legacy key present → noop.
+   - Legacy key present, target empty → move.
+   - Legacy key present, target also present (prior session already moved) →
+     drop the raw legacy key, do not overwrite the preserved copy.
+   - `chatMetadata[EXT]` missing or non-object → noop.
+   ---------------------------------------------------------------------- */
+
+/**
+ * Migrate `ctx.chatMetadata[EXT].openclaw` → `.legacy_openclaw`.
+ * Returns a small diagnostic object so init / tests can assert behaviour.
+ * Persists metadata via `ctx.saveMetadataDebounced()` only when something
+ * actually changed.
+ */
+function migrateLegacyOpenClawMetadata(ctx) {
+    const root = ctx?.chatMetadata?.[EXT];
+    if (!root || typeof root !== 'object') {
+        return { migrated: false, reason: 'no-metadata' };
+    }
+    if (!('openclaw' in root)) {
+        return { migrated: false, reason: 'no-legacy-key' };
+    }
+    if ('legacy_openclaw' in root) {
+        // Prior session already preserved the blob. Drop the raw legacy key
+        // so we don't pay the migration check on every future chat load.
+        delete root.openclaw;
+        if (ctx?.saveMetadataDebounced) ctx.saveMetadataDebounced();
+        return { migrated: false, reason: 'already-migrated' };
+    }
+    root.legacy_openclaw = root.openclaw;
+    delete root.openclaw;
+    if (ctx?.saveMetadataDebounced) ctx.saveMetadataDebounced();
+    return { migrated: true, reason: 'moved' };
+}
+
+/* ----------------------------------------------------------------------
    NOVA AGENT — tool registry (plan §4) + skills (plan §5).
 
    These arrays are PURE DATA — no handlers, no skill dispatch, no
