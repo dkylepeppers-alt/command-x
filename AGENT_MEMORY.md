@@ -77,6 +77,44 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-23 (evening) — Next-session hand-off: after Phase 3c precursor (tier + approval gate)
+
+**Scope of this PR (adds to the same branch as the Phase 6a loader):** one new pure helper slice for the Phase 3c dispatch loop. Added `novaToolGate({ permission, tier, toolName, rememberedApprovals })` to `index.js` NOVA AGENT section, placed between `loadNovaSoulMemory` and `buildNovaUnifiedDiff`. Supporting pieces: `NOVA_TIERS` + `NOVA_PERMISSIONS` frozen enums, `_NOVA_TIER_ALLOWS` lookup table (Sets for O(1) checks), `_novaRememberedApprovalsHas` container helper. New `test/nova-tool-gate.test.mjs` (26 assertions across 6 suites). Full suite **281/281 pass** (+26 vs prior 255).
+
+**What this ships (and what remains for Phase 3c):**
+- ✅ Closed-enum decision contract: return `{ allowed, requiresApproval, reason? }`. `reason` values are a closed set: `tier-too-low`, `unknown-permission`, `missing-permission`. The Phase 3c dispatcher should branch on these and surface them verbatim in the audit log — don't map them to generic "denied" strings.
+- ✅ Defensive defaults: missing `permission` → denied (`missing-permission`, not "read"). Missing / malformed `tier` → falls back to strictest (`'read'`). Malformed `rememberedApprovals` (object / string / number / Symbol) is ignored — the gate returns `requiresApproval: true` as if nothing were remembered.
+- ✅ Two independent decisions in one call: tier gate AND approval gate. Design rationale: Phase 3c's dispatch loop needs both before it decides whether to `cxConfirm` — splitting into two helpers would force every caller to sequence them in the same order, and the tests would have to re-assert "approval is never requested for a tier-denied tool" at every call site. Folding both into one decision was the right trade-off; the 3×3 matrix test locks it in.
+- ✅ `toolName` + empty-string toolName defeat the `rememberedApprovals` bypass. Both tests `missing toolName defeats the remembered-approvals bypass` and `empty-string toolName defeats the remembered-approvals bypass` lock this in. Rationale: an LLM could send a tool_call with an empty/missing `function.name` and a matching entry could exist in the set; we want that to re-confirm, not silently run.
+- ⏳ **Not wired from `sendNovaTurn` yet.** Phase 3c replaces the `toolCallsDeferred` branch with a real dispatch loop that calls `novaToolGate` per tool_call, routes through `cxConfirm` when `requiresApproval`, and emits one audit entry per gate decision. Don't wire this from anywhere else — the gate is meant to run exactly once per tool_call, right before approval.
+- ⏳ **`rememberedApprovals` storage shape for Phase 3c.** The plan says `rememberApprovalsSession: false` is a boolean setting in `settings.nova`, but the per-session remembered-tool-names list lives elsewhere. Phase 3c should store it at `ctx.chatMetadata[EXT].nova.sessions[activeSessionId].rememberedApprovals = Set | string[]`. The gate already accepts either shape.
+
+**Notes for future agents:**
+- **Enum additions are breaking.** `NOVA_TIERS` and `NOVA_PERMISSIONS` are frozen and the gate branches on exact membership. If Phase 4/5 adds a new permission class (e.g. `'network'`), update BOTH enums, `_NOVA_TIER_ALLOWS`, AND the inline-copy in `test/nova-tool-gate.test.mjs` or the matrix test silently stops covering it. The `NOVA_TOOLS coverage` test auto-detects new permissions in the registry and fails loudly if they're missing from `NOVA_PERMISSIONS` — don't remove it.
+- **`_NOVA_TIER_ALLOWS` uses Sets, not arrays.** The hot path is `allows.has(permission)` which runs once per tool_call in the dispatch loop. If you swap to arrays for "simplicity" you'll take an `O(n)` hit at a site that already has an LLM round-trip in the critical path; negligible in practice but the convention is set — keep the Sets.
+- **Why approval is "false" on tier-denied tools, not "true".** A denied tool never runs, so asking the user to approve it would be wrong. The gate contract is: `requiresApproval: true` means "run the cxConfirm and, if approved, execute the tool." On a denied call, nothing executes regardless of the user's answer. Test `tier-denied tools never need approval` locks this in.
+- **Inline-copy test convention strikes again.** `test/nova-tool-gate.test.mjs` inline-copies `novaToolGate` + `NOVA_TIERS` + `NOVA_PERMISSIONS` + `_NOVA_TIER_ALLOWS` + `_novaRememberedApprovalsHas`. If you edit the production helper, edit the inline copy too, or the tests silently test the wrong function.
+- **Source-shape tests pin the ordering.** The gate must live between `loadNovaSoulMemory` and `buildNovaUnifiedDiff`. If you reorganise the NOVA AGENT section, update `gate helper lives between soul/memory loader and diff helper` to reflect the new ordering.
+
+**What to do next (in order — each is a single reviewable PR):**
+1. **Phase 3c — tool handler dispatch loop + approval modal DOM.** Now has all its pure helpers shipped (`buildNovaUnifiedDiff`, `loadNovaSoulMemory`, `novaToolGate`, `composeNovaSystemPrompt`, `buildNovaRequestMessages`). The loop: for each tool_call, resolve to `NOVA_TOOLS` entry → call `novaToolGate` → on `allowed:false` skip with audit entry → on `requiresApproval:true` call `cxConfirm` with `buildNovaUnifiedDiff` preview for `fs_write` → on approve, call handler → append `role:'tool'` message → re-call `sendRequest`. Enforce `maxToolCalls` cap with one final audit entry on hit. Also the phase that finally consumes `probeNovaBridge`.
+2. **Phase 2c — approval modal DOM shell + connection-profile picker + skill picker.** Must land alongside 3c (3c's `cxConfirm` call site needs the diff-renderer pane). Use `cxConfirm`, never native.
+3. **Phase 6b — self-edit tools** (`nova_read_soul`, `nova_write_soul`, `nova_read_memory`, `nova_append_memory`, `nova_overwrite_memory`). Each write handler must call `invalidateNovaSoulMemoryCache()` after success.
+4. **Phase 7 — settings surface.** Profile picker from `/profile-list`, tier radio (use `NOVA_TIERS`), caps, plugin URL, "Install preset" button.
+
+**Hard constraints still active (copy-forward):**
+- `EXT === "command-x"` with a hyphen. Bracket-access only on `extension_settings`.
+- `buildNovaUnifiedDiff` auto-detect is nullish-only. Pass `isNewFile: true` explicitly when wiring `fs_write` previews against `fs_stat` → ENOENT.
+- `normalizeNovaPath` containment predicate: `relNative === '..' || startsWith('..' + path.sep)`.
+- Plugin `/manifest.version` comes from `package.json` via `resolvePluginVersion()`.
+- Inline-copy test convention: when editing a helper in `index.js`, edit the matching inline copy in `test/nova-*.test.mjs`. `test/nova-tool-gate.test.mjs` inline-copies **five** symbols; keep them in lockstep.
+- Run tests via `node --test test/helpers.test.mjs test/nova-*.test.mjs` (explicit filenames).
+
+**Validation this sprint:**
+- `node --check index.js` clean.
+- `node --test test/helpers.test.mjs test/nova-*.test.mjs` → **281/281 pass** (+26 new gate tests; baseline was 255).
+- No new DOM, no new LLM calls, no new event listeners, no new settings. Pure decision helper + enums.
+
 ### 2026-04-23 — Next-session hand-off: after Phase 6a soul/memory loader
 
 **Scope of this PR:** Phase 6a (read path). Added `loadNovaSoulMemory(...)` pure helper to `index.js` NOVA AGENT section, placed between the `probeNovaBridge` block and the `buildNovaUnifiedDiff` block. Supporting pieces: `NOVA_SOUL_MEMORY_TTL_MS = 5 * 60_000`, `NOVA_SOUL_FILENAME`, `NOVA_MEMORY_FILENAME`, `defaultNovaSoulMemoryBaseUrl()`, `_fetchNovaMarkdown()` per-file primitive, `invalidateNovaSoulMemoryCache()`. New `test/nova-soul-memory.test.mjs` (16 assertions). Full suite **255/255 pass** (+16 vs prior 239).

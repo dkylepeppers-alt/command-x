@@ -197,6 +197,18 @@ Chat-style agent transcript. Layout (top → bottom):
   `shouldRegister: () => false` default, flipped during the turn.
 - [ ] Single `NOVA_TOOLS` array: `{ name, displayName, description,
   parameters, permission: 'read'|'write'|'shell', handler, formatApproval }`.
+- [x] **Tier + approval gate (precursor).** Pure helper
+  `novaToolGate({ permission, tier, toolName, rememberedApprovals })` in
+  `index.js` NOVA AGENT section. Returns `{ allowed, requiresApproval,
+  reason? }`. Tier `'read'` allows read-only; `'write'` allows read+write;
+  `'full'` allows read+write+shell. Reads never need approval; write/shell
+  need approval unless the tool is in `rememberedApprovals` (Set or
+  Array). Malformed `tier` defaults to the strictest (`'read'`); unknown
+  `permission` denies with reason `unknown-permission`; missing
+  `permission` denies with `missing-permission`. `NOVA_TIERS` /
+  `NOVA_PERMISSIONS` frozen enums exported for the Phase 7 settings UI.
+  Covered by `test/nova-tool-gate.test.mjs` (26 assertions including the
+  full 3×3 matrix and a NOVA_TOOLS-registry coverage check).
 
 ### 3d. Cancellation and errors
 - [~] `AbortController` per turn; wired into `sendNovaTurn` (the module-level

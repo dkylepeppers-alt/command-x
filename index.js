@@ -4879,6 +4879,104 @@ async function loadNovaSoulMemory({
 }
 
 /* ----------------------------------------------------------------------
+   NOVA AGENT — tool tier + approval gate (plan §3c precursor, §5).
+
+   Pure synchronous decision helper used by the Phase 3c dispatch loop
+   BEFORE any tool handler runs. Answers two independent questions:
+
+     1. Is this tool *allowed* at the session's current tier?
+        (`tier: 'read'` blocks write + shell; `'write'` blocks shell;
+         `'full'` allows everything.)
+     2. If allowed, does the call require a user approval modal?
+        (Reads never do. Writes + shell do, unless the session has
+         pre-approved the tool via `rememberApprovalsSession`.)
+
+   Keeping these two decisions in one helper means there is exactly
+   one place the Phase 3c dispatcher calls before showing `cxConfirm`,
+   and exactly one place `test/nova-tool-gate.test.mjs` needs to
+   exhaustively cover the 3×3 matrix.
+
+   Return shape: `{ allowed: boolean, requiresApproval: boolean,
+   reason?: string }`. `reason` is only set on `allowed:false`; valid
+   values are `tier-too-low`, `unknown-permission`,
+   `missing-permission`. Callers should treat unknown reasons
+   conservatively — default to "deny and surface the reason to the
+   user" rather than trying to interpret them.
+
+   Defensive defaults:
+     - Malformed / missing `tier`   → treated as `'read'` (strictest).
+     - Malformed / missing `permission` → denied with
+       `missing-permission`. Not treated as `'read'` because an
+       unrecognised permission on a production tool is a bug, not a
+       no-op we should silently run.
+     - `rememberedApprovals` may be a `Set<string>`, array, or nullish.
+       Anything else (object, string, etc.) is ignored — the gate
+       returns `requiresApproval: true` as if no approvals were
+       remembered. This mirrors ST's permissive settings round-trip
+       where a corrupted key shouldn't brick the agent.
+   ---------------------------------------------------------------------- */
+
+const NOVA_TIERS = Object.freeze(['read', 'write', 'full']);
+const NOVA_PERMISSIONS = Object.freeze(['read', 'write', 'shell']);
+
+// Lookup table: `_NOVA_TIER_ALLOWS[tier]` is the set of permissions
+// that tier can run. Kept as plain Sets so the hot path is an O(1)
+// membership check — this helper runs once per tool_call in the
+// Phase 3c dispatch loop.
+const _NOVA_TIER_ALLOWS = {
+    read: new Set(['read']),
+    write: new Set(['read', 'write']),
+    full: new Set(['read', 'write', 'shell']),
+};
+
+function _novaRememberedApprovalsHas(container, toolName) {
+    if (!container || typeof toolName !== 'string' || !toolName) return false;
+    if (container instanceof Set) return container.has(toolName);
+    if (Array.isArray(container)) return container.includes(toolName);
+    return false;
+}
+
+/**
+ * Decide whether a tool call is (a) allowed under the current tier
+ * and (b) requires a user approval modal before running.
+ *
+ * @param {object} opts
+ * @param {'read'|'write'|'shell'} opts.permission - The tool's declared permission class.
+ * @param {'read'|'write'|'full'}  opts.tier       - The session's current tier.
+ * @param {string}                 [opts.toolName] - Tool name, used for `rememberedApprovals` lookup.
+ * @param {Set<string>|string[]|null} [opts.rememberedApprovals] - Session-scoped pre-approvals.
+ * @returns {{ allowed: boolean, requiresApproval: boolean, reason?: string }}
+ */
+function novaToolGate({ permission, tier, toolName, rememberedApprovals } = {}) {
+    const safeTier = NOVA_TIERS.includes(tier) ? tier : 'read';
+
+    // Unknown/missing permission: deny rather than silently treat as read.
+    // An unrecognised permission on a production tool is a bug, and we
+    // want it surfaced loudly in the audit log, not swallowed.
+    if (permission == null) {
+        return { allowed: false, requiresApproval: false, reason: 'missing-permission' };
+    }
+    if (!NOVA_PERMISSIONS.includes(permission)) {
+        return { allowed: false, requiresApproval: false, reason: 'unknown-permission' };
+    }
+
+    const allows = _NOVA_TIER_ALLOWS[safeTier];
+    if (!allows.has(permission)) {
+        return { allowed: false, requiresApproval: false, reason: 'tier-too-low' };
+    }
+
+    // Allowed. Now decide approval.
+    // Reads never need approval (they can't mutate state).
+    if (permission === 'read') {
+        return { allowed: true, requiresApproval: false };
+    }
+
+    // Write or shell: require approval unless pre-approved for the session.
+    const preApproved = _novaRememberedApprovalsHas(rememberedApprovals, toolName);
+    return { allowed: true, requiresApproval: !preApproved };
+}
+
+/* ----------------------------------------------------------------------
    NOVA AGENT — unified-diff preview helper (plan §4c).
 
    Pure string function used by the `fs_write` approval modal (Phase 3c)
