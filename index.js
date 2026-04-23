@@ -5108,7 +5108,6 @@ async function getActiveNovaProfile({ executeSlash }) {
  * @param {function} [opts.executeSlash]       - (cmd:string) => Promise<{pipe?:string}> — for /profile snapshot/restore
  * @param {function} [opts.isToolCallingSupported] - () => boolean; when defined and returns false we bail.
  * @param {function} [opts.nowImpl]            - () => number; defaults to Date.now
- * @param {function} [opts.signalFactory]      - () => AbortSignal; test hook. Default: AbortController attached to a turnTimeoutMs timer.
  */
 async function sendNovaTurn({
     ctx,
@@ -5165,8 +5164,8 @@ async function sendNovaTurn({
     saveNovaState(ctx);
 
     // --- Set up cancellation + wall-clock timeout ---
-    // novaAbortController is the canonical handle; signalFactory is only here
-    // so tests can pin a deterministic signal.
+    // `novaAbortController` is the canonical handle; Phase 3c's Cancel
+    // button reads the module-level binding and calls `.abort()` on it.
     let timeoutHandle;
     const controller = new AbortController();
     novaAbortController = controller;
@@ -5279,14 +5278,15 @@ async function sendNovaTurn({
         // see `inFlight: false` until we're fully back on the user's
         // original profile.
         if (swapPerformed && typeof executeSlash === 'function') {
+            // `swappedFrom` may be empty when the user had no active profile
+            // before the turn — we can't restore "no profile" via a slash
+            // (ST has no `/profile` clear syntax), so we simply leave
+            // Nova's profile active. The user's next non-Nova turn picks
+            // up whatever profile their workflow selects.
             try {
                 if (swappedFrom) {
                     await executeSlash(`/profile ${swappedFrom}`);
                 }
-                // If `swappedFrom` was empty we can't restore "no profile"
-                // via a slash (ST has no `/profile` clear syntax). Leave
-                // Nova's profile active; the user's next non-Nova turn will
-                // pick up the appropriate profile via their own workflow.
             } catch (err) {
                 appendNovaAuditLog(state, {
                     tool: 'profile-restore',

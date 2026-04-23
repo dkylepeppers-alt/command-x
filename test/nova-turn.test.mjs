@@ -327,8 +327,11 @@ function makeSlashMock({ initialProfile = 'old-profile', failSwap = false, failR
         if (m) {
             if (!m[1]) return { pipe: current };
             const target = m[1].trim();
-            // Restore of the original profile fails when failRestore is set
-            // and we're moving back (target matches initialProfile after a swap).
+            // `failRestore` should only fail the *restore* step, not the
+            // initial swap to Nova — otherwise the turn bails at step 3
+            // and the `finally` restore never runs. We detect the restore
+            // by pattern-matching: "swap back to the initial profile while
+            // we're currently on a different (Nova) profile".
             if (failRestore && target === initialProfile && current !== initialProfile) {
                 throw new Error('restore-failed');
             }
@@ -397,8 +400,8 @@ describe('sendNovaTurn — happy path', () => {
         assert.equal(session.messages[0].content, 'hello');
         assert.equal(session.messages[1].role, 'assistant');
         assert.equal(session.messages[1].content, 'hi back');
-        // save was called for user push + assistant push ≥ 2
-        assert.ok(ctx._getSaves() >= 2);
+        // save was called for user push + assistant push = exactly 2.
+        assert.equal(ctx._getSaves(), 2);
         // turn state clean
         assert.deepEqual(snapshot(), { inFlight: false, hasAbort: false, registryVersion: 0 });
     });
