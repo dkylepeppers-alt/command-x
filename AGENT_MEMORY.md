@@ -286,4 +286,18 @@ compose, +1 coercion). No new DOM, no new LLM calls, no new event handlers.
 `node --test 'test/*.test.mjs'` → **110/110 pass** (+14 new). No DOM
 changes, no new imports, no new event handlers.
 
+---
+
+### Review follow-up — image-prompter default-tools trim
+
+The `image-prompter` skill shipped with `defaultTools: ['st_get_context',
+'phone_list_npcs', 'fs_write']` but `defaultTier: 'read'`. At runtime that
+would force a tier-escalation prompt on every turn before the agent could
+even emit output, defeating the read-only-by-design intent of the skill
+(prompts are structured output the user copies, not files the agent writes).
+Dropped `fs_write` from the default tool list. Users can still escalate to
+write tier and pick `fs_write` manually if they want the prompt persisted.
+Left an inline comment on the `defaultTools` line explaining the rationale
+so the next agent doesn't re-add it.
+
 <!-- Add new entries above this line using the template in "How to Use This File". -->

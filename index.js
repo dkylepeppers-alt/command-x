@@ -4969,7 +4969,11 @@ const NOVA_SKILLS = [
         icon: '🎨',
         defaultTier: 'read',
         allowTierEscalation: true,
-        defaultTools: ['st_get_context', 'phone_list_npcs', 'fs_write'],
+        // Read-only by design: prompts are emitted as structured output for the user
+        // to copy. fs_write would force tier escalation on every turn; drop it from
+        // the default set and let the user escalate + pick it manually if they want
+        // prompts written to disk.
+        defaultTools: ['st_get_context', 'phone_list_npcs'],
         systemPrompt: [
             'You are the Image Prompter skill inside Nova.',
             'Use st_get_context to read the current RP scene and produce prompts',
