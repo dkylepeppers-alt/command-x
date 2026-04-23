@@ -77,6 +77,59 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-23 (late evening) — Next-session hand-off: after Phase 3c proper (dispatch loop + approval modal)
+
+**Scope of this PR:** Phase 3c core landed. `sendNovaTurn` now runs a full tool-dispatch loop when `toolHandlers` is passed; absent it, the Phase 3b deferred-stub behaviour is preserved so prior tests stay green. Added:
+
+- `runNovaToolDispatch({ initialResponse, messages, toolRegistry, handlers, tier, rememberedApprovals, maxToolCalls, confirmApproval, sendRequest, tools, signal, gate, nowImpl, onAudit })` — pure async multi-round loop. Mutates `messages` with every assistant + `role:'tool'` message it emits, returns `{ ok, rounds, toolsExecuted, toolsDenied, toolsFailed, capHit, aborted, finalAssistant, events }`. 22 assertions in `test/nova-tool-dispatch.test.mjs`.
+- `buildNovaApprovalModalBody({ tool, args, diffText, permission })` — pure HTML body builder. All user-controlled strings escaped via `escHtml`. 18 assertions in `test/nova-approval-modal.test.mjs`.
+- `cxNovaApprovalModal({ tool, args, diffText, permission, title })` — DOM wrapper reusing `.cx-modal-overlay` + new `.cx-nova-approval` / `.cx-nova-approval-*` styles in `style.css`. Destructive permissions (write/shell) use `cx-modal-btn-danger` and default focus to Cancel.
+- Wired `sendNovaTurn` with four new opt params: `tier`, `rememberedApprovals`, `toolHandlers`, `confirmApproval`. When present, the dispatcher activates and the return shape changes to include `{ toolsExecuted, toolsDenied, toolsFailed, rounds, capHit }` instead of `{ toolCalls, toolCallsDeferred }`.
+
+**Full suite: 321/321 pass (+40 new across the two test files).** Baseline was 281.
+
+**Closed-enum failure contract for the dispatcher.** Every failure mode resolves to one of:
+- A `role:'tool'` message with `{ error: <kind>, reason?: <code> }` (LLM can recover and try again). Kinds: `unknown-tool`, `malformed-arguments`, `denied` (+ reason: `tier-too-low` / `unknown-permission` / `missing-permission` / `user-rejected` / `no-confirmer` / `confirmer-error`), `no-handler`, or the stringified exception message.
+- `{ ok: false, reason }` where `reason ∈ 'aborted' | 'send-failed' | 'no-send-request'`. The partial transcript is still available to the caller via the mutated `messages` array AND the returned `events` list — `sendNovaTurn` uses `events` to persist the partial session on error.
+
+Cap-hit and gate-deny are NOT `ok:false` — the turn finishes normally with the flags set. Rationale: the user should still see the partial result, and the LLM has already been told via `role:'tool'` that the denied call failed.
+
+**Why `toolHandlers` gate-activates the dispatcher, not `confirmApproval`.** Early draft activated only when BOTH were present, then fell back to deferred behaviour. Simpler to activate on `toolHandlers` alone: the dispatcher handles "approval required but no confirmer wired" internally by denying with `no-confirmer`. This means a caller that wants a read-only turn can pass `toolHandlers` without `confirmApproval` and any write call will cleanly fail-closed instead of accidentally running.
+
+**Why the confirmer throw branch denies instead of propagating.** `confirmApproval` is an async UI call; if the modal infrastructure is broken, we do NOT want the tool to execute, and we do NOT want the turn to crash outright (the audit log and transcript would be lost). Denying with `confirmer-error` gives the LLM a chance to apologise and stop, and the user still gets a coherent transcript. Test `treats a throwing confirmer as a rejection (not a crash)` locks this in.
+
+**Dispatcher MUTATES `messages`.** This is intentional and contractual. `sendNovaTurn` builds a `messages` array via `buildNovaRequestMessages`, hands it to the dispatcher, and reads the new tail via `dispatchResult.events` to append to `session.messages` and persist. If Phase 3c's composer wants a read-only snapshot, it MUST clone before calling. Don't change this to return-a-new-array without also updating `sendNovaTurn`'s session-persistence path.
+
+**`runNovaToolDispatch` does NOT re-push the initial assistant message from `initialResponse` if it came from `sendRequest` already**... wait, actually it does. That's a subtle invariant to remember: `sendNovaTurn` calls `sendRequest` once itself, then hands the response to the dispatcher, which pushes an assistant message for that initial response AND for every subsequent round's response. Therefore `sendNovaTurn` must NOT also push the initial assistant message itself before handing off — the dispatcher handles it. This is how the code is currently wired; tests will fail noisily if someone breaks this.
+
+**Notes for future agents:**
+- **`cxNovaApprovalModal` is not unit-tested** — DOM behaviour (focus, Esc handler, button clicks) would need JSDOM. The pure `buildNovaApprovalModalBody` carries the escape-safety contract. If you touch the DOM wrapper, manually test in ST that Esc cancels, Cancel gets default focus on write/shell, and overlay tears down on both paths.
+- **`.cx-nova-approval` widens the modal to 520px.** This is safe at phone widths (380px × scale) because the modal overlay centers and the box is scrollable. If phone scaling changes, revisit.
+- **Dispatcher does not currently surface diff previews to the confirmer.** `confirmApproval` receives `{ tool, args, permission, toolCallId }` but not `diffText` — the composer in Phase 3c must build the diff itself (via `buildNovaUnifiedDiff(oldContent, args.content)` after an `fs_read`) and pass the result into `cxNovaApprovalModal`. Rationale: the dispatcher shouldn't reach into the filesystem to pre-fetch old content — that's the composer's job and it keeps the dispatcher pure.
+- **Inline-copy tests now carry 5+ symbols each.** When editing `runNovaToolDispatch` or `buildNovaApprovalModalBody`, also update the inline copies at the top of `test/nova-tool-dispatch.test.mjs` and `test/nova-approval-modal.test.mjs`. Source-shape tests will catch drift in the parameter list and in file ordering, but NOT in helper logic.
+- **`audit` callback signature: `(entry:{tool, argsSummary, outcome}) => void`.** `sendNovaTurn` wraps `appendNovaAuditLog(state, entry)`. One audit entry per tool_call outcome is guaranteed — the `audit coverage` test locks this in. Don't suppress audits on failure paths; they're the only record of what Nova tried.
+
+**What to do next (in order — each is a single reviewable PR):**
+1. **Phase 2c — composer UI wiring.** Now that `sendNovaTurn` + the dispatcher are real, the Nova composer can call them. This is where the textarea, Send button, Cancel button (→ `novaAbortController.abort()`), and profile/skill pickers live. Touches `wirePhone` + a bunch of DOM — bigger review surface than this PR.
+2. **Phase 6b — self-edit tools** (`nova_read_soul`, `nova_write_soul`, `nova_read_memory`, `nova_append_memory`, `nova_overwrite_memory`). Each write handler must call `invalidateNovaSoulMemoryCache()` after success. These are the first REAL tool handlers — a thin wrapper over the `fs_write` plugin call (when available) with a `POST /api/files/*` fallback.
+3. **Phase 7 — settings surface.** Profile picker from `/profile-list`, tier radio (use `NOVA_TIERS`), caps, plugin URL, "Install preset" button.
+4. **Phase 9 — bridge fs handlers.** The server-plugin stubs currently return `501`. The dispatcher + tier gate + approval modal are all ready; they'll just start working once the plugin answers real data.
+
+**Hard constraints still active (copy-forward):**
+- `EXT === "command-x"` with a hyphen. Bracket-access only on `extension_settings`.
+- `buildNovaUnifiedDiff` auto-detect is nullish-only. Pass `isNewFile: true` explicitly when wiring `fs_write` previews against `fs_stat` → ENOENT.
+- `normalizeNovaPath` containment predicate: `relNative === '..' || startsWith('..' + path.sep)`.
+- Plugin `/manifest.version` comes from `package.json` via `resolvePluginVersion()`.
+- `novaToolGate` — closed-enum `reason`: `tier-too-low` / `unknown-permission` / `missing-permission`.
+- `runNovaToolDispatch` — closed-enum `reason` on `ok:false`: `aborted` / `send-failed` / `no-send-request`. Tool-error reasons (inside `role:'tool'` content): `unknown-tool` / `malformed-arguments` / `denied` (+ sub-reason) / `no-handler` / handler-stringified-message.
+- Inline-copy test convention: when editing helpers in `index.js`, edit the matching inline copies in `test/nova-*.test.mjs`. Multiple test files now carry inline copies of the same symbols — keep ALL in lockstep.
+- Run tests via `node --test test/helpers.test.mjs test/nova-*.test.mjs` (explicit filenames).
+
+**Validation this sprint:**
+- `node --check index.js` clean.
+- `node --test test/helpers.test.mjs test/nova-*.test.mjs` → **321/321 pass** (+40 new; baseline was 281).
+- No new event listeners, no new settings, no new init paths. New DOM is modal-only (inert until `cxNovaApprovalModal` is called from Phase 2c).
+
 ### 2026-04-23 (evening) — Next-session hand-off: after Phase 3c precursor (tier + approval gate)
 
 **Scope of this PR (adds to the same branch as the Phase 6a loader):** one new pure helper slice for the Phase 3c dispatch loop. Added `novaToolGate({ permission, tier, toolName, rememberedApprovals })` to `index.js` NOVA AGENT section, placed between `loadNovaSoulMemory` and `buildNovaUnifiedDiff`. Supporting pieces: `NOVA_TIERS` + `NOVA_PERMISSIONS` frozen enums, `_NOVA_TIER_ALLOWS` lookup table (Sets for O(1) checks), `_novaRememberedApprovalsHas` container helper. New `test/nova-tool-gate.test.mjs` (26 assertions across 6 suites). Full suite **281/281 pass** (+26 vs prior 255).

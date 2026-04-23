@@ -5271,6 +5271,401 @@ function buildNovaRequestMessages({ systemPrompt, sessionMessages = [] }) {
     return out;
 }
 
+/* ----------------------------------------------------------------------
+   NOVA AGENT — tool-dispatch loop (plan §3c, §3d, §4c wiring).
+
+   Pure async helper called by `sendNovaTurn` when the LLM returns
+   `tool_calls`. It owns the "assistant → tool results → re-call LLM"
+   loop until one of:
+
+     - the LLM returns an assistant message with no `tool_calls`   (normal finish)
+     - `maxToolCalls` has been reached                              (cap-hit)
+     - the abort signal fires                                       (aborted)
+
+   For each tool_call it runs, in order:
+
+     1. Resolve the tool in `toolRegistry` by name. Missing name is a
+        deny with reason `unknown-tool`. The loop still appends a
+        `role:'tool'` message with `{ error: 'unknown-tool' }` so the
+        LLM can recover.
+     2. Parse `function.arguments` as JSON. Malformed JSON is a deny
+        with reason `malformed-arguments`.
+     3. Call the injected `gate` (default: `novaToolGate`) with the
+        tool's permission + current tier + rememberedApprovals. On
+        `allowed:false`, deny with the gate's `reason`. On
+        `requiresApproval:true`, call `confirmApproval`; a falsy
+        return denies with reason `user-rejected`.
+     4. Call `handlers[name](args, { signal })`. Any thrown value is
+        caught and becomes a `role:'tool'` message with
+        `{ error: <message> }`.
+     5. Append a `role:'tool'` message with the stringified result and
+        the original `tool_call_id`. Increment the executed-call
+        counter.
+
+   Between batches, the helper calls `sendRequest({ messages, tools,
+   tool_choice, signal })` with the *accumulated* messages (including
+   every tool result just appended). The returned assistant message
+   is pushed to the working `messages` array AND to the `events`
+   output; if it carries a new `tool_calls` array, the loop iterates.
+
+   The helper MUTATES the `messages` array it is given — this is the
+   contract `sendNovaTurn` relies on to build a coherent session
+   transcript. If you want a read-only view, clone before calling.
+
+   Never throws. All failure modes resolve to one of:
+     { ok: true, rounds, toolsExecuted, toolsDenied, toolsFailed,       capHit, aborted, finalAssistant }
+     { ok: false, reason, error? }
+
+   Where `reason` ∈ 'send-failed' | 'aborted'. (Cap-hit and gate-deny
+   are NOT `ok:false` — they finish the dispatch normally with the
+   flags set, because the transcript is still valid and the user
+   should still see the partial result.)
+   ---------------------------------------------------------------------- */
+
+function _stringifyNovaToolResult(value) {
+    if (value == null) return '';
+    if (typeof value === 'string') return value;
+    try { return JSON.stringify(value); } catch (_) { return String(value); }
+}
+
+async function runNovaToolDispatch({
+    initialResponse,           // { content, tool_calls } from the first LLM call
+    messages,                  // mutable array — dispatcher appends assistant + tool results
+    toolRegistry = NOVA_TOOLS,
+    handlers = {},
+    tier = 'read',
+    rememberedApprovals = null,
+    maxToolCalls = NOVA_DEFAULT_MAX_TOOL_CALLS,
+    confirmApproval,           // async ({ tool, args, permission, toolCallId }) => boolean
+    sendRequest,               // re-used for follow-up turns
+    tools = [],                // tool schemas forwarded to follow-up sendRequest calls
+    signal,                    // AbortSignal; checked between rounds
+    gate = novaToolGate,       // DI seam for tests
+    nowImpl = Date.now,
+    onAudit,                   // (entry:{tool, argsSummary, outcome}) => void — fires per tool_call
+} = {}) {
+    if (typeof sendRequest !== 'function') {
+        return { ok: false, reason: 'no-send-request' };
+    }
+
+    const events = [];
+    let rounds = 0;
+    let toolsExecuted = 0;
+    let toolsDenied = 0;
+    let toolsFailed = 0;
+    let capHit = false;
+    let response = initialResponse;
+    let finalAssistant = null;
+
+    const audit = (tool, argsSummary, outcome) => {
+        if (typeof onAudit === 'function') {
+            try { onAudit({ tool, argsSummary, outcome }); } catch (_) { /* noop */ }
+        }
+    };
+
+    // The outer loop: one iteration per LLM round. We start by treating
+    // `initialResponse` as "round 0's response" — we didn't call the LLM
+    // here, the caller did, so we don't count it toward `rounds`.
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+        if (signal && signal.aborted) {
+            return { ok: false, reason: 'aborted' };
+        }
+
+        const assistantContent = String(response?.content ?? '');
+        const toolCalls = Array.isArray(response?.tool_calls) ? response.tool_calls : [];
+        const assistantMsg = {
+            role: 'assistant',
+            content: assistantContent,
+            ts: nowImpl(),
+        };
+        if (toolCalls.length > 0) assistantMsg.tool_calls = toolCalls;
+        messages.push(assistantMsg);
+        events.push(assistantMsg);
+        finalAssistant = assistantMsg;
+
+        // No tool_calls → LLM is done, we're done.
+        if (toolCalls.length === 0) break;
+
+        // Dispatch this round's tool calls in order. Each appends a
+        // `role:'tool'` message to `messages`.
+        for (const call of toolCalls) {
+            if (signal && signal.aborted) {
+                return { ok: false, reason: 'aborted' };
+            }
+            if (toolsExecuted >= maxToolCalls) {
+                capHit = true;
+                audit('dispatch', `executed=${toolsExecuted} cap=${maxToolCalls}`, 'cap-hit');
+                break;
+            }
+
+            const callId = String(call?.id ?? '');
+            const fn = call?.function || {};
+            const name = String(fn.name || '');
+            const rawArgs = fn.arguments;
+
+            // 1. Tool lookup.
+            const tool = toolRegistry.find(t => t && t.name === name);
+            if (!tool) {
+                toolsDenied++;
+                audit(name || '(unnamed)', '', 'denied:unknown-tool');
+                const toolMsg = {
+                    role: 'tool', tool_call_id: callId, name,
+                    content: JSON.stringify({ error: 'unknown-tool' }),
+                    ts: nowImpl(),
+                };
+                messages.push(toolMsg);
+                events.push(toolMsg);
+                continue;
+            }
+
+            // 2. Parse arguments JSON. Empty string / nullish → {}.
+            let args;
+            if (rawArgs == null || rawArgs === '') {
+                args = {};
+            } else if (typeof rawArgs === 'object') {
+                args = rawArgs;
+            } else {
+                try {
+                    args = JSON.parse(String(rawArgs));
+                } catch (_) {
+                    toolsDenied++;
+                    audit(name, 'raw-args=<unparsable>', 'denied:malformed-arguments');
+                    const toolMsg = {
+                        role: 'tool', tool_call_id: callId, name,
+                        content: JSON.stringify({ error: 'malformed-arguments' }),
+                        ts: nowImpl(),
+                    };
+                    messages.push(toolMsg);
+                    events.push(toolMsg);
+                    continue;
+                }
+            }
+
+            // 3. Gate.
+            const gateResult = gate({
+                permission: tool.permission,
+                tier,
+                toolName: name,
+                rememberedApprovals,
+            });
+            if (!gateResult.allowed) {
+                toolsDenied++;
+                audit(name, `tier=${tier}`, `denied:${gateResult.reason}`);
+                const toolMsg = {
+                    role: 'tool', tool_call_id: callId, name,
+                    content: JSON.stringify({ error: 'denied', reason: gateResult.reason }),
+                    ts: nowImpl(),
+                };
+                messages.push(toolMsg);
+                events.push(toolMsg);
+                continue;
+            }
+
+            // 4. Approval (when required).
+            if (gateResult.requiresApproval) {
+                if (typeof confirmApproval !== 'function') {
+                    // No confirmer wired → treat as rejection, never as silent approval.
+                    toolsDenied++;
+                    audit(name, `tier=${tier}`, 'denied:no-confirmer');
+                    const toolMsg = {
+                        role: 'tool', tool_call_id: callId, name,
+                        content: JSON.stringify({ error: 'denied', reason: 'no-confirmer' }),
+                        ts: nowImpl(),
+                    };
+                    messages.push(toolMsg);
+                    events.push(toolMsg);
+                    continue;
+                }
+                let approved;
+                try {
+                    approved = await confirmApproval({
+                        tool,
+                        args,
+                        permission: tool.permission,
+                        toolCallId: callId,
+                    });
+                } catch (err) {
+                    // Confirmer crashed → treat as rejection, surface in audit.
+                    toolsDenied++;
+                    audit(name, `tier=${tier}`, `denied:confirmer-error:${String(err?.message || err)}`);
+                    const toolMsg = {
+                        role: 'tool', tool_call_id: callId, name,
+                        content: JSON.stringify({ error: 'denied', reason: 'confirmer-error' }),
+                        ts: nowImpl(),
+                    };
+                    messages.push(toolMsg);
+                    events.push(toolMsg);
+                    continue;
+                }
+                if (!approved) {
+                    toolsDenied++;
+                    audit(name, `tier=${tier}`, 'denied:user-rejected');
+                    const toolMsg = {
+                        role: 'tool', tool_call_id: callId, name,
+                        content: JSON.stringify({ error: 'denied', reason: 'user-rejected' }),
+                        ts: nowImpl(),
+                    };
+                    messages.push(toolMsg);
+                    events.push(toolMsg);
+                    continue;
+                }
+            }
+
+            // 5. Run handler.
+            const handler = handlers[name];
+            if (typeof handler !== 'function') {
+                toolsFailed++;
+                audit(name, '', 'error:no-handler');
+                const toolMsg = {
+                    role: 'tool', tool_call_id: callId, name,
+                    content: JSON.stringify({ error: 'no-handler' }),
+                    ts: nowImpl(),
+                };
+                messages.push(toolMsg);
+                events.push(toolMsg);
+                continue;
+            }
+            let result;
+            try {
+                result = await handler(args, { signal });
+            } catch (err) {
+                toolsFailed++;
+                audit(name, `tier=${tier}`, `error:${String(err?.message || err)}`);
+                const toolMsg = {
+                    role: 'tool', tool_call_id: callId, name,
+                    content: JSON.stringify({ error: String(err?.message || err) }),
+                    ts: nowImpl(),
+                };
+                messages.push(toolMsg);
+                events.push(toolMsg);
+                continue;
+            }
+
+            toolsExecuted++;
+            audit(name, `tier=${tier}`, 'ok');
+            const toolMsg = {
+                role: 'tool', tool_call_id: callId, name,
+                content: _stringifyNovaToolResult(result),
+                ts: nowImpl(),
+            };
+            messages.push(toolMsg);
+            events.push(toolMsg);
+        }
+
+        if (capHit) break;
+        if (signal && signal.aborted) {
+            return { ok: false, reason: 'aborted' };
+        }
+
+        // Re-call the LLM with the accumulated messages.
+        rounds++;
+        try {
+            response = await sendRequest({
+                messages,
+                tools,
+                tool_choice: 'auto',
+                signal,
+            });
+        } catch (err) {
+            const aborted = (signal && signal.aborted) || err?.name === 'AbortError';
+            audit('send-request', `round=${rounds}`, aborted ? 'aborted' : `send-failed:${String(err?.message || err)}`);
+            return { ok: false, reason: aborted ? 'aborted' : 'send-failed', error: String(err?.message || err) };
+        }
+    }
+
+    return {
+        ok: true,
+        rounds,
+        toolsExecuted,
+        toolsDenied,
+        toolsFailed,
+        capHit,
+        aborted: false,
+        finalAssistant,
+        events,
+    };
+}
+
+/* ----------------------------------------------------------------------
+   NOVA AGENT — approval modal (plan §2c, §4c wiring).
+
+   `buildNovaApprovalModalBody` is the PURE HTML builder used by the
+   DOM wrapper `cxNovaApprovalModal`. Split so tests can assert escape
+   behaviour without spinning up JSDOM.
+
+   The modal body has three zones:
+     - intent line: "Nova wants to <permission> <toolName>"
+     - args block : pretty-printed JSON of the parsed arguments
+     - diff block : unified diff string from `buildNovaUnifiedDiff`
+                    (only for fs_write / file mutations; empty string
+                    elsewhere)
+
+   Every user-controlled string (tool name, args, diff) is escaped
+   via `escHtml`. The modal shell is added by the DOM wrapper so this
+   helper stays unit-testable.
+   ---------------------------------------------------------------------- */
+
+function _novaJsonPretty(value) {
+    try { return JSON.stringify(value, null, 2); } catch (_) { return String(value); }
+}
+
+function buildNovaApprovalModalBody({ tool, args, diffText = '', permission } = {}) {
+    const displayName = (tool && (tool.displayName || tool.name)) || 'tool';
+    const perm = String(permission || tool?.permission || 'read');
+    const permLabel = perm === 'shell' ? 'run shell command' : (perm === 'write' ? 'write' : 'read');
+    const argsJson = _novaJsonPretty(args ?? {});
+    const parts = [
+        `<div class="cx-nova-approval-intent">Nova wants to <strong>${escHtml(permLabel)}</strong>: <code>${escHtml(displayName)}</code></div>`,
+        `<div class="cx-nova-approval-label">Arguments</div>`,
+        `<pre class="cx-nova-approval-args">${escHtml(argsJson)}</pre>`,
+    ];
+    if (diffText && String(diffText).trim()) {
+        parts.push(`<div class="cx-nova-approval-label">Preview</div>`);
+        parts.push(`<pre class="cx-nova-approval-diff">${escHtml(String(diffText))}</pre>`);
+    }
+    return parts.join('\n');
+}
+
+/**
+ * In-phone approval modal for a Nova tool call. Mirrors `cxConfirm`'s
+ * DOM shape but (a) renders an HTML body (args + diff), and (b) uses
+ * the `danger` styling for write/shell permissions so the user has
+ * to intentionally click the red button. Returns Promise<boolean>.
+ *
+ * Pure presentation — all gate decisions happen upstream in the
+ * dispatcher. By the time this fires, the tool is already
+ * tier-allowed and approval is required.
+ */
+function cxNovaApprovalModal({ tool, args, diffText = '', permission, title = 'Approve tool call?' } = {}) {
+    return new Promise((resolve) => {
+        const perm = String(permission || tool?.permission || 'read');
+        const danger = perm !== 'read';
+        const bodyHtml = buildNovaApprovalModalBody({ tool, args, diffText, permission: perm });
+        const confirmLabel = perm === 'shell' ? 'Run' : (perm === 'write' ? 'Write' : 'Run');
+
+        const overlay = document.createElement('div');
+        overlay.className = 'cx-modal-overlay';
+        overlay.innerHTML = `
+        <div class="cx-modal-box cx-nova-approval" role="alertdialog" aria-modal="true" aria-labelledby="cx-modal-title" aria-describedby="cx-modal-body">
+            <div class="cx-modal-title" id="cx-modal-title">${escHtml(title)}</div>
+            <div class="cx-modal-body" id="cx-modal-body">${bodyHtml}</div>
+            <div class="cx-modal-actions">
+                <button class="cx-modal-btn cx-modal-btn-secondary" id="cx-modal-cancel">Cancel</button>
+                <button class="cx-modal-btn ${danger ? 'cx-modal-btn-danger' : 'cx-modal-btn-primary'}" id="cx-modal-confirm">${escHtml(confirmLabel)}</button>
+            </div>
+        </div>`;
+        const close = (result) => { overlay.remove(); document.removeEventListener('keydown', onKey); resolve(result); };
+        const onKey = (e) => { if (e.key === 'Escape') close(false); };
+        overlay.querySelector('#cx-modal-cancel').addEventListener('click', () => close(false));
+        overlay.querySelector('#cx-modal-confirm').addEventListener('click', () => close(true));
+        document.addEventListener('keydown', onKey);
+        document.body.appendChild(overlay);
+        // Destructive actions default to Cancel focus to prevent accidental Enter.
+        overlay.querySelector(danger ? '#cx-modal-cancel' : '#cx-modal-confirm').focus();
+    });
+}
+
 /**
  * Extract the current profile name from the pipe returned by `/profile`
  * (no args). ST returns the active profile name in the pipe. Returns
@@ -5335,6 +5730,14 @@ async function sendNovaTurn({
     executeSlash,
     isToolCallingSupported,
     nowImpl = Date.now,
+    // Phase 3c dispatch-loop deps (all optional; when absent the turn
+    // behaves exactly like the Phase 3b deferred stub so existing tests
+    // stay green). Providing `toolHandlers` + `confirmApproval` activates
+    // the full loop.
+    tier = 'read',
+    rememberedApprovals = null,
+    toolHandlers = null,
+    confirmApproval = null,
 } = {}) {
     // --- Step 0: re-entrancy guard ---
     if (novaTurnInFlight) {
@@ -5450,23 +5853,86 @@ async function sendNovaTurn({
             return { ok: false, reason, error: String(err?.message || err) };
         }
 
-        // --- Step 6 (stub): tool_calls handling deferred to Phase 3c ---
+        // --- Step 6: tool_calls dispatch (Phase 3c) ---
         const assistantContent = String(response?.content ?? '');
         const toolCalls = Array.isArray(response?.tool_calls) ? response.tool_calls : [];
 
+        // Dispatcher activates when `toolHandlers` is provided. The dispatcher
+        // handles the "approval required but no confirmer wired" case
+        // internally by denying with reason `no-confirmer` — callers that want
+        // Phase 3b's deferred behaviour simply omit `toolHandlers`.
+        const dispatchActive = toolCalls.length > 0
+            && toolHandlers && typeof toolHandlers === 'object';
+
+        if (dispatchActive) {
+            const dispatchResult = await runNovaToolDispatch({
+                initialResponse: { content: assistantContent, tool_calls: toolCalls },
+                messages,
+                toolRegistry: NOVA_TOOLS,
+                handlers: toolHandlers,
+                tier,
+                rememberedApprovals,
+                maxToolCalls,
+                confirmApproval,
+                sendRequest,
+                tools,
+                signal: controller.signal,
+                nowImpl,
+                onAudit: (entry) => {
+                    appendNovaAuditLog(state, entry);
+                },
+            });
+
+            if (!dispatchResult.ok) {
+                // Persist any events the dispatcher already emitted before
+                // the error so the transcript reflects what really happened.
+                // `events` is the append-only list of messages the
+                // dispatcher added this turn (assistant rounds + tool
+                // results), in order.
+                for (const ev of (dispatchResult.events || [])) {
+                    session.messages.push(ev);
+                }
+                session.updatedAt = nowImpl();
+                saveNovaState(ctx);
+                return {
+                    ok: false,
+                    reason: dispatchResult.reason,
+                    error: dispatchResult.error,
+                };
+            }
+
+            // Append every event the dispatcher produced to the session.
+            for (const ev of dispatchResult.events) {
+                session.messages.push(ev);
+            }
+            session.updatedAt = nowImpl();
+            saveNovaState(ctx);
+
+            return {
+                ok: true,
+                assistantMessage: dispatchResult.finalAssistant,
+                toolsExecuted: dispatchResult.toolsExecuted,
+                toolsDenied: dispatchResult.toolsDenied,
+                toolsFailed: dispatchResult.toolsFailed,
+                rounds: dispatchResult.rounds,
+                capHit: dispatchResult.capHit,
+                swappedProfile: swapPerformed ? { from: swappedFrom, to: targetProfile } : null,
+            };
+        }
+
+        // --- Fallback: Phase 3b deferred behaviour (no dispatcher wired) ---
         const assistantMessage = {
             role: 'assistant',
             content: assistantContent,
             ts: nowImpl(),
         };
         if (toolCalls.length > 0) {
-            // Record the raw call shapes so Phase 3c can replay them once
-            // the dispatcher lands.
+            // Record the raw call shapes so the caller can replay them.
             assistantMessage.tool_calls = toolCalls;
             appendNovaAuditLog(state, {
                 tool: 'tool-calls',
                 argsSummary: `count=${toolCalls.length} cap=${maxToolCalls}`,
-                outcome: 'deferred-to-phase-3c',
+                outcome: 'deferred-no-dispatcher',
             });
         }
         session.messages.push(assistantMessage);

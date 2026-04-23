@@ -120,8 +120,19 @@ Chat-style agent transcript. Layout (top → bottom):
   *(Nav footer returns to home. Transcript persistence is Phase 3.)*
 
 ### 2c. Modals / sheets
-- [ ] `cxConfirm`-based approval modal for any Write/Full tool call, with
+- [x] `cxConfirm`-based approval modal for any Write/Full tool call, with
   **diff preview** for file writes and command preview for shell.
+  - **Shipped:** `cxNovaApprovalModal({ tool, args, diffText, permission,
+    title })` DOM wrapper in `index.js` NOVA AGENT section + pure
+    `buildNovaApprovalModalBody(...)` HTML body builder. Reuses the
+    `.cx-modal-overlay` / `.cx-modal-box` shell; adds a `.cx-nova-approval`
+    modifier that widens the box to fit `<pre>` args + diff blocks. All
+    user-controlled strings (tool name, args JSON, diff body) escaped via
+    `escHtml`. Destructive perms (write/shell) get the `cx-modal-btn-danger`
+    confirm button and default focus to Cancel. Covered by
+    `test/nova-approval-modal.test.mjs` (18 assertions covering shape,
+    escape-safety for prompt-injection payloads, args serialisation edge
+    cases incl. circular refs, and source-shape ordering).
 - [ ] Connection-profile picker modal (uses `/profile-list`).
 - [ ] Skill picker modal, static list.
 
@@ -158,10 +169,12 @@ Chat-style agent transcript. Layout (top → bottom):
     `test/nova-turn-state.test.mjs` (9 assertions).
 
 ### 3b. Turn lifecycle
-- [~] `sendNovaTurn(userText)` — **skeleton shipped** (`index.js` NOVA AGENT
-  section, dependency-injected for unit testing via `test/nova-turn.test.mjs`,
-  23 assertions). The contract below is implemented as the next bullet list
-  shows; streaming + real tool-call dispatch are deferred to Phase 3c.
+- [x] `sendNovaTurn(userText)` — **full loop shipped** (`index.js` NOVA AGENT
+  section). Phase 3c wired the tool-dispatch loop behind `toolHandlers` +
+  `confirmApproval` DI; absent those the turn falls back to Phase 3b's
+  deferred-stub behaviour so prior tests stay green. Covered by
+  `test/nova-turn.test.mjs` (23 assertions, backwards-compat) +
+  `test/nova-tool-dispatch.test.mjs` (22 assertions for the new loop).
   1. [x] Validate profile is set and (when provided) `isToolCallingSupported()`
      returns true — enforced at function entry. `sendRequest` presence is
      also validated so the helper never calls `undefined()`.
@@ -173,23 +186,21 @@ Chat-style agent transcript. Layout (top → bottom):
      via `buildNovaRequestMessages`.
   5. [~] Call `sendRequest({ messages, tools, tool_choice: 'auto', signal })`.
      **Streaming + `ConnectionManagerRequestService` vs `generateRaw` probe**
-     still live in the caller — Phase 3c wires them. This slice takes any
-     Promise-returning `sendRequest` so tests can drive it.
-  6. [ ] Stream chunks. On `tool_calls`, dispatch (§4), append `role:'tool'`
-     msg, re-request. **Deferred to Phase 3c.** Current behaviour: if
-     `sendRequest` returns a `tool_calls` array, we append the assistant
-     content + raw calls to the session, audit-log `tool-calls-deferred`,
-     and return `{ ok: true, toolCallsDeferred: true, toolCalls }` so the
-     caller can choose to stop or show a "tool-call dispatch landing in 3c"
-     toast.
-  7. [~] Enforce caps: **wall-clock cap** shipped as a `setTimeout` →
-     `controller.abort('turn-timeout')` wired into `novaAbortController`.
-     `maxToolCalls` / token caps belong to the Phase 3c dispatch loop.
+     still live in the caller — the Phase 2c composer wires them. This slice
+     takes any Promise-returning `sendRequest` so tests can drive it.
+  6. [x] **Dispatch loop shipped (§3c).** When the LLM returns `tool_calls`
+     and the caller provided `toolHandlers`, `runNovaToolDispatch` takes
+     over: gate → approval → handler → `role:'tool'` message → re-call
+     `sendRequest` → repeat until no more tool_calls, cap hit, or abort.
+     Every decision emits one audit entry. Streaming is still deferred;
+     each round uses a single non-streaming `sendRequest`.
+  7. [x] Enforce caps: wall-clock cap via `setTimeout` →
+     `controller.abort('turn-timeout')` wired into `novaAbortController`
+     (shipped earlier). `maxToolCalls` cap is enforced inside
+     `runNovaToolDispatch` with an audit entry (`outcome: 'cap-hit'`).
   8. [x] **Finally** restore original profile (even on error/abort). Clear
      `novaTurnInFlight` and `novaAbortController`. Restore failures are
-     audit-logged but don't mask the primary turn result. Locked in by
-     `test/nova-turn.test.mjs`: a `sendRequest` that throws still runs
-     through `/profile <snapshot>` before the helper resolves.
+     audit-logged but don't mask the primary turn result.
 
 ### 3c. Tool registration
 - [ ] **Embedded path** (default): tools passed inline on `sendRequest`.
@@ -209,14 +220,32 @@ Chat-style agent transcript. Layout (top → bottom):
   `NOVA_PERMISSIONS` frozen enums exported for the Phase 7 settings UI.
   Covered by `test/nova-tool-gate.test.mjs` (26 assertions including the
   full 3×3 matrix and a NOVA_TOOLS-registry coverage check).
+- [x] **Dispatch loop.** `runNovaToolDispatch` pure async helper in
+  `index.js` NOVA AGENT section. Takes `{ initialResponse, messages,
+  toolRegistry, handlers, tier, rememberedApprovals, maxToolCalls,
+  confirmApproval, sendRequest, tools, signal, gate, nowImpl, onAudit }`
+  and mutates `messages` with every assistant + `role:'tool'` message it
+  emits. Returns `{ ok, rounds, toolsExecuted, toolsDenied, toolsFailed,
+  capHit, aborted, finalAssistant, events }`. Every failure mode
+  (unknown-tool / malformed-arguments / tier-too-low / user-rejected /
+  no-confirmer / confirmer-error / handler throw / no-handler / abort /
+  send-failed) coerces to either a `role:'tool'` error message that lets
+  the LLM recover, or an `ok:false` exit with a closed-enum `reason`.
+  Covered by `test/nova-tool-dispatch.test.mjs` (22 assertions across
+  7 suites).
 
 ### 3d. Cancellation and errors
-- [~] `AbortController` per turn; wired into `sendNovaTurn` (the module-level
+- [x] `AbortController` per turn; wired into `sendNovaTurn` (the module-level
   `novaAbortController` binding holds it while the turn is in flight, and
   a wall-clock `setTimeout` calls `.abort('turn-timeout')` at the
-  `turnTimeoutMs` cap). Cancel button → `.abort()` on the live controller
-  lands with Phase 3c composer wiring.
-- [ ] Handler throws → tool result `{ error }` so the LLM can recover; red card.
+  `turnTimeoutMs` cap). Dispatcher checks `signal.aborted` between every
+  tool call and between rounds; returns `{ ok: false, reason: 'aborted' }`
+  so the caller can render a "turn cancelled" pill. Cancel button →
+  `.abort()` on the live controller lands with the Phase 2c composer UI.
+- [x] Handler throws → tool result `{ error }` so the LLM can recover;
+  dispatcher pushes a `role:'tool'` message with `{ error: <message> }`
+  and emits an audit entry (`outcome: 'error:<message>'`). Red-card
+  rendering lands with the Phase 2c toolcard markup.
 
 ---
 
