@@ -4634,7 +4634,7 @@ const NOVA_TOOLS = [
             properties: {
                 path: { type: 'string' },
                 encoding: { type: 'string', enum: ['utf8', 'base64'], default: 'utf8' },
-                maxBytes: { type: 'integer', minimum: 1, maximum: 10485760, default: 262144 },
+                maxBytes: { type: 'integer', minimum: 1, maximum: 10485760, default: 262144 }, // default 256 KB; cap 10 MB (prevents an LLM tool-call from slurping a giant file and blowing past the chat context window).
             },
             required: ['path'],
             additionalProperties: false,

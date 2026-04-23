@@ -24,8 +24,19 @@ const SOURCE = readFileSync(join(__dirname, '..', 'index.js'), 'utf8');
 
 /**
  * Pull the text of a top-level `const NAME = [ ... ];` array literal out of
- * the source and eval it in an isolated Function scope. The only thing it
- * can reference is Object / Array / Set — no side effects, no ST imports.
+ * the source and eval it in an isolated Function scope.
+ *
+ * Safety notes:
+ * - The source is `index.js` from THIS repository, read by the test harness
+ *   at test time. It is not user input, not fetched over the network, and
+ *   not controlled by any attacker-reachable channel.
+ * - The eval'd scope is a fresh Function closure with no `this` binding;
+ *   the literal can only reference global identifiers that would already
+ *   be available to any `node --test` file (Object, Array, RegExp, etc.).
+ * - If a future `NOVA_TOOLS` entry ever holds a live function reference
+ *   (e.g. a real `handler`), this loader will explode at eval time — that
+ *   is the signal to split the registry into a JSON-serialisable metadata
+ *   array (read by this test) and a separate handlers map (runtime-only).
  */
 function extractArrayLiteral(name) {
     const needle = `const ${name} = [`;
