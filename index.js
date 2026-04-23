@@ -8,7 +8,7 @@
  *
  * v0.10.0: Compose queue (batch mode), notification badges, [status] tag,
  *          Profiles app, Settings app, toast notifications, recency sort,
- *          character avatars, [sms to] filtering, and embedded OpenClaw bridge controls.
+ *          character avatars, [sms to] filtering.
  */
 import { getContext } from '../../../st-context.js';
 import {
@@ -24,7 +24,18 @@ const INJECT_KEY_CONTACTS = 'command-x-contacts';
 const INJECT_KEY_PRIVATE_PHONE = 'command-x-private-phone';
 const INJECT_KEY_QUESTS = 'command-x-quests';
 const INJECT_KEY_MAP = 'command-x-map';
-const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true, manualHybridPrivateTexts: true, openclawMode: 'assist', contactsInjectEveryN: 1, questsInjectEveryN: 1, autoPrivatePollEveryN: 0, trackLocations: true, autoRegisterPlaces: true, mapInjectEveryN: 3, showLocationTrails: true };
+// Nova agent defaults (plan §7c). Extracted as a named constant so the seven
+// nested keys stay readable without reformatting the pre-existing DEFAULTS line.
+const NOVA_DEFAULTS = {
+    profileName: '',
+    defaultTier: 'read',
+    maxToolCalls: 24,
+    turnTimeoutMs: 300000,
+    pluginBaseUrl: '/api/plugins/nova-agent-bridge',
+    rememberApprovalsSession: false,
+    activeSkill: 'freeform',
+};
+const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true, manualHybridPrivateTexts: true, contactsInjectEveryN: 1, questsInjectEveryN: 1, autoPrivatePollEveryN: 0, trackLocations: true, autoRegisterPlaces: true, mapInjectEveryN: 3, showLocationTrails: true, nova: { ...NOVA_DEFAULTS } };
 const MAX_AVATAR_FILE_BYTES = 8 * 1024 * 1024; // 8 MB hard cap on raw upload size
 const MAX_MAP_IMAGE_WIDTH = 1024;           // max downscaled width for uploaded map image
 const AWAIT_TIMEOUT_MS = 30_000;             // ms before awaitingReply auto-clears
@@ -64,28 +75,6 @@ const SCAN_CONTACTS_LABEL = '🔍 Scan Contacts';
 let questEnrichmentInFlight = false;
 
 
-const OPENCLAW_API_BASE = '/api/plugins/openclaw-bridge';
-
-function getOpenClawChatState() {
-    const ctx = getContext();
-    ctx.chatMetadata[EXT] = ctx.chatMetadata[EXT] || {};
-    ctx.chatMetadata[EXT].openclaw = ctx.chatMetadata[EXT].openclaw || {};
-    const state = ctx.chatMetadata[EXT].openclaw;
-    let mutated = false;
-    if (!Number.isFinite(Number(state.resetNonce))) { state.resetNonce = 0; mutated = true; }
-    if (mutated && typeof ctx.saveMetadata === 'function') ctx.saveMetadata();
-    return state;
-}
-
-function saveOpenClawChatState(patch = {}) {
-    const ctx = getContext();
-    const current = getOpenClawChatState();
-    ctx.chatMetadata[EXT] = ctx.chatMetadata[EXT] || {};
-    ctx.chatMetadata[EXT].openclaw = { ...current, ...patch };
-    ctx.saveMetadata();
-    return ctx.chatMetadata[EXT].openclaw;
-}
-
 function currentChatId() {
     const ctx = getContext();
     return String(ctx.chatId || ctx.groupId || ctx.getCurrentChatId?.() || 'no-chat');
@@ -122,368 +111,6 @@ function getRecentMessages() {
         isUser: !!message.is_user,
         isSystem: !!message.is_system,
     }));
-}
-
-async function callOpenClawBridge(path, options = {}) {
-    const ctx = getContext();
-    const response = await fetch(`${OPENCLAW_API_BASE}${path}`, {
-        method: options.method || 'GET',
-        headers: ctx.getRequestHeaders(),
-        body: options.body ? JSON.stringify(options.body) : undefined,
-    });
-
-    const data = await response.json();
-    if (!response.ok || !data?.ok) {
-        throw new Error(data?.error || `${response.status} ${response.statusText}`);
-    }
-
-    return data;
-}
-
-function getOpenClawEls() {
-    return {
-        status: phoneContainer?.querySelector('#cx-ocb-status'),
-        session: phoneContainer?.querySelector('#cx-ocb-session'),
-        reply: phoneContainer?.querySelector('#cx-ocb-reply'),
-        prompt: phoneContainer?.querySelector('#cx-ocb-prompt'),
-        mode: phoneContainer?.querySelector('#cx-ocb-mode'),
-        actions: phoneContainer?.querySelector('#cx-ocb-actions-list'),
-        actionState: phoneContainer?.querySelector('#cx-ocb-actions-state'),
-        log: phoneContainer?.querySelector('#cx-ocb-log'),
-    };
-}
-
-function setOpenClawStatus(text) {
-    const { status } = getOpenClawEls();
-    if (status) status.textContent = text;
-}
-
-function appendOpenClawLog(title, value) {
-    const { log } = getOpenClawEls();
-    if (!log) return;
-    const chunk = [title, value].filter(Boolean).join('\n');
-    const previous = String(log.textContent || '').trim();
-    log.textContent = [previous, chunk].filter(Boolean).join('\n\n').slice(-16000);
-    log.scrollTop = log.scrollHeight;
-}
-
-function escapeHtml(value) {
-    return String(value ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-}
-
-function parseOpenClawOperateEnvelope(reply, envelopeFromBridge = null) {
-    const raw = envelopeFromBridge || (() => {
-        const match = String(reply || '').match(/\[command-x-operate\]\s*([\s\S]*?)\s*\[\/command-x-operate\]/i);
-        if (!match) return null;
-        try {
-            return JSON.parse(match[1]);
-        } catch {
-            return null;
-        }
-    })();
-
-    if (!raw || raw.kind !== 'command-x/operate/v1' || !Array.isArray(raw.actions)) return null;
-    const actions = raw.actions
-        .map((action, index) => ({
-            id: String(action?.id || `action-${index + 1}`),
-            type: String(action?.type || ''),
-            title: String(action?.title || action?.type || `Action ${index + 1}`),
-            command: String(action?.command || '').trim(),
-            reason: String(action?.reason || '').trim(),
-            status: 'pending',
-            receipt: '',
-        }))
-        .filter(action => action.type === 'slash.run' && action.command.startsWith('/'));
-
-    if (!actions.length) return null;
-    return {
-        kind: raw.kind,
-        summary: String(raw.summary || '').trim(),
-        actions,
-    };
-}
-
-function applyOpenClawResponse(data, logTitle = 'OPENCLAW RESULT', responseMode = settings.openclawMode || 'assist') {
-    const envelope = responseMode === 'operate'
-        ? parseOpenClawOperateEnvelope(data.reply, data.operateEnvelope)
-        : null;
-
-    saveOpenClawChatState({
-        lastReply: data.reply,
-        lastSessionId: data.sessionId,
-        lastOperateEnvelope: envelope,
-    });
-    syncOpenClawView();
-    appendOpenClawLog(logTitle, JSON.stringify({
-        sessionId: data.sessionId,
-        reply: data.reply,
-        operateEnvelope: envelope,
-    }, null, 2));
-    return envelope;
-}
-
-function formatOpenClawResult(result) {
-    if (result == null) return '(no output)';
-    if (typeof result === 'string') return result.trim() || '(empty string)';
-    try {
-        return JSON.stringify(result, null, 2);
-    } catch {
-        return String(result);
-    }
-}
-
-function renderOpenClawActions() {
-    const chatState = getOpenClawChatState();
-    const { actions, actionState } = getOpenClawEls();
-    if (!actions || !actionState) return;
-
-    const envelope = chatState.lastOperateEnvelope;
-    if (!envelope?.actions?.length) {
-        actions.innerHTML = '<div class="cx-openclaw-empty">No pending local actions.</div>';
-        actionState.textContent = settings.openclawMode === 'operate'
-            ? 'Operate mode can propose slash.run actions here.'
-            : 'Switch to operate mode to receive actionable proposals.';
-        return;
-    }
-
-    actionState.textContent = envelope.summary || 'OpenClaw proposed local actions.';
-    actions.innerHTML = envelope.actions.map(action => `
-        <div class="cx-openclaw-action-card" data-action-id="${escapeHtml(action.id)}">
-            <div class="cx-openclaw-action-head">
-                <strong>${escapeHtml(action.title)}</strong>
-                <span class="cx-openclaw-action-type">${escapeHtml(action.type)}</span>
-            </div>
-            <pre class="cx-openclaw-action-command">${escapeHtml(action.command)}</pre>
-            ${action.reason ? `<div class="cx-openclaw-action-reason">${escapeHtml(action.reason)}</div>` : ''}
-            <div class="cx-openclaw-action-receipt">${escapeHtml(action.receipt || `Status: ${action.status}`)}</div>
-            <div class="cx-openclaw-actions">
-                <button data-ocb-approve="${escapeHtml(action.id)}" ${action.status !== 'pending' ? 'disabled' : ''}>Approve</button>
-                <button data-ocb-reject="${escapeHtml(action.id)}" ${action.status !== 'pending' ? 'disabled' : ''}>Reject</button>
-            </div>
-        </div>
-    `).join('');
-}
-
-function syncOpenClawView() {
-    const chatState = getOpenClawChatState();
-    const { session, reply, mode } = getOpenClawEls();
-    if (session) session.textContent = chatState.lastSessionId || '(not used yet)';
-    if (reply) reply.textContent = chatState.lastReply || '(no reply yet)';
-    if (mode) mode.value = settings.openclawMode || 'assist';
-    renderOpenClawActions();
-}
-
-function insertContextIntoOpenClawPrompt() {
-    const { prompt } = getOpenClawEls();
-    if (!prompt) return;
-    const ctx = getContext();
-    const lines = getRecentMessages().map(message => `${message.name}: ${message.text}`);
-    const block = [
-        `Mode: ${settings.openclawMode || 'assist'}`,
-        `Chat ID: ${currentChatId()}`,
-        `Character ID: ${ctx.characterId}`,
-        `Group ID: ${ctx.groupId}`,
-        '',
-        ...lines,
-    ].join('\n');
-    prompt.value = prompt.value ? `${prompt.value}\n\n${block}` : block;
-    setOpenClawStatus('Inserted current SillyTavern context.');
-}
-
-async function checkOpenClawHealth() {
-    setOpenClawStatus('Checking bridge health...');
-    const data = await callOpenClawBridge('/health');
-    appendOpenClawLog('HEALTH', JSON.stringify(data, null, 2));
-    setOpenClawStatus(`Bridge healthy: ${data.version}`);
-}
-
-async function refreshOpenClawSessionStatus() {
-    setOpenClawStatus('Checking session status...');
-    const chatState = getOpenClawChatState();
-    const params = new URLSearchParams({
-        chatId: currentChatId(),
-        resetNonce: String(chatState.resetNonce || 0),
-    });
-    const data = await callOpenClawBridge(`/session/status?${params.toString()}`);
-    saveOpenClawChatState({ lastSessionId: data.sessionId });
-    syncOpenClawView();
-    appendOpenClawLog('SESSION STATUS', JSON.stringify(data, null, 2));
-    setOpenClawStatus(data.sessionFound ? `Session ready: ${data.sessionId} (existing)` : `Session ready: ${data.sessionId}`);
-}
-
-async function sendToOpenClaw() {
-    const { prompt } = getOpenClawEls();
-    const ctx = getContext();
-    const userPrompt = String(prompt?.value || '').trim();
-    if (!userPrompt) {
-        setOpenClawStatus('Write a prompt first.');
-        return;
-    }
-
-    const chatState = getOpenClawChatState();
-    setOpenClawStatus('Sending to OpenClaw...');
-
-    const data = await callOpenClawBridge('/session/message', {
-        method: 'POST',
-        body: {
-            mode: settings.openclawMode || 'assist',
-            chatId: currentChatId(),
-            characterId: ctx.characterId,
-            groupId: ctx.groupId,
-            resetNonce: chatState.resetNonce || 0,
-            userPrompt,
-            recentMessages: getRecentMessages(),
-        },
-    });
-
-    const envelope = applyOpenClawResponse(data, 'OPENCLAW RESULT', settings.openclawMode || 'assist');
-    setOpenClawStatus(envelope ? `OpenClaw proposed ${envelope.actions.length} local action(s).` : `OpenClaw replied on ${data.sessionId}.`);
-}
-
-async function sendOpenClawOperateReceipt(userPrompt, logTitle) {
-    const ctx = getContext();
-    const chatState = getOpenClawChatState();
-    const data = await callOpenClawBridge('/session/message', {
-        method: 'POST',
-        body: {
-            mode: 'operate',
-            chatId: currentChatId(),
-            characterId: ctx.characterId,
-            groupId: ctx.groupId,
-            resetNonce: chatState.resetNonce || 0,
-            userPrompt,
-            recentMessages: getRecentMessages(),
-        },
-    });
-    return applyOpenClawResponse(data, logTitle, 'operate');
-}
-
-async function resetOpenClawSession() {
-    const state = getOpenClawChatState();
-    const nextNonce = Number(state.resetNonce || 0) + 1;
-    const data = await callOpenClawBridge('/session/reset', {
-        method: 'POST',
-        body: {
-            chatId: currentChatId(),
-            resetNonce: nextNonce,
-        },
-    });
-    saveOpenClawChatState({
-        resetNonce: nextNonce,
-        lastSessionId: data.sessionId,
-        lastReply: '',
-        lastOperateEnvelope: null,
-    });
-    syncOpenClawView();
-    appendOpenClawLog('SESSION RESET', JSON.stringify(data, null, 2));
-    setOpenClawStatus(`Switched to ${data.sessionId}.`);
-}
-
-async function executeOpenClawSlashCommand(text) {
-    return getContext().executeSlashCommandsWithOptions(text, {
-        handleExecutionErrors: true,
-        source: 'command-x-openclaw',
-    });
-}
-
-async function approveOpenClawAction(actionId) {
-    const chatState = getOpenClawChatState();
-    const envelope = chatState.lastOperateEnvelope;
-    const action = envelope?.actions?.find(item => item.id === actionId);
-    if (!action || action.status !== 'pending') return;
-
-    action.status = 'running';
-    action.receipt = 'Executing locally...';
-    saveOpenClawChatState({ lastOperateEnvelope: envelope });
-    syncOpenClawView();
-    setOpenClawStatus(`Running ${action.command}`);
-
-    try {
-        const result = await executeOpenClawSlashCommand(action.command);
-        const receipt = formatOpenClawResult(result);
-        action.status = 'approved';
-        action.receipt = `Approved and executed.\n\n${receipt}`;
-        saveOpenClawChatState({ lastOperateEnvelope: envelope });
-        syncOpenClawView();
-        appendOpenClawLog('OPERATE ACTION APPROVED', JSON.stringify({ actionId, command: action.command, receipt }, null, 2));
-        const followUp = await sendOpenClawOperateReceipt([
-            `Action receipt for ${action.id}:`,
-            `- decision: approved`,
-            `- type: ${action.type}`,
-            `- command: ${action.command}`,
-            '- result:',
-            receipt,
-        ].join('\n'), 'OPERATE FOLLOW-UP');
-        setOpenClawStatus(followUp ? 'Action executed. OpenClaw sent a follow-up proposal.' : 'Action executed. OpenClaw received the result.');
-    } catch (error) {
-        const receipt = String(error?.message || error);
-        action.status = 'failed';
-        action.receipt = `Execution failed.\n\n${receipt}`;
-        saveOpenClawChatState({ lastOperateEnvelope: envelope });
-        syncOpenClawView();
-        appendOpenClawLog('OPERATE ACTION ERROR', JSON.stringify({ actionId, command: action.command, error: receipt }, null, 2));
-        const followUp = await sendOpenClawOperateReceipt([
-            `Action receipt for ${action.id}:`,
-            `- decision: approved`,
-            `- type: ${action.type}`,
-            `- command: ${action.command}`,
-            '- outcome: execution_error',
-            '- error:',
-            receipt,
-        ].join('\n'), 'OPERATE FOLLOW-UP');
-        setOpenClawStatus(followUp ? 'Execution failed. OpenClaw proposed a next step.' : 'Execution failed. OpenClaw received the error.');
-    }
-}
-
-async function rejectOpenClawAction(actionId) {
-    const chatState = getOpenClawChatState();
-    const envelope = chatState.lastOperateEnvelope;
-    const action = envelope?.actions?.find(item => item.id === actionId);
-    if (!action || action.status !== 'pending') return;
-
-    action.status = 'rejected';
-    action.receipt = 'Rejected locally. Command was not run.';
-    saveOpenClawChatState({ lastOperateEnvelope: envelope });
-    syncOpenClawView();
-    appendOpenClawLog('OPERATE ACTION REJECTED', JSON.stringify({ actionId, command: action.command }, null, 2));
-    setOpenClawStatus('Action rejected. Sending receipt back to OpenClaw...');
-    const followUp = await sendOpenClawOperateReceipt([
-        `Action receipt for ${action.id}:`,
-        '- decision: rejected',
-        `- type: ${action.type}`,
-        `- command: ${action.command}`,
-        '- note: The local operator rejected this action and it was not executed.',
-    ].join('\n'), 'OPERATE FOLLOW-UP');
-    setOpenClawStatus(followUp ? 'Action rejected. OpenClaw proposed an alternative.' : 'Action rejected. OpenClaw received the rejection.');
-}
-
-async function runOpenClawSlashLocally() {
-    const { prompt } = getOpenClawEls();
-    const text = String(prompt?.value || '').trim();
-    if (!text.startsWith('/')) {
-        setOpenClawStatus('Local action expects a slash command starting with /.');
-        return;
-    }
-
-    try {
-        const result = await executeOpenClawSlashCommand(text);
-        appendOpenClawLog('LOCAL SLASH', `${text}\n\n${formatOpenClawResult(result)}`);
-        setOpenClawStatus('Ran slash command locally.');
-    } catch (error) {
-        appendOpenClawLog('LOCAL SLASH ERROR', String(error?.message || error));
-        setOpenClawStatus(String(error?.message || error));
-    }
-}
-
-function clearOpenClawPrompt() {
-    const { prompt } = getOpenClawEls();
-    if (prompt) prompt.value = '';
-    setOpenClawStatus('Cleared prompt.');
 }
 
 /* ======================================================================
@@ -2710,6 +2337,7 @@ const now = () => new Date().toLocaleTimeString([], { hour: 'numeric', minute: '
 const today = () => new Date().toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
 function escHtml(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>'); }
 function escAttr(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escapeHtml(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 
 
 function buildOutOfBandPollPrompt() {
@@ -3524,9 +3152,9 @@ function buildPhone() {
                     <div class="cx-icon-img cx-icon-map">🧭</div>
                     <div class="cx-icon-label">Map</div>
                 </div>
-                <div class="cx-app-icon" data-app="openclaw" role="button" tabindex="0" aria-label="Open OpenClaw app">
-                    <div class="cx-icon-img cx-icon-openclaw">🦞</div>
-                    <div class="cx-icon-label">OpenClaw</div>
+                <div class="cx-app-icon" data-app="nova" role="button" tabindex="0" aria-label="Open Nova agent">
+                    <div class="cx-icon-img cx-icon-nova">✴︎</div>
+                    <div class="cx-icon-label">Nova</div>
                 </div>
                 <div class="cx-app-icon" data-app="phone-settings" role="button" tabindex="0" aria-label="Open Settings">
                     <div class="cx-icon-img cx-icon-settings">⚙️</div>
@@ -3619,6 +3247,39 @@ function buildPhone() {
 
         ${buildMapView(contacts)}
 
+        <!-- Nova Agent View (scaffolding — agent loop wired in later sprint) -->
+        <div class="cx-view" data-view="nova">
+            <div class="cx-nova-header">
+                <div class="cx-nova-title-col">
+                    <div class="cx-nova-title">Nova</div>
+                    <div class="cx-nova-sub">Agentic Assistant</div>
+                </div>
+                <div class="cx-nova-pills">
+                    <button type="button" class="cx-nova-pill" id="cx-nova-pill-profile" aria-label="Choose connection profile" disabled title="Coming soon">Profile: —</button>
+                    <button type="button" class="cx-nova-pill" id="cx-nova-pill-skill" aria-label="Choose skill" disabled title="Coming soon">Skill: Free-form</button>
+                    <button type="button" class="cx-nova-pill" id="cx-nova-pill-tier" aria-label="Choose permission tier" disabled title="Coming soon">Tier: Read</button>
+                </div>
+            </div>
+            <div class="cx-nova-transcript" id="cx-nova-transcript" role="log" aria-live="polite" aria-label="Nova conversation transcript">
+                <div class="cx-nova-empty">
+                    <div class="cx-nova-empty-glyph">✴︎</div>
+                    <div class="cx-nova-empty-title">Nova is offline</div>
+                    <div class="cx-nova-empty-body">The agent loop, skills, and tool bridge ship in a later sprint. This shell verifies the scaffolding renders cleanly on your setup.</div>
+                </div>
+            </div>
+            <div class="cx-nova-composer">
+                <textarea class="cx-nova-input" id="cx-nova-input" rows="2" placeholder="Ask Nova…" aria-label="Message Nova" disabled></textarea>
+                <div class="cx-nova-composer-actions">
+                    <button type="button" class="cx-settings-btn cx-nova-send" id="cx-nova-send" aria-label="Send to Nova" disabled>Send</button>
+                    <button type="button" class="cx-settings-btn cx-nova-cancel cx-hidden" id="cx-nova-cancel" aria-label="Cancel Nova turn">Cancel</button>
+                </div>
+            </div>
+            <div class="cx-navbar">
+                <div class="cx-nav active"><div class="cx-nav-ico">✴︎</div><div class="cx-nav-lbl">Nova</div></div>
+                <div class="cx-nav" data-goto="home" role="button" tabindex="0" aria-label="Go to home screen"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
+            </div>
+        </div>
+
         <!-- Settings View -->
         <div class="cx-view" data-view="phone-settings">
             <div class="cx-settings-header">
@@ -3687,62 +3348,6 @@ function buildPhone() {
                 <div class="cx-nav" data-goto="home" role="button" tabindex="0" aria-label="Go to home screen"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
             </div>
         </div>
-
-        <!-- OpenClaw View -->
-        <div class="cx-view" data-view="openclaw">
-            <div class="cx-openclaw-header">
-                <div class="cx-openclaw-title">OpenClaw</div>
-                <div class="cx-openclaw-sub">Bridge console inside Command-X</div>
-            </div>
-            <div class="cx-openclaw-body">
-                <label class="cx-openclaw-field">
-                    <span>Mode</span>
-                    <select id="cx-ocb-mode">
-                        <option value="observe">observe</option>
-                        <option value="assist">assist</option>
-                        <option value="operate">operate</option>
-                    </select>
-                </label>
-                <div class="cx-openclaw-actions cx-openclaw-actions-tight">
-                    <button id="cx-ocb-health">Health</button>
-                    <button id="cx-ocb-session-btn">Session</button>
-                    <button id="cx-ocb-reset">Reset</button>
-                </div>
-                <div class="cx-openclaw-status" id="cx-ocb-status">Ready.</div>
-                <div class="cx-openclaw-meta">
-                    <div>
-                        <span class="cx-openclaw-meta-label">Session</span>
-                        <pre id="cx-ocb-session">(not used yet)</pre>
-                    </div>
-                    <div>
-                        <span class="cx-openclaw-meta-label">Last reply</span>
-                        <pre id="cx-ocb-reply">(no reply yet)</pre>
-                    </div>
-                </div>
-                <textarea id="cx-ocb-prompt" placeholder="Ask OpenClaw about the current chat, or paste a SillyTavern slash command to run locally."></textarea>
-                <div class="cx-openclaw-actions">
-                    <button id="cx-ocb-insert">Insert context</button>
-                    <button id="cx-ocb-send" class="cx-openclaw-primary">Send</button>
-                </div>
-                <div class="cx-openclaw-actions">
-                    <button id="cx-ocb-slash">Run slash locally</button>
-                    <button id="cx-ocb-clear">Clear</button>
-                </div>
-                <div class="cx-openclaw-meta">
-                    <div>
-                        <span class="cx-openclaw-meta-label">Proposed actions</span>
-                        <div class="cx-openclaw-action-state" id="cx-ocb-actions-state">Switch to operate mode to receive actionable proposals.</div>
-                        <div id="cx-ocb-actions-list"><div class="cx-openclaw-empty">No pending local actions.</div></div>
-                    </div>
-                </div>
-                <pre id="cx-ocb-log"></pre>
-            </div>
-            <div class="cx-navbar">
-                <div class="cx-nav active"><div class="cx-nav-ico">🦞</div><div class="cx-nav-lbl">OpenClaw</div></div>
-                <div class="cx-nav" data-goto="home" role="button" tabindex="0" aria-label="Go to home screen"><div class="cx-nav-ico">🏠</div><div class="cx-nav-lbl">Home</div></div>
-            </div>
-        </div>
-
 
         <!-- Chat View -->
         <div class="cx-view" data-view="chat">
@@ -4442,13 +4047,9 @@ function wirePhone() {
     phoneContainer.querySelectorAll('.cx-app-icon[data-app]').forEach(icon =>
         icon.addEventListener('click', () => {
             const app = icon.dataset.app;
-            if (app === 'cmdx' || app === 'profiles' || app === 'quests' || app === 'openclaw' || app === 'phone-settings' || app === 'map') {
+            if (app === 'cmdx' || app === 'profiles' || app === 'quests' || app === 'phone-settings' || app === 'map' || app === 'nova') {
                 currentApp = app;
                 switchView(app);
-                if (app === 'openclaw') {
-                    syncOpenClawView();
-                    setOpenClawStatus('Ready.');
-                }
             }
         })
     );
@@ -4524,29 +4125,6 @@ function wirePhone() {
         if (await cxConfirm('Clear all NPC contacts for this chat?', 'Clear Contacts', { confirmLabel: 'Clear All', danger: true })) {
             saveNpcs([]);
             rebuildPhone();
-        }
-    });
-    phoneContainer.querySelector('#cx-ocb-mode')?.addEventListener('change', (e) => {
-        settings.openclawMode = e.target.value;
-        saveSettings();
-        setOpenClawStatus(`Mode set: ${settings.openclawMode}`);
-    });
-    phoneContainer.querySelector('#cx-ocb-health')?.addEventListener('click', () => checkOpenClawHealth().catch(error => setOpenClawStatus(String(error?.message || error))));
-    phoneContainer.querySelector('#cx-ocb-session-btn')?.addEventListener('click', () => refreshOpenClawSessionStatus().catch(error => setOpenClawStatus(String(error?.message || error))));
-    phoneContainer.querySelector('#cx-ocb-send')?.addEventListener('click', () => sendToOpenClaw().catch(error => setOpenClawStatus(String(error?.message || error))));
-    phoneContainer.querySelector('#cx-ocb-reset')?.addEventListener('click', () => resetOpenClawSession().catch(error => setOpenClawStatus(String(error?.message || error))));
-    phoneContainer.querySelector('#cx-ocb-insert')?.addEventListener('click', insertContextIntoOpenClawPrompt);
-    phoneContainer.querySelector('#cx-ocb-slash')?.addEventListener('click', runOpenClawSlashLocally);
-    phoneContainer.querySelector('#cx-ocb-clear')?.addEventListener('click', clearOpenClawPrompt);
-    phoneContainer.querySelector('#cx-ocb-actions-list')?.addEventListener('click', (event) => {
-        const approveId = event.target?.closest?.('[data-ocb-approve]')?.dataset?.ocbApprove;
-        const rejectId = event.target?.closest?.('[data-ocb-reject]')?.dataset?.ocbReject;
-        if (approveId) {
-            approveOpenClawAction(approveId).catch(error => setOpenClawStatus(String(error?.message || error)));
-            return;
-        }
-        if (rejectId) {
-            rejectOpenClawAction(rejectId).catch(error => setOpenClawStatus(String(error?.message || error)));
         }
     });
     phoneContainer.querySelectorAll('[data-cx-edit]').forEach(btn =>
@@ -4842,7 +4420,6 @@ function createPanel() {
         }
     });
     wirePhone();
-    syncOpenClawView();
     updateUnreadBadges();
 }
 
@@ -4858,12 +4435,8 @@ function rebuildPhone() {
         saveSettings();
     });
     wirePhone();
-    syncOpenClawView();
     if (savedContact && savedApp) {
         openChat(savedContact, savedApp, true);
-    } else if (savedApp === 'openclaw') {
-        switchView('openclaw');
-        setOpenClawStatus('Ready.');
     } else if (savedApp) {
         switchView(savedApp);
     }
@@ -4897,12 +4470,565 @@ function styleCommandsInMessage(mesId) {
 }
 
 /* ======================================================================
+   NOVA AGENT — state + prompt-composition helpers (plan §3a, §6c)
+
+   Pure helpers only. Turn lifecycle, tool registry, and UI wiring land in a
+   later sprint once the `nova-agent-bridge` plugin + ConnectionManager probing
+   are ready for manual browser validation. The functions below are used
+   exclusively through `getContext()` chat metadata and never touch the DOM,
+   so they are safe to mirror in `test/nova-*.test.mjs`.
+   ====================================================================== */
+
+const NOVA_STATE_KEY = 'nova';                 // ctx.chatMetadata[EXT].nova
+const NOVA_SESSION_CAP = 20;                    // plan §3a
+const NOVA_AUDIT_CAP = 500;                     // plan §3a
+const NOVA_MEMORY_CHARS_CAP = 16 * 1024;        // plan §6c truncation budget
+
+/** Return the per-chat Nova state blob, lazily initialised. */
+function getNovaState(ctx) {
+    const root = ctx?.chatMetadata?.[EXT];
+    if (!root) return createEmptyNovaState();
+    if (!root[NOVA_STATE_KEY] || typeof root[NOVA_STATE_KEY] !== 'object') {
+        root[NOVA_STATE_KEY] = createEmptyNovaState();
+    }
+    const state = root[NOVA_STATE_KEY];
+    // Forward-compat: guarantee the documented shape even on older stored blobs.
+    if (!Array.isArray(state.sessions)) state.sessions = [];
+    if (!Array.isArray(state.auditLog)) state.auditLog = [];
+    if (!('activeSessionId' in state)) state.activeSessionId = null;
+    return state;
+}
+
+function createEmptyNovaState() {
+    return { sessions: [], activeSessionId: null, auditLog: [] };
+}
+
+/** Persist Nova state. Caller is responsible for mutating it first. */
+function saveNovaState(ctx) {
+    if (ctx?.saveMetadataDebounced) ctx.saveMetadataDebounced();
+}
+
+/**
+ * Create a new Nova session and push it onto the state, evicting oldest
+ * sessions once the cap is exceeded. Returns the new session object.
+ */
+function createNovaSession(state, { skill, tier, profileName }) {
+    const now = Date.now();
+    // Session IDs are not security-sensitive (they're collision keys for UI
+    // lookup, never exposed to untrusted code), but prefer the cryptographic
+    // UUID when available for better uniqueness guarantees and to keep static
+    // analysers happy.
+    const rand = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+        ? crypto.randomUUID().replace(/-/g, '').slice(0, 12)
+        : (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function'
+            ? Array.from(crypto.getRandomValues(new Uint8Array(6))).map(b => b.toString(16).padStart(2, '0')).join('')
+            : Date.now().toString(36) + 'xxxxxx');
+    const id = `nova-${now.toString(36)}-${rand}`;
+    const session = {
+        id,
+        skill: String(skill || 'freeform'),
+        tier: String(tier || 'read'),
+        profileName: String(profileName || ''),
+        messages: [],
+        toolCalls: [],
+        createdAt: now,
+        updatedAt: now,
+    };
+    state.sessions.push(session);
+    // Evict oldest first when over cap.
+    while (state.sessions.length > NOVA_SESSION_CAP) state.sessions.shift();
+    state.activeSessionId = id;
+    return session;
+}
+
+/**
+ * Append an audit log entry (tool invocation outcome) and trim to the cap.
+ * `argsSummary` should never include raw file contents — callers summarise
+ * before handing in (plan §13 redact test will enforce this for tool handlers).
+ */
+function appendNovaAuditLog(state, { tool, argsSummary, outcome }) {
+    const entry = {
+        ts: Date.now(),
+        tool: String(tool || 'unknown'),
+        argsSummary: String(argsSummary ?? ''),
+        outcome: String(outcome ?? ''),
+    };
+    state.auditLog.push(entry);
+    while (state.auditLog.length > NOVA_AUDIT_CAP) state.auditLog.shift();
+    return entry;
+}
+
+/**
+ * Compose the full Nova system prompt per plan §6c. Pure string helper so
+ * it can be covered by a unit test. Memory is truncated (tail-kept) to
+ * `NOVA_MEMORY_CHARS_CAP` with an explicit "…truncated" marker so the LLM
+ * doesn't silently receive partial content.
+ */
+function composeNovaSystemPrompt({ basePrompt = '', skillPrompt = '', soul = '', memory = '', toolContract = '' } = {}) {
+    const mem = String(memory || '');
+    const truncated = mem.length > NOVA_MEMORY_CHARS_CAP;
+    const memSlice = truncated
+        ? '[…truncated head…]\n' + mem.slice(mem.length - NOVA_MEMORY_CHARS_CAP)
+        : mem;
+    const sections = [
+        String(basePrompt || '').trim(),
+        String(skillPrompt || '').trim(),
+        '---',
+        '# Soul',
+        String(soul || '').trim(),
+        '---',
+        '# Memory',
+        memSlice.trim(),
+        '---',
+        String(toolContract || '').trim(),
+    ];
+    // Drop empty trimmed sections but always keep separators that sit between
+    // two non-empty blocks. Simpler: just filter empty strings.
+    return sections.filter(s => s.length > 0).join('\n');
+}
+
+/* ----------------------------------------------------------------------
+   NOVA AGENT — tool registry (plan §4) + skills (plan §5).
+
+   These arrays are PURE DATA — no handlers, no skill dispatch, no
+   registration with ST yet. Phase 3c wires `handler` and formatApproval;
+   Phase 9 backs `fs_*` / `shell_run` with the server plugin. Shipping the
+   schemas + skill prompts now lets Phase 3 pick a tool subset by id and
+   lets the Phase 10 `nova-tool-args.test.mjs` enforce schema well-formedness
+   before any LLM ever sees them.
+
+   Each NOVA_TOOLS entry:
+     { name, displayName, description, permission, parameters, backend }
+   where:
+     - `permission` ∈ 'read' | 'write' | 'shell' (tier gate)
+     - `backend`    ∈ 'plugin' | 'st-api' | 'phone' (dispatcher hint)
+     - `parameters` is a strict JSON-Schema object with `required` listed
+
+   `NOVA_TOOL_NAMES` is exported as a Set for O(1) membership checks in
+   skill default-tool lists.
+   ---------------------------------------------------------------------- */
+
+const SKILLS_VERSION = 1; // bump when any skill prompt changes
+
+const NOVA_TOOLS = [
+    // === 4a. Filesystem (plugin-backed) ===
+    {
+        name: 'fs_list', displayName: 'List directory', permission: 'read', backend: 'plugin',
+        description: 'List files and folders under a path inside the SillyTavern install directory.',
+        parameters: {
+            type: 'object',
+            properties: {
+                path: { type: 'string', description: 'Path relative to ST install root.' },
+                recursive: { type: 'boolean', default: false },
+                maxDepth: { type: 'integer', minimum: 1, maximum: 10, default: 3 },
+            },
+            required: ['path'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'fs_read', displayName: 'Read file', permission: 'read', backend: 'plugin',
+        description: 'Read a file inside the SillyTavern install directory.',
+        parameters: {
+            type: 'object',
+            properties: {
+                path: { type: 'string' },
+                encoding: { type: 'string', enum: ['utf8', 'base64'], default: 'utf8' },
+                maxBytes: { type: 'integer', minimum: 1, maximum: 10485760, default: 262144 }, // default 256 KB; cap 10 MB (prevents an LLM tool-call from slurping a giant file and blowing past the chat context window).
+            },
+            required: ['path'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'fs_write', displayName: 'Write file', permission: 'write', backend: 'plugin',
+        description: 'Write or overwrite a file. Destructive; always routes through approval with diff preview.',
+        parameters: {
+            type: 'object',
+            properties: {
+                path: { type: 'string' },
+                content: { type: 'string' },
+                encoding: { type: 'string', enum: ['utf8', 'base64'], default: 'utf8' },
+                createParents: { type: 'boolean', default: true },
+                overwrite: { type: 'boolean', default: false },
+            },
+            required: ['path', 'content'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'fs_delete', displayName: 'Delete path', permission: 'write', backend: 'plugin',
+        description: 'Move a file or directory to .nova-trash/<ts>/. Destructive; requires approval.',
+        parameters: {
+            type: 'object',
+            properties: {
+                path: { type: 'string' },
+                recursive: { type: 'boolean', default: false },
+            },
+            required: ['path'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'fs_move', displayName: 'Move / rename', permission: 'write', backend: 'plugin',
+        description: 'Move or rename a file or directory within the ST install root.',
+        parameters: {
+            type: 'object',
+            properties: {
+                from: { type: 'string' },
+                to: { type: 'string' },
+                overwrite: { type: 'boolean', default: false },
+            },
+            required: ['from', 'to'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'fs_stat', displayName: 'Stat path', permission: 'read', backend: 'plugin',
+        description: 'Return metadata (size, mtime, type) for a file or directory.',
+        parameters: {
+            type: 'object',
+            properties: { path: { type: 'string' } },
+            required: ['path'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'fs_search', displayName: 'Search files', permission: 'read', backend: 'plugin',
+        description: 'Full-text search inside files under a path, optionally filtered by glob.',
+        parameters: {
+            type: 'object',
+            properties: {
+                query: { type: 'string' },
+                glob: { type: 'string' },
+                path: { type: 'string', default: '.' },
+                maxResults: { type: 'integer', minimum: 1, maximum: 500, default: 50 },
+            },
+            required: ['query'],
+            additionalProperties: false,
+        },
+    },
+
+    // === 4b. Shell (plugin-backed, Full tier only) ===
+    {
+        name: 'shell_run', displayName: 'Run shell command', permission: 'shell', backend: 'plugin',
+        description: 'Execute an allow-listed shell command (node, npm, git, python, grep, rg, ls, cat, head, tail, wc, find). Destructive; requires approval.',
+        parameters: {
+            type: 'object',
+            properties: {
+                cmd: { type: 'string' },
+                args: { type: 'array', items: { type: 'string' }, default: [] },
+                cwd: { type: 'string' },
+                timeoutMs: { type: 'integer', minimum: 100, maximum: 300000, default: 60000 },
+            },
+            required: ['cmd'],
+            additionalProperties: false,
+        },
+    },
+
+    // === 4d. SillyTavern API tools (no plugin required) ===
+    {
+        name: 'st_list_characters', displayName: 'List characters', permission: 'read', backend: 'st-api',
+        description: 'List all character cards available in the current ST user profile.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+    },
+    {
+        name: 'st_read_character', displayName: 'Read character', permission: 'read', backend: 'st-api',
+        description: 'Read a character card as JSON (spec v2).',
+        parameters: {
+            type: 'object',
+            properties: { name: { type: 'string' } },
+            required: ['name'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'st_write_character', displayName: 'Write character', permission: 'write', backend: 'st-api',
+        description: 'Create or update a character card. Requires approval.',
+        parameters: {
+            type: 'object',
+            properties: {
+                name: { type: 'string' },
+                card: { type: 'object' },
+                overwrite: { type: 'boolean', default: false },
+            },
+            required: ['name', 'card'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'st_list_worldbooks', displayName: 'List worldbooks', permission: 'read', backend: 'st-api',
+        description: 'List all world info / lorebook files in the current ST user profile.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+    },
+    {
+        name: 'st_read_worldbook', displayName: 'Read worldbook', permission: 'read', backend: 'st-api',
+        description: 'Read a worldbook / world info file as JSON.',
+        parameters: {
+            type: 'object',
+            properties: { name: { type: 'string' } },
+            required: ['name'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'st_write_worldbook', displayName: 'Write worldbook', permission: 'write', backend: 'st-api',
+        description: 'Create or update a worldbook. Requires approval.',
+        parameters: {
+            type: 'object',
+            properties: {
+                name: { type: 'string' },
+                book: { type: 'object' },
+                overwrite: { type: 'boolean', default: false },
+            },
+            required: ['name', 'book'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'st_run_slash', displayName: 'Run slash command', permission: 'write', backend: 'st-api',
+        description: 'Execute a SillyTavern slash command via ctx.executeSlashCommandsWithOptions. Requires approval.',
+        parameters: {
+            type: 'object',
+            properties: { command: { type: 'string' } },
+            required: ['command'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'st_get_context', displayName: 'Read chat context', permission: 'read', backend: 'st-api',
+        description: 'Return a compact snapshot of the current ST chat: character, persona, and last N messages.',
+        parameters: {
+            type: 'object',
+            properties: { lastN: { type: 'integer', minimum: 1, maximum: 50, default: 10 } },
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'st_list_profiles', displayName: 'List connection profiles', permission: 'read', backend: 'st-api',
+        description: 'List all saved connection profiles.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+    },
+    {
+        name: 'st_get_profile', displayName: 'Read connection profile', permission: 'read', backend: 'st-api',
+        description: 'Return metadata for a connection profile by name.',
+        parameters: {
+            type: 'object',
+            properties: { name: { type: 'string' } },
+            required: ['name'],
+            additionalProperties: false,
+        },
+    },
+
+    // === 4e. Phone-internal tools (in-process, no plugin, no network) ===
+    {
+        name: 'phone_list_npcs', displayName: 'List phone NPCs', permission: 'read', backend: 'phone',
+        description: 'List NPCs stored for the current Command-X chat.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+    },
+    {
+        name: 'phone_write_npc', displayName: 'Write phone NPC', permission: 'write', backend: 'phone',
+        description: 'Create or update a Command-X NPC profile.',
+        parameters: {
+            type: 'object',
+            properties: {
+                name: { type: 'string' },
+                fields: { type: 'object' },
+            },
+            required: ['name', 'fields'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'phone_list_quests', displayName: 'List phone quests', permission: 'read', backend: 'phone',
+        description: 'List quests stored for the current Command-X chat.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+    },
+    {
+        name: 'phone_write_quest', displayName: 'Write phone quest', permission: 'write', backend: 'phone',
+        description: 'Create or update a Command-X quest entry.',
+        parameters: {
+            type: 'object',
+            properties: {
+                id: { type: 'string' },
+                fields: { type: 'object' },
+            },
+            required: ['id', 'fields'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'phone_list_places', displayName: 'List phone places', permission: 'read', backend: 'phone',
+        description: 'List registered places for the current Command-X chat.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+    },
+    {
+        name: 'phone_write_place', displayName: 'Write phone place', permission: 'write', backend: 'phone',
+        description: 'Create or update a registered place.',
+        parameters: {
+            type: 'object',
+            properties: {
+                name: { type: 'string' },
+                fields: { type: 'object' },
+            },
+            required: ['name', 'fields'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'phone_list_messages', displayName: 'List phone messages', permission: 'read', backend: 'phone',
+        description: 'List messages for a contact in the current Command-X chat.',
+        parameters: {
+            type: 'object',
+            properties: {
+                contactName: { type: 'string' },
+                limit: { type: 'integer', minimum: 1, maximum: 200, default: 50 },
+            },
+            required: ['contactName'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'phone_inject_message', displayName: 'Inject phone message', permission: 'write', backend: 'phone',
+        description: 'Inject a synthetic message into a contact thread (for staged-scene setup).',
+        parameters: {
+            type: 'object',
+            properties: {
+                contactName: { type: 'string' },
+                from: { type: 'string', enum: ['user', 'contact'] },
+                text: { type: 'string' },
+            },
+            required: ['contactName', 'from', 'text'],
+            additionalProperties: false,
+        },
+    },
+];
+
+const NOVA_TOOL_NAMES = new Set(NOVA_TOOLS.map(t => t.name));
+
+/* ----------------------------------------------------------------------
+   NOVA SKILLS (plan §5). Each skill is a named system-prompt pack with a
+   default tier and default tool subset. `defaultTools === 'all'` means the
+   skill inherits whatever the active tier allows.
+   ---------------------------------------------------------------------- */
+
+const NOVA_SKILLS = [
+    {
+        id: 'character-creator',
+        label: 'Character Creator',
+        icon: '👤',
+        defaultTier: 'write',
+        allowTierEscalation: true,
+        defaultTools: [
+            'st_list_characters', 'st_read_character', 'st_write_character',
+            'fs_list', 'fs_read', 'fs_stat', 'fs_search', 'fs_write',
+        ],
+        systemPrompt: [
+            'You are the Character Creator skill inside Nova.',
+            'You are an expert on the SillyTavern character-card v2 schema:',
+            "  spec: 'chara_card_v2', spec_version: '2.0', data: { name, description,",
+            '  personality, scenario, first_mes, mes_example, creator_notes,',
+            '  system_prompt, post_history_instructions, alternate_greetings,',
+            '  character_book, tags, creator, character_version, extensions }.',
+            'Cards live at SillyTavern/data/<user>/characters/<name>.json.',
+            'Prefer st_write_character over fs_write when updating a card — the',
+            'ST API handles PNG embedding and chat index updates for you.',
+            'Never overwrite an existing card without showing a diff first.',
+            'When a user asks you to invent a character, pick opinionated',
+            'concrete details; never leave schema fields as "TBD".',
+        ].join('\n'),
+    },
+    {
+        id: 'worldbook-creator',
+        label: 'Worldbook Creator',
+        icon: '📖',
+        defaultTier: 'write',
+        allowTierEscalation: true,
+        defaultTools: [
+            'st_list_worldbooks', 'st_read_worldbook', 'st_write_worldbook',
+            'fs_list', 'fs_read', 'fs_stat', 'fs_search', 'fs_write',
+        ],
+        systemPrompt: [
+            'You are the Worldbook Creator skill inside Nova.',
+            'You are an expert on the SillyTavern worldbook (world info) schema:',
+            '  an `entries` object keyed by integer uid, each with key[],',
+            '  keysecondary[], comment, content, constant, selective,',
+            '  selectiveLogic, addMemo, order, position (0..4), disable,',
+            '  excludeRecursion, preventRecursion, probability, useProbability,',
+            '  depth, group, groupOverride, groupWeight, scanDepth, caseSensitive,',
+            '  matchWholeWords, useGroupScoring, automationId, role, vectorized.',
+            'Worldbooks live at SillyTavern/data/<user>/worlds/<name>.json.',
+            'Prefer st_write_worldbook over fs_write — the ST API normalizes uids.',
+            'When building a new world, start with 3–5 foundational entries',
+            '(setting, factions, tone) before branching into specifics.',
+        ].join('\n'),
+    },
+    {
+        id: 'image-prompter',
+        label: 'Image Prompter',
+        icon: '🎨',
+        defaultTier: 'read',
+        allowTierEscalation: true,
+        // Read-only by design: prompts are emitted as structured output for the user
+        // to copy. fs_write would force tier escalation on every turn; drop it from
+        // the default set and let the user escalate + pick it manually if they want
+        // prompts written to disk.
+        defaultTools: ['st_get_context', 'phone_list_npcs'],
+        systemPrompt: [
+            'You are the Image Prompter skill inside Nova.',
+            'Use st_get_context to read the current RP scene and produce prompts',
+            'for SD / SDXL / Flux / Illustrious. Emit structured output:',
+            '  { positive, negative, sampler_hint, steps_hint, cfg_hint, notes }.',
+            'Support three flavours (user picks):',
+            '  • Anime — booru-tag style, comma-separated, concrete visual tokens.',
+            '  • Realistic — natural language + cinematography (lens, light, mood).',
+            '  • Artistic — style tokens + artist references + medium words.',
+            'Always tie the prompt to the *current* scene: character, outfit,',
+            'location, lighting, camera. Never invent details that contradict',
+            'the chat context.',
+        ].join('\n'),
+    },
+    {
+        id: 'freeform',
+        label: 'Plain helper',
+        icon: '✴︎',
+        defaultTier: 'read',
+        allowTierEscalation: true,
+        defaultTools: 'all',
+        systemPrompt: [
+            'You are Nova in free-form helper mode.',
+            'The user has not picked a specialised skill; answer whatever they',
+            'ask using the full soul + memory context and whatever tools the',
+            'current tier permits. Keep responses short. Ask before doing',
+            'anything destructive.',
+        ].join('\n'),
+    },
+];
+
+/* ======================================================================
    SETTINGS
    ====================================================================== */
 
 function loadSettings() {
     const ctx = getContext();
     if (ctx.extensionSettings[EXT]) Object.assign(settings, ctx.extensionSettings[EXT]);
+    // Migration: strip any legacy settings that have been retired so existing
+    // installs roll forward without a manual edit.
+    const LEGACY_KEYS = ['openclawMode'];
+    let migrated = false;
+    for (const key of LEGACY_KEYS) {
+        if (key in settings) { delete settings[key]; migrated = true; }
+        if (ctx.extensionSettings[EXT] && key in ctx.extensionSettings[EXT]) {
+            delete ctx.extensionSettings[EXT][key];
+            migrated = true;
+        }
+    }
+    if (migrated) ctx.saveSettingsDebounced();
+    // Nested-default hydration: Object.assign above is a shallow merge, so a user
+    // who previously saved a partial `nova` object would lose any keys added to
+    // NOVA_DEFAULTS in a newer release. Re-merge NOVA_DEFAULTS under whatever is
+    // stored so every key in the documented shape is always readable.
+    settings.nova = { ...NOVA_DEFAULTS, ...(settings.nova || {}) };
     const cb = (id, key, fallback = false) => {
         const el = document.getElementById(id);
         if (el) el.checked = settings[key] ?? fallback;
@@ -4916,9 +5042,6 @@ function loadSettings() {
     cb('cx_ext_track_locations', 'trackLocations', true);
     cb('cx_ext_auto_register_places', 'autoRegisterPlaces', true);
     cb('cx_ext_show_trails', 'showLocationTrails', true);
-    if (!["observe", "assist", "operate"].includes(settings.openclawMode)) settings.openclawMode = 'assist';
-    const openclawMode = document.getElementById('cx_ext_openclaw_mode');
-    if (openclawMode) openclawMode.value = settings.openclawMode || 'assist';
     const contactsN = document.getElementById('cx_ext_contacts_every_n');
     if (contactsN) contactsN.value = Math.max(1, Number(settings.contactsInjectEveryN) || 1);
     const questsN = document.getElementById('cx_ext_quests_every_n');
@@ -4936,7 +5059,6 @@ function saveSettings() {
     settings.batchMode = document.getElementById('cx_ext_batch_mode')?.checked ?? settings.batchMode ?? false;
     settings.autoDetectNpcs = document.getElementById('cx_ext_auto_detect_npcs')?.checked ?? settings.autoDetectNpcs ?? true;
     settings.manualHybridPrivateTexts = document.getElementById('cx_set_private_hybrid')?.checked ?? document.getElementById('cx-set-private-hybrid')?.checked ?? settings.manualHybridPrivateTexts ?? true;
-    settings.openclawMode = document.getElementById('cx_ext_openclaw_mode')?.value || settings.openclawMode || 'assist';
     settings.trackLocations = document.getElementById('cx_ext_track_locations')?.checked ?? document.getElementById('cx-set-track-locations')?.checked ?? settings.trackLocations ?? true;
     settings.autoRegisterPlaces = document.getElementById('cx_ext_auto_register_places')?.checked ?? document.getElementById('cx-set-auto-places')?.checked ?? settings.autoRegisterPlaces ?? true;
     settings.showLocationTrails = document.getElementById('cx_ext_show_trails')?.checked ?? document.getElementById('cx-set-trails')?.checked ?? settings.showLocationTrails ?? true;
@@ -4969,7 +5091,7 @@ jQuery(async () => {
 
         loadSettings();
         refreshPrivatePhonePrompt();
-        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_openclaw_mode, #cx_ext_contacts_every_n, #cx_ext_quests_every_n, #cx_ext_auto_private_poll_n, #cx_ext_track_locations, #cx_ext_auto_register_places, #cx_ext_show_trails, #cx_ext_map_every_n').on('change', () => {
+        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_contacts_every_n, #cx_ext_quests_every_n, #cx_ext_auto_private_poll_n, #cx_ext_track_locations, #cx_ext_auto_register_places, #cx_ext_show_trails, #cx_ext_map_every_n').on('change', () => {
             saveSettings();
             if (settings.enabled) {
                 createPanel();
