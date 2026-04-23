@@ -2336,7 +2336,14 @@ function getContactsFromContext() {
 const now = () => new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 const today = () => new Date().toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
 function escHtml(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>'); }
-function escAttr(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+/**
+ * Escape for HTML *attribute* contexts. Escapes `&`, `<`, `>`, `"`, and
+ * `'` so untrusted values can't break out of the surrounding `"..."`
+ * attribute delimiter. Use this any time you interpolate a dynamic
+ * value inside `attr="..."` — `escHtml` leaves quotes intact and
+ * CodeQL (correctly) flags its use in attribute position.
+ */
+function escAttr(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function escapeHtml(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 
 
@@ -3340,7 +3347,7 @@ function buildPhone() {
                 <div class="cx-settings-section">NOVA</div>
                 <div class="cx-settings-row">
                     <span class="cx-settings-label">Connection profile</span>
-                    <input type="text" id="cx-set-nova-profile" class="cx-settings-text-input" value="${escHtml(settings.nova?.profileName || '')}" placeholder="e.g. GPT-4o Mini" />
+                    <input type="text" id="cx-set-nova-profile" class="cx-settings-text-input" value="${escAttr(settings.nova?.profileName || '')}" placeholder="e.g. GPT-4o Mini" />
                 </div>
                 <div class="cx-settings-row">
                     <span class="cx-settings-label">Default permission tier</span>
@@ -3360,7 +3367,7 @@ function buildPhone() {
                 </div>
                 <div class="cx-settings-row">
                     <span class="cx-settings-label">Bridge plugin URL</span>
-                    <input type="text" id="cx-set-nova-plugin-url" class="cx-settings-text-input" value="${escHtml(settings.nova?.pluginBaseUrl || NOVA_DEFAULTS.pluginBaseUrl)}" />
+                    <input type="text" id="cx-set-nova-plugin-url" class="cx-settings-text-input" value="${escAttr(settings.nova?.pluginBaseUrl || NOVA_DEFAULTS.pluginBaseUrl)}" />
                 </div>
                 <div class="cx-settings-section">ABOUT</div>
                 <div class="cx-settings-row cx-settings-about">
@@ -4224,7 +4231,7 @@ function cxPickList(title, options, { initial = null, confirmLabel = 'Choose' } 
             ? options.map((opt, i) => {
                 const active = opt.value === selected;
                 const hint = opt.hint ? `<div class="cx-pick-hint">${escHtml(opt.hint)}</div>` : '';
-                return `<div class="cx-pick-row ${active ? 'cx-pick-active' : ''}" data-pick-value="${escHtml(String(opt.value))}" role="button" tabindex="0" aria-label="${escHtml(String(opt.label))}">
+                return `<div class="cx-pick-row ${active ? 'cx-pick-active' : ''}" data-pick-value="${escAttr(String(opt.value))}" role="button" tabindex="0" aria-label="${escAttr(String(opt.label))}">
                     <div class="cx-pick-dot"></div>
                     <div class="cx-pick-body">
                         <div class="cx-pick-label">${escHtml(String(opt.label))}</div>
