@@ -302,6 +302,74 @@ so the next agent doesn't re-add it.
 
 <!-- Add new entries above this line using the template in "How to Use This File". -->
 
+### 2026-04-23 — Nova Phase 8 server plugin scaffold (this PR, follow-up commit)
+
+**Context:** Stood up `server-plugin/nova-agent-bridge/` — the companion ST
+server plugin that will back Nova's `fs_*` and `shell_run` tools. Scaffold
+only: the ST plugin contract (`init`/`exit`/`info`), the two discovery
+routes (`/manifest`, `/health`), and the pure path-safety helper
+(`paths.js`) are real. The eight fs/shell routes are wired as explicit
+`501 not-implemented` stubs so the extension's Phase 4f capability probe
+can distinguish "plugin present, handler pending" from "plugin missing
+entirely".
+
+**Notes for future agents:**
+- **Plugin loads as CommonJS.** ST's plugin loader (`st-docs/For_Contributors/
+  Server-Plugins.md`) prefers `package.json.main`, then `index.js`, then
+  `index.mjs`. We ship `package.json` with `"main": "index.js"` so the
+  CJS entry is always picked up. Don't convert this to ESM — ST's loader
+  is tested primarily against CJS plugins.
+- **`/manifest.capabilities` is the source of truth for what's actually
+  wired.** Every fs/shell key starts at `false` and flips to `true` only
+  when the real handler lands. Do NOT flip a key to `true` just because
+  the route exists — the extension Phase 4f probe uses this to decide
+  whether to register the corresponding `NOVA_TOOLS` entry, and a
+  too-optimistic flag will let the LLM call a tool that always 501s.
+- **`paths.js` is intentionally zero-dep** (only `node:path`). The
+  deny-list distinguishes single-segment bans (`.git`, `node_modules` —
+  any depth) from two-segment pair bans (`plugins/nova-agent-bridge`
+  specifically). This matters: a blanket `plugins/` ban would lock out
+  every other ST plugin directory, and a single-segment `nova-agent-bridge`
+  ban could hit unrelated folders. Keep the split.
+- **Symlink-escape protection is explicitly deferred.** `normalizeNovaPath`
+  is lexical — it does not call `fs.realpath`. The plan requires the
+  realpath check; it lands at request time in the fs-handler sprint
+  because (a) it's async and (b) an unreadable symlink path on startup
+  shouldn't block route wiring.
+- **Config loader is a single-line regex parser** (`/^\s*root\s*:\s*(.+?)\s*$/m`
+  with quote-stripping). Intentional — adding a real YAML dep for one
+  key would violate the "zero runtime deps" rule in §8a. When config
+  grows past 2-3 keys, add the YAML dep then, not sooner.
+- **Tests use `createRequire` to load the CJS plugin from ESM.** The
+  `test/nova-plugin.test.mjs` pattern (build a mock router, assert the
+  recorded route list) is cheap and catches route-contract regressions
+  without spinning up Express. The `/manifest` + `/health` + stub-501
+  handlers are exercised directly through a mock `res` object. Reuse
+  this pattern for future route handlers.
+- **`test/nova-paths.test.mjs` inline-copies `normalizeNovaPath`** per
+  the existing test convention (AGENT_MEMORY 2026-04-22 entry on pure
+  helpers). When you change `paths.js`, mirror the edit into the test
+  file in the same PR.
+- **Not yet wired:** the extension-side capability probe (plan §4f) still
+  needs the `fetch('/api/plugins/nova-agent-bridge/manifest')` call plus
+  the `NOVA_TOOLS` filter step. Fully separate PR.
+
+**What's still deferred (explicitly):**
+- Phase 3b turn lifecycle (and `migrateLegacyOpenClawMetadata` init wiring).
+- Phase 3c tool handlers + approval modal DOM (will consume `buildNovaUnifiedDiff`).
+- Phase 3d cancellation UI.
+- Phase 4f capability-probe wiring on the extension side.
+- Phase 6a/6b soul/memory runtime loader.
+- Phase 7a/7b settings surface.
+- Phase 8b real fs/shell handlers + symlink-realpath + audit log + CSRF
+  (next plugin sprint).
+- Phase 9 profile swap.
+
+**Validation:** `node --check` clean on all three JS files;
+`node --test test/*.test.mjs` → **165/165 pass** (+29 new: 19 paths, 10
+plugin). `require('./server-plugin/nova-agent-bridge/index.js')` succeeds
+under plain Node with no ST present.
+
 ### 2026-04-23 — Nova Phase 4c + Phase 1f/§10 pure-helper sprint (this PR)
 
 **Context:** Landed two more pure helpers before the agent loop lands:

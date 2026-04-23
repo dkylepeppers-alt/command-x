@@ -1,0 +1,22 @@
+# SillyTavern Server Plugin — nova-agent-bridge
+#
+# Optional configuration. Drop this file next to index.js as `config.yaml`
+# to override defaults.
+#
+# `root` — Absolute path the plugin is allowed to read/write under. Default
+# is `process.cwd()` (the directory ST was launched from, i.e. the
+# SillyTavern install). Paths that escape this root — or traverse any
+# deny-listed segment (.git, node_modules, plugins/nova-agent-bridge) —
+# are rejected by the path-safety layer (`paths.js`).
+#
+# root: /absolute/path/to/allowed/root
+
+# Reserved for future sprints:
+#
+# shellAllowList:
+#   - node
+#   - npm
+#   - git
+#
+# maxFileBytes: 20971520   # 20 MB cap per §8c
+# auditLogPath: ./data/_nova-audit.jsonl

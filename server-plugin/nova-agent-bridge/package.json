@@ -1,0 +1,11 @@
+{
+  "name": "nova-agent-bridge",
+  "version": "0.1.0",
+  "description": "Filesystem and shell bridge for the Command-X Nova agent (SillyTavern server plugin).",
+  "main": "index.js",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  }
+}
