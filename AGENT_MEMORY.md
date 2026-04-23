@@ -79,7 +79,13 @@ _Newest entries first. Append a new entry here at the end of every PR._
 
 ### 2026-04-23 — Next-session hand-off: after Phase 3a turn-state scaffolding
 
-**Context:** This PR shipped **Phase 3a's remaining item — module-level turn state** per the prior hand-off. Added three `let` bindings (`novaTurnInFlight = false`, `novaAbortController = null`, `novaToolRegistryVersion = 0`) and a `_getNovaTurnState()` snapshot helper to the NOVA AGENT section of `index.js`, plus `test/nova-turn-state.test.mjs` (9 tests, 216/216 total). No behavioural change — these are the variables §3b will mutate.
+**Scope of this PR (#18) — cumulative, three Nova phases on one branch:**
+1. **Phase 4f — capability probe** (commit `dccb3ed`): `probeNovaBridge` + `invalidateNovaBridgeProbeCache`, cache invalidation added to the existing `CHAT_CHANGED` listener, `test/nova-probe.test.mjs`.
+2. **Phase 1f — init wiring** (commits `fba6dde` / `52009f5`): `NOVA_INIT_VERSION` + `initNovaOnce(ctx)`, **new dedicated Nova `CHAT_CHANGED` listener** (separate from the phone-UI one), startup call in `jQuery(async () => ...)`, `test/nova-init-once.test.mjs`.
+3. **Phase 3a — turn-state scaffolding** (commit `fe9eff7`, this hand-off's headline): three `let` bindings (`novaTurnInFlight = false`, `novaAbortController = null`, `novaToolRegistryVersion = 0`) + `_getNovaTurnState()` snapshot helper in the NOVA AGENT section of `index.js`, plus `test/nova-turn-state.test.mjs` (9 tests).
+4. **PR review follow-ups** (commit `da1b7cc`): cleared a `setTimeout` leak in `probeNovaBridge`'s manual-fallback path, fixed `test/nova-init-once.test.mjs`'s inline `EXT` constant from `'command_x'` → `'command-x'`, clarified this memory entry.
+
+**Behavioural impact of the cumulative PR:** one new `CHAT_CHANGED` listener (for `initNovaOnce`; runs a one-shot `chatMetadata[EXT].openclaw` → `.legacy_openclaw` migration on first load per chat); one additional side-effect on the pre-existing `CHAT_CHANGED` listener (probe cache invalidation); no new LLM calls; no new DOM. Phase 3a alone is pure declarations + one diagnostic helper.
 
 **Notes for future agents:**
 - **`_getNovaTurnState()` is the stable read-only test hook.** `hasAbort` is a boolean (`novaAbortController !== null`), deliberately NOT the live reference, so test code can't mutate the active controller via the snapshot. Snapshots are fresh objects on every call — mutating one doesn't affect internal state. If §3b needs a richer hook (e.g. `abortReason`), add fields to the return object but keep all values structured-cloneable primitives.
@@ -104,12 +110,9 @@ _Newest entries first. Append a new entry here at the end of every PR._
 
 **Validation this sprint:**
 - `node --check index.js` clean.
-- `node --test test/helpers.test.mjs test/nova-*.test.mjs` → **216/216 pass** (+9 new turn-state tests; baseline was 207).
-- **This commit alone:** New DOM: none. New LLM calls: none. New event handlers: none. Pure declarations + one diagnostic helper. (The prior commits on this same branch — Phases 4f and 1f — do add a `CHAT_CHANGED` handler for `initNovaOnce` and a probe-cache invalidator; the cumulative branch diff reflects those.)
-
-**Follow-ups from PR review (applied in the final commit of this branch):**
-- `probeNovaBridge` manual-timeout fallback now stores the `setTimeout` handle and `clearTimeout`s it in a `finally` block so the fallback timer can't abort a stale controller or keep an extra timer alive after the fetch resolves. `AbortSignal.timeout(...)` path is unchanged (self-clearing).
-- `test/nova-init-once.test.mjs` corrected its inline `EXT` constant from `'command_x'` → `'command-x'` to match the production namespace so the chat-metadata tests exercise the real key.
+- `node --test test/helpers.test.mjs test/nova-*.test.mjs` → **216/216 pass** (+21 probe tests from 4f, +12 init-once tests from 1f, +9 turn-state tests from 3a; baseline at branch start was 174).
+- Manual in-ST: none required — all four commits are pure scaffolding / test-hooks, no UI wiring yet.
+- PR review comments on `fe9eff7` all resolved in `da1b7cc` (clearTimeout-in-finally, `EXT` namespace fix, scope-clarity notes in this entry).
 
 ### 2026-04-23 — Next-session hand-off: after Phase 1f init wiring
 
