@@ -220,4 +220,70 @@ gap flagged in the previous review.
 `node --test 'test/*.test.mjs'` → **96/96 pass** (+16 new: 9 state, 6
 compose, +1 coercion). No new DOM, no new LLM calls, no new event handlers.
 
+---
+
+## Entry N+1 — Phase 4 + Phase 5: tool-registry + skills pure-data slice
+
+**Branch:** `copilot/explore-openclaw-overhaul-options-again`
+**Head at commit time:** (to be filled by report_progress)
+
+**What shipped:**
+- `NOVA_TOOLS` array (24 tools across 4 backends: `plugin`, `st-api`,
+  `phone`) with strict JSON-Schema `parameters` (all `additionalProperties:
+  false`). Permission axis is `'read' | 'write' | 'shell'`; `shell` is
+  pinned to `backend === 'plugin'` by a test assertion.
+- `NOVA_TOOL_NAMES` Set exported alongside for O(1) skill-default-tool
+  lookups.
+- `NOVA_SKILLS` array with the 4 plan-required skills: `character-creator`,
+  `worldbook-creator`, `image-prompter`, `freeform`. Each carries a prose
+  `systemPrompt`, `defaultTier`, `allowTierEscalation`, and a
+  `defaultTools` list (or the string `'all'`) whose tool names are
+  validated against `NOVA_TOOL_NAMES` at test time.
+- `SKILLS_VERSION = 1` constant — bump whenever ANY skill prompt changes so
+  downstream caches can invalidate (Phase 3c will read this).
+- `test/nova-tool-args.test.mjs` — 14 structural assertions. Uses a small
+  "extract top-level const-array literal and eval it" loader instead of
+  inline-copy, because the arrays are ~400 lines and inline-copy would
+  bit-rot instantly.
+
+**Invariants the tests lock in:**
+- Tool names are unique, snake_case, and letter-first.
+- Every `parameters` schema is `type: 'object'` with explicit
+  `additionalProperties: false` — this prevents an LLM from sending extra
+  junk params that silently slip through.
+- Every `required` key actually exists in `properties`.
+- `enum.default` (if present) is inside `enum`.
+- `integer` defaults are actually integers.
+- Skill `defaultTools` array entries all resolve to real tool names.
+- All 4 plan-required skill ids are present.
+
+**What's NOT in this commit (explicitly):**
+- **No tool handlers.** `NOVA_TOOLS` is pure data. Phase 3c adds
+  `handler(args, ctx) → Promise<result>` and `formatApproval(args) →
+  string` per tool. Phase 9 backs `fs_*` / `shell_run` with
+  `nova-agent-bridge`. Attempting to *call* a tool right now would throw.
+- **No skill runtime.** Selecting a skill from the UI still does nothing —
+  `cx-nova-pill-skill` stays inert. Phase 3b wires `systemPrompt` into the
+  composer call.
+- **Phase 4f capability discovery** (probe `/api/plugins/nova-agent-bridge/
+  manifest`) is still open and lands with Phase 9.
+
+**Gotchas:**
+- The test file uses `new Function()` to eval the extracted array literal.
+  This is safe because the source is our own repo file — but if you ever
+  add a function-valued property (like a live `handler`), the eval will
+  blow up. When Phase 3c lands, split the registry into two: a
+  JSON-serializable metadata array for the test, and a separate
+  handlers map.
+- `shell_run` schema does NOT allow-list `cmd` values inside the JSON
+  schema (too brittle; the allow-list lives in the plugin). The schema
+  accepts any string; the plugin is the gatekeeper.
+- `phone_inject_message.from` is an enum `['user', 'contact']` — matches
+  the existing message-store convention, not the `[sms from="…" to="…"]`
+  tag grammar. Don't confuse them.
+
+**Validation this sprint:** `node --check index.js` clean;
+`node --test 'test/*.test.mjs'` → **110/110 pass** (+14 new). No DOM
+changes, no new imports, no new event handlers.
+
 <!-- Add new entries above this line using the template in "How to Use This File". -->

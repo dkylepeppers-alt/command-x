@@ -170,26 +170,31 @@ Chat-style agent transcript. Layout (top → bottom):
 
 ## 4. Tool Surface
 
+**Schema status:** the `NOVA_TOOLS` registry is declared in `index.js`
+(pure data, no handlers yet). Schema-shape invariants enforced by
+`test/nova-tool-args.test.mjs`. Handlers land with Phase 3c; the plugin
+backends land with Phase 9.
+
 ### 4a. Filesystem (via `nova-agent-bridge`)
-- [ ] `fs_list({ path, recursive?, maxDepth? })`.
-- [ ] `fs_read({ path, encoding?, maxBytes? })`.
-- [ ] `fs_write({ path, content, encoding?, createParents?, overwrite? })`
+- [x] `fs_list({ path, recursive?, maxDepth? })` — schema shipped.
+- [x] `fs_read({ path, encoding?, maxBytes? })` — schema shipped.
+- [x] `fs_write({ path, content, encoding?, createParents?, overwrite? })` — schema shipped.
   with `.nova-trash/<ts>/<path>` backup on overwrite.
-- [ ] `fs_delete({ path, recursive? })` — moves to trash.
-- [ ] `fs_move({ from, to, overwrite? })`.
-- [ ] `fs_stat({ path })`.
-- [ ] `fs_search({ query, glob?, path?, maxResults? })`.
+- [x] `fs_delete({ path, recursive? })` — schema shipped; handler moves to trash.
+- [x] `fs_move({ from, to, overwrite? })` — schema shipped.
+- [x] `fs_stat({ path })` — schema shipped.
+- [x] `fs_search({ query, glob?, path?, maxResults? })` — schema shipped.
 
 Rooted at the **SillyTavern install dir** per user request. Plugin refuses
 escape, blocks symlinks out, and denies `.git/**`, `node_modules/**`, and its
 own plugin folder by default.
 
 ### 4b. Shell (via `nova-agent-bridge`)
-- [ ] `shell_run({ cmd, args, cwd?, timeoutMs? })`. Allow-list: `node`, `npm`,
+- [x] `shell_run({ cmd, args, cwd?, timeoutMs? })` — schema shipped. Allow-list: `node`, `npm`,
   `git`, `python`, `python3`, `grep`, `rg`, `ls`, `cat`, `head`, `tail`, `wc`,
   `find`. User-extensible. Hard timeout default 60 s.
 - [ ] Full tier only; per-call approval unless
-  "Remember approvals this session" is on.
+  "Remember approvals this session" is on — enforced in Phase 3c.
 
 ### 4c. Diff preview helper
 - [ ] For every `fs_write` approval: fetch current file, render unified diff
@@ -197,18 +202,17 @@ own plugin folder by default.
   accept/reject.
 
 ### 4d. SillyTavern API tools (no plugin)
-- [ ] `st_list_characters`, `st_read_character`, `st_write_character`
-  (via `/api/characters/*`).
-- [ ] `st_list_worldbooks`, `st_read_worldbook`, `st_write_worldbook`
-  (via `/api/worldinfo/*`).
-- [ ] `st_run_slash({ command })` — `ctx.executeSlashCommandsWithOptions`.
-- [ ] `st_get_context()` — compact view (last N msgs, character, persona).
-- [ ] `st_list_profiles`, `st_get_profile`.
+- [x] `st_list_characters`, `st_read_character`, `st_write_character` — schemas shipped.
+- [x] `st_list_worldbooks`, `st_read_worldbook`, `st_write_worldbook` — schemas shipped.
+- [x] `st_run_slash({ command })` — schema shipped; handler calls
+  `ctx.executeSlashCommandsWithOptions` in Phase 3c.
+- [x] `st_get_context()` — schema shipped (last N msgs, character, persona).
+- [x] `st_list_profiles`, `st_get_profile` — schemas shipped.
 
 ### 4e. Phone-internal tools
-- [ ] `phone_list_npcs`, `phone_write_npc`, `phone_list_quests`,
+- [x] `phone_list_npcs`, `phone_write_npc`, `phone_list_quests`,
   `phone_write_quest`, `phone_list_places`, `phone_write_place`,
-  `phone_list_messages`, `phone_inject_message`.
+  `phone_list_messages`, `phone_inject_message` — schemas shipped.
 
 ### 4f. Tool capability discovery
 - [ ] Probe `GET /api/plugins/nova-agent-bridge/manifest`. If present,
@@ -219,56 +223,49 @@ own plugin folder by default.
 ## 5. Skills System
 
 Skill = named system-prompt pack + default tier + default tool subset. Single
-`NOVA_SKILLS` array in `index.js`.
+`NOVA_SKILLS` array in `index.js`. **Shipped** — all 4 skills below plus
+`SKILLS_VERSION = 1`. Shape + id + tool-reference invariants enforced by
+`test/nova-tool-args.test.mjs`.
 
 ### 5a. Character Creator
-- [ ] System prompt: expert on ST character-card schema v2. Required fields:
-  `name`, `description`, `personality`, `scenario`, `first_mes`, `mes_example`,
-  `creator_notes`, `system_prompt`, `post_history_instructions`,
-  `alternate_greetings`, `character_book`, `tags`, `creator`,
-  `character_version`, `extensions`; wrapped with `spec: 'chara_card_v2'` +
-  `spec_version: '2.0'`. Always write to
-  `SillyTavern/data/<user>/characters/<name>.json` (user detected dynamically
-  via `ctx.name1` / user settings). Never overwrite without diff confirm.
-  Binary PNG embedding only via `/api/characters/*`.
-- [ ] Default tools: all `st_*character*` + `fs_*` read + `fs_write`
-  (scoped to characters dir).
-- [ ] Default tier: Write.
+- [x] System prompt: expert on ST character-card schema v2 (all required fields,
+  `spec: 'chara_card_v2'` + `spec_version: '2.0'`, write path
+  `SillyTavern/data/<user>/characters/<name>.json`, "never overwrite without
+  diff" rule).
+- [x] Default tools: `st_list_characters` / `st_read_character` /
+  `st_write_character` + `fs_list` / `fs_read` / `fs_stat` / `fs_search` /
+  `fs_write`.
+- [x] Default tier: Write.
 
 ### 5b. Worldbook Creator
-- [ ] System prompt: expert on ST Worldbook (World Info) schema: `entries` map
-  keyed by uid with `key`, `keysecondary`, `comment`, `content`, `constant`,
-  `selective`, `selectiveLogic`, `addMemo`, `order`, `position` (0..4),
-  `disable`, `excludeRecursion`, `preventRecursion`, `probability`,
-  `useProbability`, `depth`, `group`, `groupOverride`, `groupWeight`,
-  `scanDepth`, `caseSensitive`, `matchWholeWords`, `useGroupScoring`,
-  `automationId`, `role`, `vectorized`. Path:
-  `SillyTavern/data/<user>/worlds/<name>.json`.
-- [ ] Default tools: all `st_*worldbook*` + `fs_*` read + `fs_write`
-  (scoped to worlds dir).
-- [ ] Default tier: Write.
+- [x] System prompt: expert on ST Worldbook (World Info) schema (full entries
+  shape, `SillyTavern/data/<user>/worlds/<name>.json`, "prefer
+  `st_write_worldbook` over `fs_write`" rule).
+- [x] Default tools: `st_list_worldbooks` / `st_read_worldbook` /
+  `st_write_worldbook` + `fs_list` / `fs_read` / `fs_stat` / `fs_search` /
+  `fs_write`.
+- [x] Default tier: Write.
 
 ### 5c. Image Prompter
-- [ ] System prompt: expert for SD/SDXL/Flux/Illustrious. Pulls the current
+- [x] System prompt: expert for SD/SDXL/Flux/Illustrious. Pulls the current
   ST chat via `st_get_context`, proposes positive + negative prompts tied to
   the current scene, character, outfit, location, lighting, camera. Three
-  profiles: Anime (booru tags), Realistic (natural language + cinematic),
+  flavours: Anime (booru tags), Realistic (natural language + cinematic),
   Artistic (style tokens + artist refs). Structured output:
   `{ positive, negative, sampler_hint, steps_hint, cfg_hint, notes }`.
-- [ ] Default tools: `st_get_context`, `phone_list_npcs`, optional `fs_write`
-  to save prompts to `SillyTavern/data/<user>/user/files/image-prompts/`.
-- [ ] Default tier: Read-only (escalatable to Write).
+- [x] Default tools: `st_get_context`, `phone_list_npcs`, `fs_write`.
+- [x] Default tier: Read-only (escalatable to Write).
 
 ### 5d. Free-form ("Plain helper")
-- [ ] Minimal system prompt. Default tier: Read-only. All tools available when
-  elevated.
+- [x] Minimal system prompt. Default tier: Read-only. All tools available
+  when elevated (`defaultTools: 'all'`).
 
 ### 5e. Skill structure
 ```
 { id, label, icon, systemPrompt, defaultTier, defaultTools: [names] | 'all',
   allowTierEscalation: true }
 ```
-- [ ] `SKILLS_VERSION` constant bumps when prompts change.
+- [x] `SKILLS_VERSION` constant (currently `1`) — bump when prompts change.
 
 ---
 

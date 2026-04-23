@@ -4587,6 +4587,420 @@ function composeNovaSystemPrompt({ basePrompt = '', skillPrompt = '', soul = '',
     return sections.filter(s => s.length > 0).join('\n');
 }
 
+/* ----------------------------------------------------------------------
+   NOVA AGENT — tool registry (plan §4) + skills (plan §5).
+
+   These arrays are PURE DATA — no handlers, no skill dispatch, no
+   registration with ST yet. Phase 3c wires `handler` and formatApproval;
+   Phase 9 backs `fs_*` / `shell_run` with the server plugin. Shipping the
+   schemas + skill prompts now lets Phase 3 pick a tool subset by id and
+   lets the Phase 10 `nova-tool-args.test.mjs` enforce schema well-formedness
+   before any LLM ever sees them.
+
+   Each NOVA_TOOLS entry:
+     { name, displayName, description, permission, parameters, backend }
+   where:
+     - `permission` ∈ 'read' | 'write' | 'shell' (tier gate)
+     - `backend`    ∈ 'plugin' | 'st-api' | 'phone' (dispatcher hint)
+     - `parameters` is a strict JSON-Schema object with `required` listed
+
+   `NOVA_TOOL_NAMES` is exported as a Set for O(1) membership checks in
+   skill default-tool lists.
+   ---------------------------------------------------------------------- */
+
+const SKILLS_VERSION = 1; // bump when any skill prompt changes
+
+const NOVA_TOOLS = [
+    // === 4a. Filesystem (plugin-backed) ===
+    {
+        name: 'fs_list', displayName: 'List directory', permission: 'read', backend: 'plugin',
+        description: 'List files and folders under a path inside the SillyTavern install directory.',
+        parameters: {
+            type: 'object',
+            properties: {
+                path: { type: 'string', description: 'Path relative to ST install root.' },
+                recursive: { type: 'boolean', default: false },
+                maxDepth: { type: 'integer', minimum: 1, maximum: 10, default: 3 },
+            },
+            required: ['path'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'fs_read', displayName: 'Read file', permission: 'read', backend: 'plugin',
+        description: 'Read a file inside the SillyTavern install directory.',
+        parameters: {
+            type: 'object',
+            properties: {
+                path: { type: 'string' },
+                encoding: { type: 'string', enum: ['utf8', 'base64'], default: 'utf8' },
+                maxBytes: { type: 'integer', minimum: 1, maximum: 10485760, default: 262144 },
+            },
+            required: ['path'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'fs_write', displayName: 'Write file', permission: 'write', backend: 'plugin',
+        description: 'Write or overwrite a file. Destructive; always routes through approval with diff preview.',
+        parameters: {
+            type: 'object',
+            properties: {
+                path: { type: 'string' },
+                content: { type: 'string' },
+                encoding: { type: 'string', enum: ['utf8', 'base64'], default: 'utf8' },
+                createParents: { type: 'boolean', default: true },
+                overwrite: { type: 'boolean', default: false },
+            },
+            required: ['path', 'content'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'fs_delete', displayName: 'Delete path', permission: 'write', backend: 'plugin',
+        description: 'Move a file or directory to .nova-trash/<ts>/. Destructive; requires approval.',
+        parameters: {
+            type: 'object',
+            properties: {
+                path: { type: 'string' },
+                recursive: { type: 'boolean', default: false },
+            },
+            required: ['path'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'fs_move', displayName: 'Move / rename', permission: 'write', backend: 'plugin',
+        description: 'Move or rename a file or directory within the ST install root.',
+        parameters: {
+            type: 'object',
+            properties: {
+                from: { type: 'string' },
+                to: { type: 'string' },
+                overwrite: { type: 'boolean', default: false },
+            },
+            required: ['from', 'to'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'fs_stat', displayName: 'Stat path', permission: 'read', backend: 'plugin',
+        description: 'Return metadata (size, mtime, type) for a file or directory.',
+        parameters: {
+            type: 'object',
+            properties: { path: { type: 'string' } },
+            required: ['path'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'fs_search', displayName: 'Search files', permission: 'read', backend: 'plugin',
+        description: 'Full-text search inside files under a path, optionally filtered by glob.',
+        parameters: {
+            type: 'object',
+            properties: {
+                query: { type: 'string' },
+                glob: { type: 'string' },
+                path: { type: 'string', default: '.' },
+                maxResults: { type: 'integer', minimum: 1, maximum: 500, default: 50 },
+            },
+            required: ['query'],
+            additionalProperties: false,
+        },
+    },
+
+    // === 4b. Shell (plugin-backed, Full tier only) ===
+    {
+        name: 'shell_run', displayName: 'Run shell command', permission: 'shell', backend: 'plugin',
+        description: 'Execute an allow-listed shell command (node, npm, git, python, grep, rg, ls, cat, head, tail, wc, find). Destructive; requires approval.',
+        parameters: {
+            type: 'object',
+            properties: {
+                cmd: { type: 'string' },
+                args: { type: 'array', items: { type: 'string' }, default: [] },
+                cwd: { type: 'string' },
+                timeoutMs: { type: 'integer', minimum: 100, maximum: 300000, default: 60000 },
+            },
+            required: ['cmd'],
+            additionalProperties: false,
+        },
+    },
+
+    // === 4d. SillyTavern API tools (no plugin required) ===
+    {
+        name: 'st_list_characters', displayName: 'List characters', permission: 'read', backend: 'st-api',
+        description: 'List all character cards available in the current ST user profile.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+    },
+    {
+        name: 'st_read_character', displayName: 'Read character', permission: 'read', backend: 'st-api',
+        description: 'Read a character card as JSON (spec v2).',
+        parameters: {
+            type: 'object',
+            properties: { name: { type: 'string' } },
+            required: ['name'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'st_write_character', displayName: 'Write character', permission: 'write', backend: 'st-api',
+        description: 'Create or update a character card. Requires approval.',
+        parameters: {
+            type: 'object',
+            properties: {
+                name: { type: 'string' },
+                card: { type: 'object' },
+                overwrite: { type: 'boolean', default: false },
+            },
+            required: ['name', 'card'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'st_list_worldbooks', displayName: 'List worldbooks', permission: 'read', backend: 'st-api',
+        description: 'List all world info / lorebook files in the current ST user profile.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+    },
+    {
+        name: 'st_read_worldbook', displayName: 'Read worldbook', permission: 'read', backend: 'st-api',
+        description: 'Read a worldbook / world info file as JSON.',
+        parameters: {
+            type: 'object',
+            properties: { name: { type: 'string' } },
+            required: ['name'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'st_write_worldbook', displayName: 'Write worldbook', permission: 'write', backend: 'st-api',
+        description: 'Create or update a worldbook. Requires approval.',
+        parameters: {
+            type: 'object',
+            properties: {
+                name: { type: 'string' },
+                book: { type: 'object' },
+                overwrite: { type: 'boolean', default: false },
+            },
+            required: ['name', 'book'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'st_run_slash', displayName: 'Run slash command', permission: 'write', backend: 'st-api',
+        description: 'Execute a SillyTavern slash command via ctx.executeSlashCommandsWithOptions. Requires approval.',
+        parameters: {
+            type: 'object',
+            properties: { command: { type: 'string' } },
+            required: ['command'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'st_get_context', displayName: 'Read chat context', permission: 'read', backend: 'st-api',
+        description: 'Return a compact snapshot of the current ST chat: character, persona, and last N messages.',
+        parameters: {
+            type: 'object',
+            properties: { lastN: { type: 'integer', minimum: 1, maximum: 50, default: 10 } },
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'st_list_profiles', displayName: 'List connection profiles', permission: 'read', backend: 'st-api',
+        description: 'List all saved connection profiles.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+    },
+    {
+        name: 'st_get_profile', displayName: 'Read connection profile', permission: 'read', backend: 'st-api',
+        description: 'Return metadata for a connection profile by name.',
+        parameters: {
+            type: 'object',
+            properties: { name: { type: 'string' } },
+            required: ['name'],
+            additionalProperties: false,
+        },
+    },
+
+    // === 4e. Phone-internal tools (in-process, no plugin, no network) ===
+    {
+        name: 'phone_list_npcs', displayName: 'List phone NPCs', permission: 'read', backend: 'phone',
+        description: 'List NPCs stored for the current Command-X chat.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+    },
+    {
+        name: 'phone_write_npc', displayName: 'Write phone NPC', permission: 'write', backend: 'phone',
+        description: 'Create or update a Command-X NPC profile.',
+        parameters: {
+            type: 'object',
+            properties: {
+                name: { type: 'string' },
+                fields: { type: 'object' },
+            },
+            required: ['name', 'fields'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'phone_list_quests', displayName: 'List phone quests', permission: 'read', backend: 'phone',
+        description: 'List quests stored for the current Command-X chat.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+    },
+    {
+        name: 'phone_write_quest', displayName: 'Write phone quest', permission: 'write', backend: 'phone',
+        description: 'Create or update a Command-X quest entry.',
+        parameters: {
+            type: 'object',
+            properties: {
+                id: { type: 'string' },
+                fields: { type: 'object' },
+            },
+            required: ['id', 'fields'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'phone_list_places', displayName: 'List phone places', permission: 'read', backend: 'phone',
+        description: 'List registered places for the current Command-X chat.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+    },
+    {
+        name: 'phone_write_place', displayName: 'Write phone place', permission: 'write', backend: 'phone',
+        description: 'Create or update a registered place.',
+        parameters: {
+            type: 'object',
+            properties: {
+                name: { type: 'string' },
+                fields: { type: 'object' },
+            },
+            required: ['name', 'fields'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'phone_list_messages', displayName: 'List phone messages', permission: 'read', backend: 'phone',
+        description: 'List messages for a contact in the current Command-X chat.',
+        parameters: {
+            type: 'object',
+            properties: {
+                contactName: { type: 'string' },
+                limit: { type: 'integer', minimum: 1, maximum: 200, default: 50 },
+            },
+            required: ['contactName'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'phone_inject_message', displayName: 'Inject phone message', permission: 'write', backend: 'phone',
+        description: 'Inject a synthetic message into a contact thread (for staged-scene setup).',
+        parameters: {
+            type: 'object',
+            properties: {
+                contactName: { type: 'string' },
+                from: { type: 'string', enum: ['user', 'contact'] },
+                text: { type: 'string' },
+            },
+            required: ['contactName', 'from', 'text'],
+            additionalProperties: false,
+        },
+    },
+];
+
+const NOVA_TOOL_NAMES = new Set(NOVA_TOOLS.map(t => t.name));
+
+/* ----------------------------------------------------------------------
+   NOVA SKILLS (plan §5). Each skill is a named system-prompt pack with a
+   default tier and default tool subset. `defaultTools === 'all'` means the
+   skill inherits whatever the active tier allows.
+   ---------------------------------------------------------------------- */
+
+const NOVA_SKILLS = [
+    {
+        id: 'character-creator',
+        label: 'Character Creator',
+        icon: '👤',
+        defaultTier: 'write',
+        allowTierEscalation: true,
+        defaultTools: [
+            'st_list_characters', 'st_read_character', 'st_write_character',
+            'fs_list', 'fs_read', 'fs_stat', 'fs_search', 'fs_write',
+        ],
+        systemPrompt: [
+            'You are the Character Creator skill inside Nova.',
+            'You are an expert on the SillyTavern character-card v2 schema:',
+            "  spec: 'chara_card_v2', spec_version: '2.0', data: { name, description,",
+            '  personality, scenario, first_mes, mes_example, creator_notes,',
+            '  system_prompt, post_history_instructions, alternate_greetings,',
+            '  character_book, tags, creator, character_version, extensions }.',
+            'Cards live at SillyTavern/data/<user>/characters/<name>.json.',
+            'Prefer st_write_character over fs_write when updating a card — the',
+            'ST API handles PNG embedding and chat index updates for you.',
+            'Never overwrite an existing card without showing a diff first.',
+            'When a user asks you to invent a character, pick opinionated',
+            'concrete details; never leave schema fields as "TBD".',
+        ].join('\n'),
+    },
+    {
+        id: 'worldbook-creator',
+        label: 'Worldbook Creator',
+        icon: '📖',
+        defaultTier: 'write',
+        allowTierEscalation: true,
+        defaultTools: [
+            'st_list_worldbooks', 'st_read_worldbook', 'st_write_worldbook',
+            'fs_list', 'fs_read', 'fs_stat', 'fs_search', 'fs_write',
+        ],
+        systemPrompt: [
+            'You are the Worldbook Creator skill inside Nova.',
+            'You are an expert on the SillyTavern worldbook (world info) schema:',
+            '  an `entries` object keyed by integer uid, each with key[],',
+            '  keysecondary[], comment, content, constant, selective,',
+            '  selectiveLogic, addMemo, order, position (0..4), disable,',
+            '  excludeRecursion, preventRecursion, probability, useProbability,',
+            '  depth, group, groupOverride, groupWeight, scanDepth, caseSensitive,',
+            '  matchWholeWords, useGroupScoring, automationId, role, vectorized.',
+            'Worldbooks live at SillyTavern/data/<user>/worlds/<name>.json.',
+            'Prefer st_write_worldbook over fs_write — the ST API normalizes uids.',
+            'When building a new world, start with 3–5 foundational entries',
+            '(setting, factions, tone) before branching into specifics.',
+        ].join('\n'),
+    },
+    {
+        id: 'image-prompter',
+        label: 'Image Prompter',
+        icon: '🎨',
+        defaultTier: 'read',
+        allowTierEscalation: true,
+        defaultTools: ['st_get_context', 'phone_list_npcs', 'fs_write'],
+        systemPrompt: [
+            'You are the Image Prompter skill inside Nova.',
+            'Use st_get_context to read the current RP scene and produce prompts',
+            'for SD / SDXL / Flux / Illustrious. Emit structured output:',
+            '  { positive, negative, sampler_hint, steps_hint, cfg_hint, notes }.',
+            'Support three flavours (user picks):',
+            '  • Anime — booru-tag style, comma-separated, concrete visual tokens.',
+            '  • Realistic — natural language + cinematography (lens, light, mood).',
+            '  • Artistic — style tokens + artist references + medium words.',
+            'Always tie the prompt to the *current* scene: character, outfit,',
+            'location, lighting, camera. Never invent details that contradict',
+            'the chat context.',
+        ].join('\n'),
+    },
+    {
+        id: 'freeform',
+        label: 'Plain helper',
+        icon: '✴︎',
+        defaultTier: 'read',
+        allowTierEscalation: true,
+        defaultTools: 'all',
+        systemPrompt: [
+            'You are Nova in free-form helper mode.',
+            'The user has not picked a specialised skill; answer whatever they',
+            'ask using the full soul + memory context and whatever tools the',
+            'current tier permits. Keep responses short. Ask before doing',
+            'anything destructive.',
+        ].join('\n'),
+    },
+];
+
 /* ======================================================================
    SETTINGS
    ====================================================================== */
