@@ -4588,6 +4588,132 @@ function composeNovaSystemPrompt({ basePrompt = '', skillPrompt = '', soul = '',
 }
 
 /* ----------------------------------------------------------------------
+   NOVA AGENT — bridge-plugin capability probe (plan §4f).
+
+   Pings `GET <pluginBaseUrl>/manifest` with a short timeout to decide
+   whether the `nova-agent-bridge` server plugin is installed and which
+   tool surfaces it advertises. Callers (Phase 3c tool dispatcher) use
+   the returned `capabilities` map to decide whether to register the
+   fs/shell tools or fall back to phone/st-api-only mode.
+
+   Contract:
+   - Never throws. On 404 / non-200 / network error / timeout, resolves
+     to `{ present: false }`.
+   - On success, returns
+     `{ present: true, version, root, shellAllowList, capabilities }`
+     where `capabilities` is a plain object of booleans (unknown flags
+     coerced via `!!`; non-object manifest bodies drop it).
+   - Result is cached in a module-level cache for `NOVA_PROBE_TTL_MS`
+     (60s). `CHAT_CHANGED` invalidates it so switching chats re-probes
+     without requiring a full reload.
+   - `fetchImpl` / `nowImpl` are injectable so `test/nova-probe.test.mjs`
+     can drive the probe without a live network or real timers.
+   ---------------------------------------------------------------------- */
+
+const NOVA_PROBE_TTL_MS = 60_000;
+const NOVA_PROBE_TIMEOUT_MS = 3_000;
+
+// Module-level cache. Shape: `{ result, expiresAt }` or `null` when cold.
+let _novaBridgeProbeCache = null;
+
+function invalidateNovaBridgeProbeCache() {
+    _novaBridgeProbeCache = null;
+}
+
+/**
+ * Coerce a manifest `capabilities` payload into a plain `{ [key]: boolean }`
+ * map. Non-objects / arrays / nullish → `undefined` (caller drops the key
+ * from the returned shape). Strict `!!` coercion so "false"/0/"" all become
+ * `false`.
+ */
+function _coerceNovaCapabilities(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+    const out = {};
+    for (const k of Object.keys(raw)) out[k] = !!raw[k];
+    return out;
+}
+
+async function probeNovaBridge({
+    baseUrl,
+    fetchImpl,
+    nowImpl,
+    ttlMs = NOVA_PROBE_TTL_MS,
+    timeoutMs = NOVA_PROBE_TIMEOUT_MS,
+    force = false,
+} = {}) {
+    const now = typeof nowImpl === 'function' ? nowImpl : Date.now;
+    const doFetch = typeof fetchImpl === 'function'
+        ? fetchImpl
+        : (typeof fetch === 'function' ? fetch : null);
+
+    // Cache hit within TTL — return the cached result regardless of the
+    // (possibly different) baseUrl. Phase 3c reads settings.nova.pluginBaseUrl
+    // at steady state; switching it at runtime is rare and a chat reload
+    // clears the cache via CHAT_CHANGED.
+    if (!force && _novaBridgeProbeCache && _novaBridgeProbeCache.expiresAt > now()) {
+        return _novaBridgeProbeCache.result;
+    }
+
+    const url = String(baseUrl || NOVA_DEFAULTS.pluginBaseUrl).replace(/\/+$/, '') + '/manifest';
+
+    const miss = (reason) => {
+        const result = { present: false };
+        _novaBridgeProbeCache = { result, expiresAt: now() + ttlMs };
+        try { console.debug('[command-x] nova bridge probe →', reason, url); } catch (_) { /* noop */ }
+        return result;
+    };
+
+    if (!doFetch) return miss('no-fetch');
+
+    // AbortSignal.timeout is the documented way; fall back to a manual
+    // controller on older browsers that ship only AbortController.
+    let signal;
+    try {
+        if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+            signal = AbortSignal.timeout(timeoutMs);
+        } else if (typeof AbortController === 'function') {
+            const ctl = new AbortController();
+            setTimeout(() => ctl.abort(), timeoutMs);
+            signal = ctl.signal;
+        }
+    } catch (_) { /* leave signal undefined */ }
+
+    let resp;
+    try {
+        resp = await doFetch(url, { method: 'GET', signal });
+    } catch (_err) {
+        return miss('network-error');
+    }
+
+    if (!resp || !resp.ok) {
+        return miss(`status-${resp && resp.status}`);
+    }
+
+    let body;
+    try {
+        body = await resp.json();
+    } catch (_err) {
+        return miss('bad-json');
+    }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return miss('non-object-body');
+    }
+
+    const result = { present: true };
+    if (body.version !== undefined) result.version = String(body.version);
+    if (body.root !== undefined) result.root = String(body.root);
+    if (Array.isArray(body.shellAllowList)) {
+        result.shellAllowList = body.shellAllowList.map(String);
+    }
+    const caps = _coerceNovaCapabilities(body.capabilities);
+    if (caps) result.capabilities = caps;
+
+    _novaBridgeProbeCache = { result, expiresAt: now() + ttlMs };
+    try { console.debug('[command-x] nova bridge probe → present', url, result); } catch (_) { /* noop */ }
+    return result;
+}
+
+/* ----------------------------------------------------------------------
    NOVA AGENT — unified-diff preview helper (plan §4c).
 
    Pure string function used by the `fs_write` approval modal (Phase 3c)
@@ -5461,6 +5587,10 @@ jQuery(async () => {
             commandMode = null;
             _turnCounter = 0;
             invalidateContactCaches();
+            // Phase 4f: force a fresh bridge probe on chat change so a user
+            // who installs / restarts the server plugin mid-session sees it
+            // without a full SillyTavern reload.
+            invalidateNovaBridgeProbeCache();
             clearSmsPrompt();
             clearTypingIndicator();
             // Re-inject contacts prompt for new chat

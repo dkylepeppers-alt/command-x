@@ -77,6 +77,36 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-23 — Next-session hand-off: after Phase 4f probe lands
+
+**Context:** This PR shipped **Phase 4f — capability probe** per the prior hand-off plan. Added `probeNovaBridge({ baseUrl, fetchImpl, nowImpl, ttlMs, timeoutMs, force })` + `invalidateNovaBridgeProbeCache()` to the NOVA AGENT section of `index.js`, hooked invalidation into `CHAT_CHANGED`, and added `test/nova-probe.test.mjs` (21 new tests, 195/195 total). **No behavioural change** — the probe is exposed but not yet consumed. Phase 3c will gate fs/shell tool registration on the result.
+
+**Notes for future agents:**
+- **The probe is cache-first, never-throws.** Returns `{ present: true, version?, root?, shellAllowList?, capabilities? }` on 200, or `{ present: false }` on anything else (404, 500, malformed JSON, non-object body, network error, timeout). Capability flags are strictly `!!`-coerced so `0`/`""`/`"false"` all become `false`. Drop-on-malformed is the contract for `shellAllowList` (must be array) and `capabilities` (must be plain object) — do not relax this without updating the test copy.
+- **Both hits and misses are cached for `NOVA_PROBE_TTL_MS` (60s)** so a missing plugin doesn't get hammered. `CHAT_CHANGED` invalidates, and callers can pass `force: true` to bypass (Phase 3c will want this for a manual "Re-probe" button in settings).
+- **`fetchImpl` / `nowImpl` injection is the test contract.** Production callers leave them undefined and fall through to global `fetch` / `Date.now`. The test file inline-copies the helper (same convention as `nova-diff.test.mjs` etc.) — edit both copies in lockstep. There is a comment header on `test/nova-probe.test.mjs` calling this out.
+- **Timeout path is covered by a real abort.** The test uses `timeoutMs: 5` + a fetch mock that awaits the signal's `abort` event and throws a named `AbortError`. This exercises the `AbortSignal.timeout` branch end-to-end (Node 18+). The helper's fallback to a manual `AbortController` is for very old browsers only.
+- **`console.debug` is fire-and-forget.** The probe wraps both the hit and miss log lines in `try/catch` so a broken console (seen once in ST's headless test harness) cannot take the probe down. Don't change to `console.log` — debug-level keeps it out of the default console filter.
+- **The probe does NOT read `settings.nova.pluginBaseUrl` itself.** Callers pass `baseUrl` explicitly so the helper stays pure. Phase 3c should do `probeNovaBridge({ baseUrl: settings.nova?.pluginBaseUrl })`.
+
+**What to do next (in order — each is a single reviewable PR):**
+1. **Phase 1f — wire `migrateLegacyOpenClawMetadata` into init.** Still pending from the prior hand-off. Create `initNovaOnce(ctx)` gated by `chatMetadata[EXT].nova?._initVersion`; hook from the NOVA AGENT section's own `CHAT_CHANGED` listener (don't add to the existing top-level one). Test: fake ctx with unmigrated + already-migrated metadata; assert idempotency across two calls.
+2. **Phase 3a — module-level turn state.** Add `let novaTurnInFlight = false; let novaAbortController = null; let novaToolRegistryVersion = 0;` near the other NOVA constants. Expose read-only getters via a test hook so Phase 3b tests can assert state without module internals.
+3. **Phase 3b — turn lifecycle.** Biggest slice; split if it grows past ~300 LOC. Follow the 8-step contract in `docs/nova-agent-plan.md` §3b. Profile-snapshot/restore in a `try…finally` — lock this with a test that throws from the mock `sendRequest` and asserts the restore slash fired.
+
+**Hard constraints still active (copy-forward from prior hand-off):**
+- `EXT === "command-x"` with a hyphen. Bracket-access only on `extension_settings`.
+- `buildNovaUnifiedDiff` auto-detect is nullish-only. Pass `isNewFile: true` explicitly when wiring `fs_write` previews against `fs_stat` → ENOENT.
+- `normalizeNovaPath` containment predicate: `relNative === '..' || startsWith('..' + path.sep)`. Don't touch without re-running `..foo` regression tests.
+- Plugin `/manifest.version` comes from `package.json` via `resolvePluginVersion()`. Bump `package.json` when the plugin version changes.
+- Inline-copy test convention: when editing a helper in `index.js`, edit the matching inline copy in `test/nova-*.test.mjs` or tests silently test the wrong function.
+- Run tests via `node --test test/helpers.test.mjs test/nova-*.test.mjs` (explicit filenames). The `'test/*.test.mjs'` glob appears to not expand under the current Node version — got "Could not find" from the runner. Use explicit filenames or the `helpers.test.mjs test/nova-*.test.mjs` form.
+
+**Validation this sprint:**
+- `node --check index.js` clean.
+- `node --test test/helpers.test.mjs test/nova-*.test.mjs` → **195/195 pass** (+21 new probe tests; baseline was 174).
+- No new DOM, no new LLM calls, no new event handlers beyond the one-line invalidation inside the existing `CHAT_CHANGED`.
+
 ### 2026-04-23 — Next-session hand-off: pick up after PR #17 merges
 
 **Context:** PR #17 shipped three pure-helper / scaffold slices (diff preview, legacy metadata migration, `nova-agent-bridge` scaffold with discovery routes + 501 stubs). Review feedback was addressed in 6e53843. **This entry is instructions to the next agent / next-me for the first commit after merge.** Read it before anything else, then re-read `docs/nova-agent-plan.md` and the 2026-04-23 review-feedback entry further down.
