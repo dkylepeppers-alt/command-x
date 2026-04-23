@@ -77,6 +77,48 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-23 — Next-session hand-off: after Phase 3b turn-lifecycle skeleton
+
+**Scope of this PR:** Phase 3b skeleton. Added `sendNovaTurn` to the NOVA AGENT section of `index.js` (dependency-injected async helper that never throws), plus four small supporting pure helpers: `resolveNovaSkill`, `buildNovaRequestMessages`, `parseNovaProfilePipe`, `getActiveNovaProfile`. Added `NOVA_BASE_PROMPT`, `NOVA_TOOL_CONTRACT`, `NOVA_DEFAULT_MAX_TOOL_CALLS`, `NOVA_DEFAULT_TURN_TIMEOUT_MS` constants. New test file `test/nova-turn.test.mjs` (23 assertions). Full suite: **239/239 pass** (+23 vs baseline 216).
+
+**What §3b actually ships (and what it defers):**
+- ✅ Precondition validation (empty text, missing `sendRequest`, `isToolCallingSupported()=false`, blank profile, unknown skill) — all return `{ ok:false, reason }` before mutating any state.
+- ✅ User + assistant message push into the active session (auto-created if none) with `saveNovaState` after each push.
+- ✅ Profile snapshot → swap → restore, all inside `try…finally`. Swap failure returns `profile-swap-failed` early; restore failure is audit-logged but never masks the primary turn result. Skips the swap round-trip when the target profile is already active.
+- ✅ `AbortController` wired to `novaAbortController`. Wall-clock cap = `turnTimeoutMs` → `setTimeout` → `controller.abort('turn-timeout')`. The `clearTimeout` in `finally` is load-bearing — don't drop it or a cancelled turn keeps a timer alive.
+- ✅ `novaTurnInFlight` re-entrancy guard: second concurrent call returns `{ ok:false, reason:'in-flight' }` without stacking controllers. Locked in by a test that suspends the first turn via an unresolved promise.
+- ⏳ **Streaming + real tool-call dispatch loop → Phase 3c.** If `sendRequest` returns `tool_calls`, we store them on the assistant message, audit-log `tool-calls-deferred`, and return `{ ok:true, toolCallsDeferred:true, toolCalls }`. Phase 3c replaces that stub with real dispatch without changing the outer return contract.
+- ⏳ `ConnectionManagerRequestService` vs `generateRaw` probe stays in the caller. This helper takes any Promise-returning `sendRequest({messages, tools, tool_choice, signal}) → {content?, tool_calls?}`.
+
+**Notes for future agents:**
+- **Dependency injection is the testability contract.** `sendNovaTurn` reads nothing from module scope for I/O — `sendRequest`, `executeSlash`, `isToolCallingSupported`, `nowImpl` are all parameters. The caller (Phase 3c composer wiring) will bind them to `ctx.ConnectionManagerRequestService.sendRequest`, `ctx.executeSlashCommandsWithOptions`, `ctx.isToolCallingSupported`, and `Date.now` respectively. **Don't turn these into module-scope reads "for convenience"** — the mock pattern in `test/nova-turn.test.mjs` depends on them staying injectable. Module state IS read for the re-entrancy guard (`novaTurnInFlight` / `novaAbortController`); that's the one intentional global-state touchpoint.
+- **`executeSlash` abstraction shape: `(cmd:string) => Promise<{pipe?:string}>`.** This matches ST's `ctx.executeSlashCommandsWithOptions(cmd)` return shape. When wiring from the caller, pass `cmd => ctx.executeSlashCommandsWithOptions(cmd)` — don't spread options.
+- **"None" / "" from `/profile` both mean "no active profile".** `parseNovaProfilePipe` normalises both to `''`. If `swappedFrom === ''` after the snapshot, the `finally` restore is skipped (ST has no `/profile` clear syntax). This is called out in a comment; don't remove it — switching back to "no profile" via a literal name of `None` would cause a confusing slash error.
+- **Return-shape contract.** On success: `{ ok:true, assistantMessage, toolCalls, toolCallsDeferred, swappedProfile }`. On failure: `{ ok:false, reason, error? }`. `reason` values currently in use: `in-flight`, `empty-text`, `no-send-request`, `no-tool-calling`, `no-profile`, `no-skill`, `profile-swap-failed`, `aborted`, `send-failed`. Phase 3c should treat these as a closed enum — add new reasons rather than overloading existing ones.
+- **Audit log is append-only and never throws.** `appendNovaAuditLog` is called synchronously after `saveNovaState` — if you add new audit entries, keep the ordering (mutate → audit → save). Outcomes used by 3b: `send-failed:<msg>`, `aborted:<msg>`, `error:<msg>` (profile-swap / profile-restore), `deferred-to-phase-3c` (tool-calls). Phase 3c should keep these strings stable for future log-query features.
+- **`resolveNovaSkill` falls back to `'freeform'` silently.** Unknown skill ids don't error — they just land on the free-form skill. When §7b lands the skill picker, make sure it shows the effective skill in the UI (not just the requested id) so users see the fallback.
+- **Don't add `throw` statements to `sendNovaTurn`.** The caller (composer UI) will rely on it always resolving. The test `restores profile even when sendRequest throws` proves the try/finally handles the one place an `await` can explode — add new `await` points inside the same try.
+- **Source-shape test is intentionally brittle in `test/nova-turn.test.mjs`.** It asserts `novaTurnInFlight = false` AND `novaAbortController = null` both live inside the `finally` block. If you refactor the cleanup into a helper, update those two regex assertions to match the new location.
+
+**What to do next (in order — each is a single reviewable PR):**
+1. **Phase 3c — tool handler dispatch + approval modal DOM.** Replace the `toolCallsDeferred` branch in `sendNovaTurn` with a real dispatch loop: for each tool_call, look up the entry in `NOVA_TOOLS`, gate Write/Full on a `cxConfirm` approval modal (use `buildNovaUnifiedDiff` from §4c for `fs_write`), run the handler, append a `role:'tool'` message with the result, re-call `sendRequest`. Bump `novaToolRegistryVersion` when the bridge-probe result flips present/absent. This is the phase that finally consumes `probeNovaBridge` (§4f). Enforce `maxToolCalls` here — emit an audit entry + break the loop on cap hit.
+2. **Phase 2c — approval modal DOM + connection-profile picker + skill picker.** Can land alongside 3c since the dispatch loop needs the approval modal. Use `cxConfirm` never native `confirm`. `buildNovaUnifiedDiff` output should render in a `<pre>` inside the modal body.
+3. **Phase 6a/6b — fetch + cache soul.md/memory.md on init; add Soul/Memory editor to in-phone Settings.** Small and independent. Once this lands, the `soul`/`memory` parameters to `sendNovaTurn` become real non-empty strings.
+4. **Phase 7 — settings surface.** Profile picker, tier radio, caps, plugin URL, "Install preset" button. Gates all Nova UI.
+
+**Hard constraints still active (copy-forward):**
+- `EXT === "command-x"` with a hyphen. Bracket-access only on `extension_settings`.
+- `buildNovaUnifiedDiff` auto-detect is nullish-only. Pass `isNewFile: true` explicitly when wiring `fs_write` previews against `fs_stat` → ENOENT.
+- `normalizeNovaPath` containment predicate: `relNative === '..' || startsWith('..' + path.sep)`.
+- Plugin `/manifest.version` comes from `package.json` via `resolvePluginVersion()`.
+- Inline-copy test convention: when editing a helper in `index.js`, edit the matching inline copy in `test/nova-*.test.mjs` or tests silently test the wrong function. `test/nova-turn.test.mjs` inline-copies **eight** helpers (`getNovaState`, `saveNovaState`, `createNovaSession`, `appendNovaAuditLog`, `composeNovaSystemPrompt`, `resolveNovaSkill`, `buildNovaRequestMessages`, `parseNovaProfilePipe`) plus `sendNovaTurn` itself via a `makeTurnCapsule()` closure (needed because the module-level `novaTurnInFlight` / `novaAbortController` bindings can't be imported standalone). Keep the capsule in lockstep with the production function body.
+- Run tests via `node --test test/helpers.test.mjs test/nova-*.test.mjs` (explicit filenames, not `'test/*.test.mjs'`).
+
+**Validation this sprint:**
+- `node --check index.js` clean.
+- `node --test test/helpers.test.mjs test/nova-*.test.mjs` → **239/239 pass** (+23 new turn-lifecycle tests; baseline was 216).
+- Manual in-ST: none required — `sendNovaTurn` has no callers yet. Phase 3c composer wiring is the first time this runs against a live LLM.
+
 ### 2026-04-23 — Next-session hand-off: after Phase 3a turn-state scaffolding
 
 **Scope of this PR (#18) — cumulative, three Nova phases on one branch:**

@@ -158,20 +158,38 @@ Chat-style agent transcript. Layout (top → bottom):
     `test/nova-turn-state.test.mjs` (9 assertions).
 
 ### 3b. Turn lifecycle
-- [ ] `sendNovaTurn(userText)`:
-  1. Validate profile is set and `ctx.isToolCallingSupported()` returns true.
-  2. Push user message, persist.
-  3. **Snapshot** active profile via `/profile`; swap to
-     `settings.nova.profileName` via `/profile <name>`.
-  4. Build messages: `[system: composedPrompt(), ...transcript]`.
-  5. Call `ctx.ConnectionManagerRequestService.sendRequest({ messages, tools, tool_choice: 'auto', stream: true, signal })`.
-     Fallback: `ctx.generateRaw({ ... useTools: true })` when
-     `ConnectionManagerRequestService` isn't present. Probe at init time.
-  6. Stream chunks. On `tool_calls`, dispatch (§4), append `role:'tool'` msg,
-     re-request.
-  7. Enforce caps: `maxToolCalls` (24), wall-clock (5 min), tokens.
-  8. **Finally** restore original profile (even on error/abort). Clear
-     `novaTurnInFlight`. Persist.
+- [~] `sendNovaTurn(userText)` — **skeleton shipped** (`index.js` NOVA AGENT
+  section, dependency-injected for unit testing via `test/nova-turn.test.mjs`,
+  23 assertions). The contract below is implemented as the next bullet list
+  shows; streaming + real tool-call dispatch are deferred to Phase 3c.
+  1. [x] Validate profile is set and (when provided) `isToolCallingSupported()`
+     returns true — enforced at function entry. `sendRequest` presence is
+     also validated so the helper never calls `undefined()`.
+  2. [x] Push user message, persist via `saveNovaState(ctx)`.
+  3. [x] **Snapshot** active profile via `/profile`; swap to target via
+     `/profile <name>`. Skip swap when already active. Swap failure returns
+     `{ ok: false, reason: 'profile-swap-failed' }` without running the LLM.
+  4. [x] Build messages: `[system: composeNovaSystemPrompt(...), ...transcript]`
+     via `buildNovaRequestMessages`.
+  5. [~] Call `sendRequest({ messages, tools, tool_choice: 'auto', signal })`.
+     **Streaming + `ConnectionManagerRequestService` vs `generateRaw` probe**
+     still live in the caller — Phase 3c wires them. This slice takes any
+     Promise-returning `sendRequest` so tests can drive it.
+  6. [ ] Stream chunks. On `tool_calls`, dispatch (§4), append `role:'tool'`
+     msg, re-request. **Deferred to Phase 3c.** Current behaviour: if
+     `sendRequest` returns a `tool_calls` array, we append the assistant
+     content + raw calls to the session, audit-log `tool-calls-deferred`,
+     and return `{ ok: true, toolCallsDeferred: true, toolCalls }` so the
+     caller can choose to stop or show a "tool-call dispatch landing in 3c"
+     toast.
+  7. [~] Enforce caps: **wall-clock cap** shipped as a `setTimeout` →
+     `controller.abort('turn-timeout')` wired into `novaAbortController`.
+     `maxToolCalls` / token caps belong to the Phase 3c dispatch loop.
+  8. [x] **Finally** restore original profile (even on error/abort). Clear
+     `novaTurnInFlight` and `novaAbortController`. Restore failures are
+     audit-logged but don't mask the primary turn result. Locked in by
+     `test/nova-turn.test.mjs`: a `sendRequest` that throws still runs
+     through `/profile <snapshot>` before the helper resolves.
 
 ### 3c. Tool registration
 - [ ] **Embedded path** (default): tools passed inline on `sendRequest`.
@@ -181,7 +199,11 @@ Chat-style agent transcript. Layout (top → bottom):
   parameters, permission: 'read'|'write'|'shell', handler, formatApproval }`.
 
 ### 3d. Cancellation and errors
-- [ ] `AbortController` per turn; Cancel button → `.abort()`.
+- [~] `AbortController` per turn; wired into `sendNovaTurn` (the module-level
+  `novaAbortController` binding holds it while the turn is in flight, and
+  a wall-clock `setTimeout` calls `.abort('turn-timeout')` at the
+  `turnTimeoutMs` cap). Cancel button → `.abort()` on the live controller
+  lands with Phase 3c composer wiring.
 - [ ] Handler throws → tool result `{ error }` so the LLM can recover; red card.
 
 ---
@@ -517,6 +539,10 @@ All under `test/` using Node `--test`.
   `NOVA_TOOLS[].parameters` against sample args.
 - [ ] `nova-profile-swap.test.mjs` — mocks `executeSlashCommandsWithOptions`;
   verifies swap/restore on throw and mutex serialisation.
+  - **Partially covered by `test/nova-turn.test.mjs`** (profile snapshot +
+    swap + restore including the `sendRequest` throws case). A dedicated
+    mutex serialisation test lands with Phase 3c when the caller wires the
+    module-level controller up to the composer UI.
 - [x] `nova-prompt-compose.test.mjs` — soul+memory concatenation, truncation,
   skill ordering.
 - [ ] `nova-audit-redact.test.mjs` — audit entries never include raw content.
@@ -532,6 +558,12 @@ All under `test/` using Node `--test`.
 - [x] `nova-plugin.test.mjs` — nova-agent-bridge plugin exports + route
   wiring + /manifest shape (not in original list; shipped with Phase 8a/b
   scaffold).
+- [x] `nova-turn.test.mjs` — Phase 3b turn lifecycle: precondition
+  validation, happy path (user + assistant push, system-prompt
+  composition, signal propagation), profile snapshot/swap/restore
+  including `sendRequest`-throws and restore-failure paths,
+  re-entrancy guard, deferred-tool-calls placeholder, plus source-shape
+  assertions on `index.js` (23 assertions).
 - [x] Keep `helpers.test.mjs` green.
 
 ---

@@ -4980,6 +4980,328 @@ function initNovaOnce(ctx) {
 }
 
 /* ----------------------------------------------------------------------
+   NOVA AGENT — turn lifecycle (plan §3b).
+
+   `sendNovaTurn` is the core agent loop. It is written as a fully
+   dependency-injected helper so `test/nova-turn.test.mjs` can exercise
+   it without an ST runtime — all I/O (slash commands, LLM calls, now(),
+   signal factories) arrives via the `deps` parameter. UI wiring (the
+   phone composer → this function) lands in Phase 3c together with the
+   tool-dispatch loop and streaming; this slice ships the skeleton that
+   locks in the subtlest contract: profile snapshot + swap + restore
+   in a `try…finally` that survives errors and aborts.
+
+   Eight-step contract (see plan §3b). This slice implements 1, 2, 3, 4,
+   5, 7 (wall-clock cap), 8. Step 6 (tool_calls loop) and streaming are
+   stubs — if the LLM returns `tool_calls`, we append the assistant
+   content (if any), audit-log `tool-calls-deferred`, and hand the
+   unresolved calls back to the caller. Phase 3c replaces that stub with
+   real dispatch.
+
+   Re-entrancy: guarded by `novaTurnInFlight`. Second concurrent call
+   returns `{ ok: false, reason: 'in-flight' }` without touching state.
+   Abort: `novaAbortController` holds the controller whose `.signal` is
+   forwarded to the LLM call. Phase 3c's Cancel button calls `.abort()`.
+
+   Never throws. Errors become `{ ok: false, reason, error }`. The
+   `finally` block always restores the pre-turn profile (if a swap
+   occurred) and clears `novaTurnInFlight` / `novaAbortController`.
+
+   Return shape:
+     { ok: true, assistantMessage, toolCalls?, toolCallsDeferred?, swappedProfile }
+     { ok: false, reason, error? }
+   ---------------------------------------------------------------------- */
+
+const NOVA_DEFAULT_MAX_TOOL_CALLS = 24;
+const NOVA_DEFAULT_TURN_TIMEOUT_MS = 300_000; // 5 min wall clock
+
+// The base system prompt + tool-use contract sit here rather than in NOVA_SKILLS
+// so every skill inherits them. Phase 3c may expand the tool contract once the
+// dispatcher shape is finalised.
+const NOVA_BASE_PROMPT = [
+    'You are Nova, an interactive SillyTavern assistant living inside the',
+    'Command-X phone. Say what you are about to do in one short sentence,',
+    'then call the appropriate tool. Prefer the smallest correct edit.',
+    'Confirm destructive operations by letting the approval modal fire — do',
+    'not try to route around it.',
+].join('\n');
+
+const NOVA_TOOL_CONTRACT = [
+    'Tool-use contract:',
+    '- Call one tool at a time. Wait for the result before calling the next.',
+    '- If a tool errors, explain what went wrong and propose a recovery.',
+    '- Stop calling tools once the user\'s request is satisfied — do not',
+    '  loop for the sake of looping.',
+    '- Never invent tool names; only call tools from the provided schema.',
+].join('\n');
+
+/**
+ * Resolve the active skill definition by id. Falls back to `freeform`.
+ * Pure helper — no side effects.
+ */
+function resolveNovaSkill(skillId, skills = NOVA_SKILLS) {
+    const id = String(skillId || 'freeform');
+    return skills.find(s => s.id === id) || skills.find(s => s.id === 'freeform') || null;
+}
+
+/**
+ * Build the `messages` array fed to `sendRequest`. Pure: caller owns
+ * composing soul/memory/base/skill prompts before calling.
+ */
+function buildNovaRequestMessages({ systemPrompt, sessionMessages = [] }) {
+    const out = [];
+    if (systemPrompt) out.push({ role: 'system', content: String(systemPrompt) });
+    for (const m of sessionMessages) {
+        if (!m || typeof m !== 'object') continue;
+        if (!m.role) continue;
+        out.push({ role: String(m.role), content: String(m.content ?? '') });
+    }
+    return out;
+}
+
+/**
+ * Extract the current profile name from the pipe returned by `/profile`
+ * (no args). ST returns the active profile name in the pipe. Returns
+ * `''` when no profile is active or the pipe is empty / non-string.
+ */
+function parseNovaProfilePipe(pipeValue) {
+    if (pipeValue == null) return '';
+    const s = String(pipeValue).trim();
+    // ST's /profile can return "None" or an empty string when no profile is
+    // selected; treat both as "no active profile" so the restore step is a
+    // no-op rather than trying to swap to a literal name of "None".
+    if (!s || s.toLowerCase() === 'none') return '';
+    return s;
+}
+
+/**
+ * Run `/profile` (no args) through the injected slash executor and return
+ * the currently-active profile name (or '' if none). Never throws —
+ * failure resolves to '' so the caller can still attempt a swap.
+ */
+async function getActiveNovaProfile({ executeSlash }) {
+    if (typeof executeSlash !== 'function') return '';
+    try {
+        const res = await executeSlash('/profile');
+        return parseNovaProfilePipe(res && res.pipe);
+    } catch (_) {
+        return '';
+    }
+}
+
+/**
+ * Turn-lifecycle entry point. See header comment for the full contract.
+ *
+ * @param {object} opts
+ * @param {object} opts.ctx                    - SillyTavern context (for saveNovaState / state mutation)
+ * @param {string} opts.userText               - User message text (required, non-empty)
+ * @param {string} [opts.skillId]              - Skill id to resolve against NOVA_SKILLS. Default 'freeform'.
+ * @param {string} [opts.profileName]          - Connection profile to run under. Required for the turn to proceed.
+ * @param {string} [opts.soul]                 - soul.md contents (inlined verbatim).
+ * @param {string} [opts.memory]               - memory.md contents (tail-truncated by composeNovaSystemPrompt).
+ * @param {number} [opts.maxToolCalls]         - Cap on tool calls this turn. Default 24.
+ * @param {number} [opts.turnTimeoutMs]        - Wall-clock cap. Default 300_000.
+ * @param {Array}  [opts.tools]                - Tool schemas forwarded to `sendRequest`. Default [].
+ *
+ * Injected deps (all optional where noted):
+ * @param {function} opts.sendRequest          - ({messages, tools, tool_choice, signal}) => Promise<{content?, tool_calls?}>
+ * @param {function} [opts.executeSlash]       - (cmd:string) => Promise<{pipe?:string}> — for /profile snapshot/restore
+ * @param {function} [opts.isToolCallingSupported] - () => boolean; when defined and returns false we bail.
+ * @param {function} [opts.nowImpl]            - () => number; defaults to Date.now
+ * @param {function} [opts.signalFactory]      - () => AbortSignal; test hook. Default: AbortController attached to a turnTimeoutMs timer.
+ */
+async function sendNovaTurn({
+    ctx,
+    userText,
+    skillId = 'freeform',
+    profileName = '',
+    soul = '',
+    memory = '',
+    maxToolCalls = NOVA_DEFAULT_MAX_TOOL_CALLS,
+    turnTimeoutMs = NOVA_DEFAULT_TURN_TIMEOUT_MS,
+    tools = [],
+    sendRequest,
+    executeSlash,
+    isToolCallingSupported,
+    nowImpl = Date.now,
+} = {}) {
+    // --- Step 0: re-entrancy guard ---
+    if (novaTurnInFlight) {
+        return { ok: false, reason: 'in-flight' };
+    }
+
+    // --- Step 1: precondition validation ---
+    const text = String(userText ?? '').trim();
+    if (!text) return { ok: false, reason: 'empty-text' };
+    if (typeof sendRequest !== 'function') {
+        return { ok: false, reason: 'no-send-request' };
+    }
+    if (typeof isToolCallingSupported === 'function' && !isToolCallingSupported()) {
+        return { ok: false, reason: 'no-tool-calling' };
+    }
+    const targetProfile = String(profileName || '').trim();
+    if (!targetProfile) return { ok: false, reason: 'no-profile' };
+
+    const skill = resolveNovaSkill(skillId);
+    if (!skill) return { ok: false, reason: 'no-skill' };
+
+    // Resolve state + active session up front so "turn in flight" + the
+    // audit-log entries always land on the right session even if a later
+    // step aborts.
+    const state = getNovaState(ctx);
+    let session = state.sessions.find(s => s && s.id === state.activeSessionId);
+    if (!session) {
+        session = createNovaSession(state, {
+            skill: skill.id,
+            tier: skill.defaultTier || 'read',
+            profileName: targetProfile,
+        });
+    }
+
+    // --- Step 2: push user message, persist ---
+    const turnStartedAt = nowImpl();
+    session.messages.push({ role: 'user', content: text, ts: turnStartedAt });
+    session.updatedAt = turnStartedAt;
+    saveNovaState(ctx);
+
+    // --- Set up cancellation + wall-clock timeout ---
+    // novaAbortController is the canonical handle; signalFactory is only here
+    // so tests can pin a deterministic signal.
+    let timeoutHandle;
+    const controller = new AbortController();
+    novaAbortController = controller;
+    novaTurnInFlight = true;
+    if (turnTimeoutMs > 0 && turnTimeoutMs < Infinity) {
+        timeoutHandle = setTimeout(() => {
+            try { controller.abort(new Error('turn-timeout')); } catch (_) { /* noop */ }
+        }, turnTimeoutMs);
+    }
+
+    let swappedFrom = '';
+    let swapPerformed = false;
+
+    try {
+        // --- Step 3: profile snapshot + swap ---
+        if (typeof executeSlash === 'function') {
+            swappedFrom = await getActiveNovaProfile({ executeSlash });
+            // Skip swap if already on the target profile — avoids a noisy
+            // slash round-trip and preserves whatever chat state the user
+            // already had active.
+            if (swappedFrom !== targetProfile) {
+                try {
+                    await executeSlash(`/profile ${targetProfile}`);
+                    swapPerformed = true;
+                } catch (err) {
+                    appendNovaAuditLog(state, {
+                        tool: 'profile-swap',
+                        argsSummary: `to=${targetProfile}`,
+                        outcome: `error:${String(err?.message || err)}`,
+                    });
+                    saveNovaState(ctx);
+                    return { ok: false, reason: 'profile-swap-failed', error: String(err?.message || err) };
+                }
+            }
+        }
+
+        // --- Step 4: build messages ---
+        const systemPrompt = composeNovaSystemPrompt({
+            basePrompt: NOVA_BASE_PROMPT,
+            skillPrompt: skill.systemPrompt || '',
+            soul,
+            memory,
+            toolContract: NOVA_TOOL_CONTRACT,
+        });
+        const messages = buildNovaRequestMessages({
+            systemPrompt,
+            sessionMessages: session.messages,
+        });
+
+        // --- Step 5: call LLM ---
+        let response;
+        try {
+            response = await sendRequest({
+                messages,
+                tools: Array.isArray(tools) ? tools : [],
+                tool_choice: 'auto',
+                signal: controller.signal,
+            });
+        } catch (err) {
+            // Distinguish abort from other failures so the caller (and tests)
+            // can render the right UI affordance.
+            const aborted = controller.signal?.aborted || err?.name === 'AbortError';
+            const reason = aborted ? 'aborted' : 'send-failed';
+            appendNovaAuditLog(state, {
+                tool: 'send-request',
+                argsSummary: `skill=${skill.id} profile=${targetProfile} msgs=${messages.length}`,
+                outcome: `${reason}:${String(err?.message || err)}`,
+            });
+            saveNovaState(ctx);
+            return { ok: false, reason, error: String(err?.message || err) };
+        }
+
+        // --- Step 6 (stub): tool_calls handling deferred to Phase 3c ---
+        const assistantContent = String(response?.content ?? '');
+        const toolCalls = Array.isArray(response?.tool_calls) ? response.tool_calls : [];
+
+        const assistantMessage = {
+            role: 'assistant',
+            content: assistantContent,
+            ts: nowImpl(),
+        };
+        if (toolCalls.length > 0) {
+            // Record the raw call shapes so Phase 3c can replay them once
+            // the dispatcher lands.
+            assistantMessage.tool_calls = toolCalls;
+            appendNovaAuditLog(state, {
+                tool: 'tool-calls',
+                argsSummary: `count=${toolCalls.length} cap=${maxToolCalls}`,
+                outcome: 'deferred-to-phase-3c',
+            });
+        }
+        session.messages.push(assistantMessage);
+        session.updatedAt = assistantMessage.ts;
+        saveNovaState(ctx);
+
+        return {
+            ok: true,
+            assistantMessage,
+            toolCalls,
+            toolCallsDeferred: toolCalls.length > 0,
+            swappedProfile: swapPerformed ? { from: swappedFrom, to: targetProfile } : null,
+        };
+    } finally {
+        // --- Step 8: always restore profile + clear turn state ---
+        if (timeoutHandle !== undefined) {
+            try { clearTimeout(timeoutHandle); } catch (_) { /* noop */ }
+        }
+        // Order matters: restore the profile BEFORE clearing the turn-state
+        // flags. A second turn waiting on the re-entrancy guard must not
+        // see `inFlight: false` until we're fully back on the user's
+        // original profile.
+        if (swapPerformed && typeof executeSlash === 'function') {
+            try {
+                if (swappedFrom) {
+                    await executeSlash(`/profile ${swappedFrom}`);
+                }
+                // If `swappedFrom` was empty we can't restore "no profile"
+                // via a slash (ST has no `/profile` clear syntax). Leave
+                // Nova's profile active; the user's next non-Nova turn will
+                // pick up the appropriate profile via their own workflow.
+            } catch (err) {
+                appendNovaAuditLog(state, {
+                    tool: 'profile-restore',
+                    argsSummary: `to=${swappedFrom}`,
+                    outcome: `error:${String(err?.message || err)}`,
+                });
+                saveNovaState(ctx);
+            }
+        }
+        novaTurnInFlight = false;
+        novaAbortController = null;
+    }
+}
+
+/* ----------------------------------------------------------------------
    NOVA AGENT — tool registry (plan §4) + skills (plan §5).
 
    These arrays are PURE DATA — no handlers, no skill dispatch, no
