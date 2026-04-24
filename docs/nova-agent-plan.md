@@ -4,14 +4,20 @@ Status: **Approved** — 2026-04-22. This document is the source of truth for th
 Nova Agent work. Update checkboxes as items land and append amendments at the
 bottom.
 
-> **v0.13.0 landed (2026-04-23) — Nova is LIVE.** The agent loop
-> (Phase 3) is now wired to the view, pills are interactive, three
-> picker modals work, profile-list probe (§9) is live, the soul/memory
-> self-edit tools (§6b) are registered with handlers, and both
-> settings surfaces (§7) are populated. The only remaining gaps for a
-> "fully stocked" Nova are the `nova-agent-bridge` server plugin
-> (§8) and real handlers for `fs_*` / `shell_*` / `st_*` / `phone_*`
-> tools. See AGENT_MEMORY 2026-04-23 for the full delta.
+> **v0.13.0 landed (2026-04-23 → 2026-04-24) — Nova is LIVE.** The
+> agent loop (Phase 3) is now wired to the view, pills are
+> interactive (with keyboard access), three picker modals work,
+> profile-list probe (§9) is live, the soul/memory self-edit tools
+> (§6b) are registered with handlers, and both settings surfaces
+> (§7) are populated. Post-merge review follow-ups aligned the
+> `turnTimeoutMs` clamp floor to 10000 across `novaHandleSend` /
+> `loadSettings` / UI `min`, added keyboard handlers to
+> `cxPickList` rows, and corrected the `no-handler` vs
+> `unknown-tool` dispatcher-surface comment. The only remaining
+> gaps for a "fully stocked" Nova are the `nova-agent-bridge`
+> server plugin (§8) and real handlers for `fs_*` / `shell_*` /
+> `st_*` / `phone_*` tools. See AGENT_MEMORY 2026-04-24 for the
+> full delta and next-PR checklist.
 
 Rewrite target: replace the `openclaw` app with **Nova**, an interactive
 tool-calling agent inside the Command-X phone. Nova has full read/write access
