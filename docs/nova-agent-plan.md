@@ -314,6 +314,19 @@ own plugin folder by default.
 - [x] `phone_list_npcs`, `phone_write_npc`, `phone_list_quests`,
   `phone_write_quest`, `phone_list_places`, `phone_write_place`,
   `phone_list_messages`, `phone_inject_message` — schemas shipped.
+- [x] **Handlers shipped** — `buildNovaPhoneHandlers({ ... })` factory
+  in `index.js` NOVA AGENT section (immediately after
+  `buildNovaSoulMemoryHandlers`). Thin wrappers around the production
+  `loadNpcs` / `mergeNpcs` / `loadQuests` / `upsertQuest` / `loadPlaces`
+  / `upsertPlace` / `loadMessages` / `pushMessage` helpers; never throw;
+  all eight handlers resolve to `{ ok, ... }` on success or
+  `{ error: <string> }`. All store helpers are DI'd for testability.
+  `novaHandleSend` composes the factory into the dispatch `toolHandlers`
+  map alongside `buildNovaSoulMemoryHandlers`. Covered by
+  `test/nova-phone-tools.test.mjs` (39 assertions incl. never-throws
+  fuzzing against `undefined` / `null` / primitive / array args, limit
+  clamping on `phone_list_messages`, authoritative-id/name semantics,
+  and source-shape key parity).
 
 ### 4f. Tool capability discovery
 - [ ] Probe `GET /api/plugins/nova-agent-bridge/manifest`. If present,
@@ -761,3 +774,10 @@ All under `test/` using Node `--test`.
   `/manifest` now reports the resolved `auditLogPath`. `exit()` now calls
   `auditLogger.close()` (no-op today; reserved for the rotation sprint).
   Shell (`/shell/run`) is the only remaining 501 stub.
+- **2026-04-24 (phone handlers)** — Plan audit + first slice of §4e
+  handler wiring. `buildNovaPhoneHandlers` factory lands the 8
+  `phone_*` handlers behind the same DI+factory pattern as
+  `buildNovaSoulMemoryHandlers`. `novaHandleSend` composes both maps
+  into its `toolHandlers` arg. Pure local stores — no plugin, no
+  network, no approval gate beyond the dispatcher's tier check. 485
+  tests green (+39).

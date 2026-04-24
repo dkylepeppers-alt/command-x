@@ -4453,12 +4453,14 @@ async function novaHandleSend() {
 
     const { soul, memory } = await loadNovaSoulMemory();
 
-    // Build the tool handler set. Soul/memory self-edit tools are the
-    // only ones we ship handlers for today — other registered tools
-    // (fs_*, shell_*, st_*, phone_*) return { error: 'no-handler' } when
-    // dispatched without a handler, while missing tools use the
-    // dispatcher's unknown-tool failure surface.
-    const toolHandlers = buildNovaSoulMemoryHandlers({});
+    // Build the tool handler set. Shipped today: soul/memory self-edit
+    // (§6b) + phone-internal stores (§4e). Bridge-backed tools (fs_*,
+    // shell_*) and ST-API tools (st_*) still dispatch to `no-handler`
+    // until their factories land.
+    const toolHandlers = {
+        ...buildNovaSoulMemoryHandlers({}),
+        ...buildNovaPhoneHandlers({}),
+    };
 
     setNovaInFlight(true);
     if (textOnlyFallback) {
@@ -7286,6 +7288,172 @@ function buildNovaSoulMemoryHandlers({
                 return { ok: true, path: memoryPath, bytes: content.length };
             }
             return res;
+        },
+    };
+}
+
+/* ----------------------------------------------------------------------
+   NOVA AGENT — phone-internal tool handlers (plan §4e).
+
+   `buildNovaPhoneHandlers` returns the 8 `phone_*` tool handlers that
+   read/write the phone's local stores (NPCs, quests, places, messages).
+   All stores are in `localStorage` and scoped to the current chat, so no
+   network, no plugin, no approval gate beyond the dispatcher's built-in
+   tier check (write permission required for the write handlers).
+
+   Contract — mirrors `buildNovaSoulMemoryHandlers`:
+   - Handlers NEVER throw; errors resolve to `{ error: <string> }`.
+   - Reads return `{ <collection>: [...] }` so the LLM can inspect shape.
+   - Writes return `{ ok: true, ... }` on success.
+   - All store mutations go through the production helpers so any side
+     effects (caches, UI rebuild, event dispatch, focus normalisation)
+     stay in one place.
+
+   Injected deps (all optional; default to module globals so the
+   production call site just passes `{}`):
+     - `loadNpcsImpl`, `mergeNpcsImpl`
+     - `loadQuestsImpl`, `upsertQuestImpl`
+     - `loadPlacesImpl`, `upsertPlaceImpl`
+     - `loadMessagesImpl`, `pushMessageImpl`
+   ---------------------------------------------------------------------- */
+
+/**
+ * Build the 8 phone_* tool handlers. Returns `{ name: handler }` map
+ * compatible with the `toolHandlers` argument of `sendNovaTurn`.
+ */
+function buildNovaPhoneHandlers({
+    loadNpcsImpl,
+    mergeNpcsImpl,
+    loadQuestsImpl,
+    upsertQuestImpl,
+    loadPlacesImpl,
+    upsertPlaceImpl,
+    loadMessagesImpl,
+    pushMessageImpl,
+    messageHistoryLimitDefault = 50,
+    messageHistoryLimitMax = 200,
+} = {}) {
+    const _loadNpcs = typeof loadNpcsImpl === 'function' ? loadNpcsImpl : (typeof loadNpcs === 'function' ? loadNpcs : () => []);
+    const _mergeNpcs = typeof mergeNpcsImpl === 'function' ? mergeNpcsImpl : (typeof mergeNpcs === 'function' ? mergeNpcs : null);
+    const _loadQuests = typeof loadQuestsImpl === 'function' ? loadQuestsImpl : (typeof loadQuests === 'function' ? loadQuests : () => []);
+    const _upsertQuest = typeof upsertQuestImpl === 'function' ? upsertQuestImpl : (typeof upsertQuest === 'function' ? upsertQuest : null);
+    const _loadPlaces = typeof loadPlacesImpl === 'function' ? loadPlacesImpl : (typeof loadPlaces === 'function' ? loadPlaces : () => []);
+    const _upsertPlace = typeof upsertPlaceImpl === 'function' ? upsertPlaceImpl : (typeof upsertPlace === 'function' ? upsertPlace : null);
+    const _loadMessages = typeof loadMessagesImpl === 'function' ? loadMessagesImpl : (typeof loadMessages === 'function' ? loadMessages : () => []);
+    const _pushMessage = typeof pushMessageImpl === 'function' ? pushMessageImpl : (typeof pushMessage === 'function' ? pushMessage : null);
+
+    const clampLimit = (raw) => {
+        const n = Number(raw);
+        if (!Number.isFinite(n) || n <= 0) return messageHistoryLimitDefault;
+        return Math.max(1, Math.min(Math.floor(n), messageHistoryLimitMax));
+    };
+
+    const safeName = (v) => (typeof v === 'string' ? v.trim() : '');
+    const isObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
+    // Defensive arg coercion: destructuring defaults only fire for `undefined`,
+    // not `null`. The dispatch loop already validates tool args against the
+    // JSON schema, but third-party callers + fuzzing shouldn't crash us.
+    const safeArgs = (v) => (isObject(v) ? v : {});
+
+    return {
+        phone_list_npcs: async () => {
+            try {
+                const npcs = _loadNpcs() || [];
+                return { npcs: Array.isArray(npcs) ? npcs : [] };
+            } catch (err) {
+                return { error: String(err?.message || err) };
+            }
+        },
+        phone_write_npc: async (rawArgs) => {
+            const { name, fields } = safeArgs(rawArgs);
+            const cleanName = safeName(name);
+            if (!cleanName) return { error: 'name must be a non-empty string' };
+            if (!isObject(fields)) return { error: 'fields must be an object' };
+            if (!_mergeNpcs) return { error: 'mergeNpcs unavailable' };
+            try {
+                // Merge input is `{ name, ...fields }`; production `mergeNpcs`
+                // handles both new-insert and update-by-name paths.
+                _mergeNpcs([{ ...fields, name: cleanName }]);
+                return { ok: true, name: cleanName };
+            } catch (err) {
+                return { error: String(err?.message || err) };
+            }
+        },
+        phone_list_quests: async () => {
+            try {
+                const quests = _loadQuests() || [];
+                return { quests: Array.isArray(quests) ? quests : [] };
+            } catch (err) {
+                return { error: String(err?.message || err) };
+            }
+        },
+        phone_write_quest: async (rawArgs) => {
+            const { id, fields } = safeArgs(rawArgs);
+            const cleanId = safeName(id);
+            if (!cleanId) return { error: 'id must be a non-empty string' };
+            if (!isObject(fields)) return { error: 'fields must be an object' };
+            if (!_upsertQuest) return { error: 'upsertQuest unavailable' };
+            try {
+                const clean = _upsertQuest({ ...fields, id: cleanId });
+                return { ok: true, id: cleanId, quest: clean || null };
+            } catch (err) {
+                return { error: String(err?.message || err) };
+            }
+        },
+        phone_list_places: async () => {
+            try {
+                const places = _loadPlaces() || [];
+                return { places: Array.isArray(places) ? places : [] };
+            } catch (err) {
+                return { error: String(err?.message || err) };
+            }
+        },
+        phone_write_place: async (rawArgs) => {
+            const { name, fields } = safeArgs(rawArgs);
+            const cleanName = safeName(name);
+            if (!cleanName) return { error: 'name must be a non-empty string' };
+            if (!isObject(fields)) return { error: 'fields must be an object' };
+            if (!_upsertPlace) return { error: 'upsertPlace unavailable' };
+            try {
+                const clean = _upsertPlace({ ...fields, name: cleanName });
+                if (!clean) return { error: 'upsert rejected (invalid place)' };
+                return { ok: true, place: clean };
+            } catch (err) {
+                return { error: String(err?.message || err) };
+            }
+        },
+        phone_list_messages: async (rawArgs) => {
+            const { contactName, limit } = safeArgs(rawArgs);
+            const cleanName = safeName(contactName);
+            if (!cleanName) return { error: 'contactName must be a non-empty string' };
+            try {
+                const all = _loadMessages(cleanName) || [];
+                const list = Array.isArray(all) ? all : [];
+                const cap = clampLimit(limit);
+                const messages = list.length > cap ? list.slice(-cap) : list.slice();
+                return { contactName: cleanName, messages, total: list.length };
+            } catch (err) {
+                return { error: String(err?.message || err) };
+            }
+        },
+        phone_inject_message: async (rawArgs) => {
+            const { contactName, from, text } = safeArgs(rawArgs);
+            const cleanName = safeName(contactName);
+            if (!cleanName) return { error: 'contactName must be a non-empty string' };
+            if (from !== 'user' && from !== 'contact') return { error: 'from must be "user" or "contact"' };
+            if (typeof text !== 'string') return { error: 'text must be a string' };
+            if (!text.trim()) return { error: 'text must be non-empty' };
+            if (!_pushMessage) return { error: 'pushMessage unavailable' };
+            try {
+                // Production message type is 'sent' for user-origin, 'received'
+                // for contact-origin. The `from` arg in the tool schema is a
+                // stable LLM-facing name; map it to the internal type here.
+                const type = from === 'user' ? 'sent' : 'received';
+                _pushMessage(cleanName, type, text, null);
+                return { ok: true, contactName: cleanName, from };
+            } catch (err) {
+                return { error: String(err?.message || err) };
+            }
         },
     };
 }

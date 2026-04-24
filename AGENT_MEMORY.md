@@ -77,6 +77,39 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-24 (phone handlers) — Plan audit + Nova `phone_*` tool handlers shipped
+
+**Context:** Conducted a full audit of `docs/nova-agent-plan.md` against the actual shipped state (v0.13.0 live, 446 tests green before this PR). Plan checkboxes are significantly stale vs. reality — §0–§11 are largely landed; the real remaining work is: (1) `fs_*` / `st_*` / `phone_*` tool-handler factories in `index.js`; (2) `/shell/run` plugin route; (3) rich per-turn tool-card rendering; (4) diff preview wiring in approval modal; (5) plugin-side CSRF + session-cookie checks. This PR takes the smallest self-contained slice: phone-internal tool handlers.
+
+**What shipped:**
+- `buildNovaPhoneHandlers({ loadNpcsImpl, mergeNpcsImpl, loadQuestsImpl, upsertQuestImpl, loadPlacesImpl, upsertPlaceImpl, loadMessagesImpl, pushMessageImpl, messageHistoryLimitDefault=50, messageHistoryLimitMax=200 })` factory in the NOVA AGENT section immediately after `buildNovaSoulMemoryHandlers`. Returns the 8 `phone_*` handlers mapped by tool name.
+- `novaHandleSend` now composes both handler maps (`{ ...buildNovaSoulMemoryHandlers({}), ...buildNovaPhoneHandlers({}) }`).
+- `test/nova-phone-tools.test.mjs` — 39 assertions across 11 suites. Inline-copies the helper per the AGENT_MEMORY convention (index.js can't import cleanly under plain Node).
+- `test/nova-ui-wiring.test.mjs` gained a source-contract assertion that `novaHandleSend` calls `buildNovaPhoneHandlers(` and all 8 tool names are present.
+
+**Contract locked by tests:**
+- **Never throws.** Every handler resolves to either a success shape (`{ ok, ... }` / `{ <collection>: [...] }`) or `{ error: <string> }`. Fuzzed against `undefined`, `null`, primitives, arrays, malformed objects.
+- **Args object is coerced.** Destructuring default `= {}` only fires for `undefined`, not `null` — the fuzzing suite caught this and the factory now uses a `safeArgs(v)` helper before destructuring. **When you add more handlers, don't write `async ({ x } = {}) => {...}`; write `async (raw) => { const { x } = safeArgs(raw); ... }` or reintroduce the `null → TypeError` regression.**
+- **Name/id is authoritative.** `phone_write_npc({ name: 'Aria', fields: { name: 'WRONG' } })` MUST merge `{ name: 'Aria', ... }`. Two tests lock this for NPCs and quests.
+- **User-origin `from: 'user'` maps to internal `type: 'sent'`; `from: 'contact'` maps to `type: 'received'`.** These are the two production message types (there's also `'sent-neural'`, but the LLM should use dedicated neural-command flows, not inject synthetic messages as neural commands).
+- **`phone_list_messages.limit` clamp.** `0` / negative / `NaN` / `Infinity` / non-finite → default (50). Positive values are `Math.max(1, Math.min(floor(limit), max))`. Max is 200 (matches the JSON-schema `maximum` in `NOVA_TOOLS`).
+- **`phone_write_place` returns `{ error: 'upsert rejected (invalid place)' }` when `upsertPlace` returns `null`.** Production `upsertPlace` returns null on sanitization failure (e.g. bad coordinates). The handler surfaces this, doesn't swallow.
+
+**Inline-copy convention follow-through:**
+- When you edit `buildNovaPhoneHandlers` or `safeArgs` / `safeName` / `clampLimit` in `index.js`, mirror the edit into `test/nova-phone-tools.test.mjs`. The inline copy is the Node-testable twin; there's still no JSDOM/ST harness.
+- The fuzzing suite at the bottom of the test file is a forward-looking guard: any future handler you add to the factory is automatically tested against the weird-args set. Don't delete it when adding new handlers — just make sure your new handler's output shape is one of the known ones (`ok`, `npcs`, `quests`, `places`, `messages`, or `error`), or extend the assertion list.
+
+**What's still outstanding on the plan (copy-forward):**
+1. `buildNovaStTools` factory for ST-API tools (`st_list_characters`, `st_read_character`, `st_write_character`, `st_list_worldbooks`, `st_read_worldbook`, `st_write_worldbook`, `st_run_slash`, `st_get_context`, `st_list_profiles`, `st_get_profile`). ST-API-only, no plugin dep — natural next slice after this one.
+2. `buildNovaFsTools` / `buildNovaShellTools` factory that wraps `<pluginBaseUrl>/fs/*` + `/shell/run` HTTP routes. Reuse the `_novaBridgeWrite`-style pattern; all seven fs routes are live in the plugin.
+3. `/shell/run` plugin route (501 stub today): `spawn(cmd, args, { shell: false })` + allow-list resolution + stdin disabled + per-request timeout (default 60 s, hard cap 5 min) + stdout/stderr size caps + audit entry.
+4. Rich per-turn tool-card transcript rendering (plan §2b/§3c).
+5. Diff preview in approval path: composer-side `fs_read` → `buildNovaUnifiedDiff` → `cxNovaApprovalModal` (helper already exists, approval modal already exists, just needs wiring).
+6. Plugin CSRF + session-cookie check on every route (plan §8c).
+7. Plan checkbox refresh pass — many items under §0/§1/§2/§5/§7/§9/§10/§11 are `- [ ]` but have actually landed. Not gating work; cosmetic debt.
+
+**Validation:** `node --check index.js` clean; `node --test test/` → **485/485 pass** (+39 new: all in `nova-phone-tools.test.mjs`, plus one new source-contract assertion in `nova-ui-wiring.test.mjs` that fits inside an existing test block).
+
 ### 2026-04-24 (latest) — Phase 8b write routes + audit log shipped (review pass 2)
 
 **Context:** Initial write-routes PR landed with 9 review comments. This update addresses all of them.

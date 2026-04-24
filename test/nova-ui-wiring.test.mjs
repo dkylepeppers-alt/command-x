@@ -79,6 +79,28 @@ test('Nova self-edit tool handlers factory is exported in source', async () => {
     }
 });
 
+test('Nova phone-internal tool handlers factory is exported and wired', async () => {
+    const { js } = await loadSources();
+    assert.match(js, /function buildNovaPhoneHandlers\(/);
+    for (const name of [
+        'phone_list_npcs',
+        'phone_write_npc',
+        'phone_list_quests',
+        'phone_write_quest',
+        'phone_list_places',
+        'phone_write_place',
+        'phone_list_messages',
+        'phone_inject_message',
+    ]) {
+        assert.match(js, new RegExp(`\\b${name}\\b`), `Missing phone handler key ${name}`);
+    }
+    // novaHandleSend must merge the phone handlers into the tool handler set.
+    const novaHandleSend = js.match(/async function novaHandleSend\([\s\S]*?\n\}/);
+    assert.ok(novaHandleSend, 'novaHandleSend body not found');
+    assert.match(novaHandleSend[0], /buildNovaPhoneHandlers\(/,
+        'novaHandleSend must compose buildNovaPhoneHandlers into the toolHandlers map');
+});
+
 test('Profile-swap helpers are wired to the slash executor', async () => {
     const { js } = await loadSources();
     assert.match(js, /function listNovaProfiles\(/);
