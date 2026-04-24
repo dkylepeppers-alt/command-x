@@ -17,7 +17,7 @@ import {
     extension_prompt_roles,
 } from '../../../../script.js';
 
-const VERSION = '0.12.0';
+const VERSION = '0.13.0';
 const EXT = 'command-x';
 const INJECT_KEY = 'command-x-sms';
 const INJECT_KEY_CONTACTS = 'command-x-contacts';
@@ -2336,7 +2336,14 @@ function getContactsFromContext() {
 const now = () => new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 const today = () => new Date().toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
 function escHtml(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>'); }
-function escAttr(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+/**
+ * Escape for HTML *attribute* contexts. Escapes `&`, `<`, `>`, `"`, and
+ * `'` so untrusted values can't break out of the surrounding `"..."`
+ * attribute delimiter. Use this any time you interpolate a dynamic
+ * value inside `attr="..."` — `escHtml` leaves quotes intact and
+ * CodeQL (correctly) flags its use in attribute position.
+ */
+function escAttr(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function escapeHtml(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 
 
@@ -3247,7 +3254,7 @@ function buildPhone() {
 
         ${buildMapView(contacts)}
 
-        <!-- Nova Agent View (scaffolding — agent loop wired in later sprint) -->
+        <!-- Nova Agent View -->
         <div class="cx-view" data-view="nova">
             <div class="cx-nova-header">
                 <div class="cx-nova-title-col">
@@ -3255,22 +3262,22 @@ function buildPhone() {
                     <div class="cx-nova-sub">Agentic Assistant</div>
                 </div>
                 <div class="cx-nova-pills">
-                    <button type="button" class="cx-nova-pill" id="cx-nova-pill-profile" aria-label="Choose connection profile" disabled title="Coming soon">Profile: —</button>
-                    <button type="button" class="cx-nova-pill" id="cx-nova-pill-skill" aria-label="Choose skill" disabled title="Coming soon">Skill: Free-form</button>
-                    <button type="button" class="cx-nova-pill" id="cx-nova-pill-tier" aria-label="Choose permission tier" disabled title="Coming soon">Tier: Read</button>
+                    <button type="button" class="cx-nova-pill" id="cx-nova-pill-profile" aria-label="Choose connection profile">Profile: —</button>
+                    <button type="button" class="cx-nova-pill" id="cx-nova-pill-skill" aria-label="Choose skill">Skill: Free-form</button>
+                    <button type="button" class="cx-nova-pill" id="cx-nova-pill-tier" aria-label="Choose permission tier">Tier: Read</button>
                 </div>
             </div>
             <div class="cx-nova-transcript" id="cx-nova-transcript" role="log" aria-live="polite" aria-label="Nova conversation transcript">
-                <div class="cx-nova-empty">
+                <div class="cx-nova-empty" id="cx-nova-empty">
                     <div class="cx-nova-empty-glyph">✴︎</div>
-                    <div class="cx-nova-empty-title">Nova is offline</div>
-                    <div class="cx-nova-empty-body">The agent loop, skills, and tool bridge ship in a later sprint. This shell verifies the scaffolding renders cleanly on your setup.</div>
+                    <div class="cx-nova-empty-title">Nova is ready</div>
+                    <div class="cx-nova-empty-body">Pick a connection profile from the <strong>Profile</strong> pill, then ask Nova anything. Reads are instant; writes and shell commands ask for approval first.</div>
                 </div>
             </div>
             <div class="cx-nova-composer">
-                <textarea class="cx-nova-input" id="cx-nova-input" rows="2" placeholder="Ask Nova…" aria-label="Message Nova" disabled></textarea>
+                <textarea class="cx-nova-input" id="cx-nova-input" rows="2" placeholder="Ask Nova…" aria-label="Message Nova"></textarea>
                 <div class="cx-nova-composer-actions">
-                    <button type="button" class="cx-settings-btn cx-nova-send" id="cx-nova-send" aria-label="Send to Nova" disabled>Send</button>
+                    <button type="button" class="cx-settings-btn cx-nova-send" id="cx-nova-send" aria-label="Send to Nova">Send</button>
                     <button type="button" class="cx-settings-btn cx-nova-cancel cx-hidden" id="cx-nova-cancel" aria-label="Cancel Nova turn">Cancel</button>
                 </div>
             </div>
@@ -3336,6 +3343,31 @@ function buildPhone() {
                 <div class="cx-settings-row">
                     <span class="cx-settings-label">Lock Screen on Open</span>
                     <label class="cx-toggle"><input type="checkbox" id="cx-set-lock" ${settings.showLockscreen ? 'checked' : ''}><span class="cx-toggle-slider"></span></label>
+                </div>
+                <div class="cx-settings-section">NOVA</div>
+                <div class="cx-settings-row">
+                    <span class="cx-settings-label">Connection profile</span>
+                    <input type="text" id="cx-set-nova-profile" class="cx-settings-text-input" value="${escAttr(settings.nova?.profileName || '')}" placeholder="e.g. GPT-4o Mini" />
+                </div>
+                <div class="cx-settings-row">
+                    <span class="cx-settings-label">Default permission tier</span>
+                    <select id="cx-set-nova-tier" class="cx-settings-text-input">
+                        <option value="read" ${(settings.nova?.defaultTier || 'read') === 'read' ? 'selected' : ''}>Read</option>
+                        <option value="write" ${settings.nova?.defaultTier === 'write' ? 'selected' : ''}>Write</option>
+                        <option value="full" ${settings.nova?.defaultTier === 'full' ? 'selected' : ''}>Full</option>
+                    </select>
+                </div>
+                <div class="cx-settings-row">
+                    <span class="cx-settings-label">Max tool calls / turn</span>
+                    <input type="number" id="cx-set-nova-max-tools" class="cx-settings-number-input" min="1" max="100" step="1" value="${Math.max(1, Number(settings.nova?.maxToolCalls) || NOVA_DEFAULTS.maxToolCalls)}" />
+                </div>
+                <div class="cx-settings-row">
+                    <span class="cx-settings-label">Turn timeout (ms)</span>
+                    <input type="number" id="cx-set-nova-timeout" class="cx-settings-number-input" min="10000" max="3600000" step="1000" value="${Math.max(10000, Number(settings.nova?.turnTimeoutMs) || NOVA_DEFAULTS.turnTimeoutMs)}" />
+                </div>
+                <div class="cx-settings-row">
+                    <span class="cx-settings-label">Bridge plugin URL</span>
+                    <input type="text" id="cx-set-nova-plugin-url" class="cx-settings-text-input" value="${escAttr(settings.nova?.pluginBaseUrl || NOVA_DEFAULTS.pluginBaseUrl)}" />
                 </div>
                 <div class="cx-settings-section">ABOUT</div>
                 <div class="cx-settings-row cx-settings-about">
@@ -4036,6 +4068,485 @@ function wireMapInteractions() {
     }
 }
 
+/* ======================================================================
+   NOVA AGENT — UI wiring (plan §2c, §3b integration, §9)
+
+   Bridges the Nova view DOM to the `sendNovaTurn` lifecycle that lives
+   in the `/* === NOVA AGENT === *\/` section above. Responsibilities:
+
+     - `wireNovaView(container)`           : attach pill / send / cancel handlers.
+     - `refreshNovaPills(container)`       : update pill labels from settings.
+     - `renderNovaTranscript(container)`   : draw the current session messages.
+     - `appendNovaTranscriptLine(...)`     : add a single ad-hoc line (system/🔌).
+     - `buildNovaSendRequest(ctx)`         : adapter that returns an
+        `({messages, tools, tool_choice, signal}) => Promise<{content, tool_calls}>`
+        callback backed by whichever ST API is available on this build:
+          1. `ctx.ConnectionManagerRequestService?.sendRequest` (tools capable)
+          2. `ctx.generateRaw` fallback — text-only, no tools. The caller
+             can still run reads via their own tool handlers but the LLM
+             won't emit tool_calls in this mode. Surfaced as a transcript
+             "⚠︎ text-only mode" line so the user understands.
+     - Picker modals: `novaPickProfile` / `novaPickSkill` / `novaPickTier`.
+
+   All picker / transcript helpers are PURE w.r.t. the DOM: they only
+   touch nodes under `phoneContainer`. Safe to call from anywhere.
+   ====================================================================== */
+
+// Module-level transcript cap — full history lives in session.messages,
+// this just bounds the rendered DOM so it doesn't grow unbounded during
+// a long conversation.
+const NOVA_TRANSCRIPT_RENDER_CAP = 200;
+
+function _novaContainer() {
+    return phoneContainer?.querySelector('[data-view="nova"]') || null;
+}
+
+/** Human label for a tier id. */
+function _novaTierLabel(tier) {
+    const t = String(tier || 'read').toLowerCase();
+    if (t === 'full') return 'Full';
+    if (t === 'write') return 'Write';
+    return 'Read';
+}
+
+/** Human label for a skill id. Falls back to the id itself. */
+function _novaSkillLabel(skillId) {
+    const s = NOVA_SKILLS.find(x => x.id === skillId);
+    return s ? s.label : String(skillId || 'freeform');
+}
+
+/**
+ * Sync the three pill labels with the currently active settings.nova state.
+ */
+function refreshNovaPills() {
+    const novaView = _novaContainer();
+    if (!novaView) return;
+    const nova = settings?.nova || NOVA_DEFAULTS;
+    const profileLbl = nova.profileName || '—';
+    const skillLbl = _novaSkillLabel(nova.activeSkill || 'freeform');
+    const tierLbl = _novaTierLabel(nova.defaultTier || 'read');
+    const pp = novaView.querySelector('#cx-nova-pill-profile');
+    const ps = novaView.querySelector('#cx-nova-pill-skill');
+    const pt = novaView.querySelector('#cx-nova-pill-tier');
+    if (pp) pp.textContent = `Profile: ${profileLbl}`;
+    if (ps) ps.textContent = `Skill: ${skillLbl}`;
+    if (pt) pt.textContent = `Tier: ${tierLbl}`;
+}
+
+/** Render a single session-message or transcript event into a DOM node. */
+function _novaRenderMessageNode(msg) {
+    const role = String(msg.role || '');
+    const div = document.createElement('div');
+    if (role === 'user') {
+        div.className = 'cx-nova-msg cx-nova-msg-user';
+        div.innerHTML = `<div class="cx-nova-msg-body">${escHtml(msg.content || '')}</div>`;
+    } else if (role === 'assistant') {
+        div.className = 'cx-nova-msg cx-nova-msg-assistant';
+        const body = escHtml(msg.content || '');
+        div.innerHTML = `<div class="cx-nova-msg-body">${body || '<em class="cx-nova-muted">(no content)</em>'}</div>`;
+    } else if (role === 'tool') {
+        // Tool result card — compact JSON preview.
+        div.className = 'cx-nova-toolcard';
+        let name = msg.name || 'tool';
+        let bodyText = '';
+        try { bodyText = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content, null, 2); }
+        catch (_) { bodyText = String(msg.content ?? ''); }
+        div.innerHTML = `<div class="cx-nova-msg-body"><strong>${escHtml(name)}</strong> → <code>${escHtml(bodyText.slice(0, 400))}</code></div>`;
+    } else if (role === 'system' || role === 'notice' || role === 'user-preview') {
+        const variantClass = role === 'notice'
+            ? 'cx-nova-msg-notice'
+            : (role === 'user-preview' ? 'cx-nova-msg-user' : 'cx-nova-msg-system');
+        div.className = `cx-nova-msg ${variantClass}`;
+        div.innerHTML = `<div class="cx-nova-msg-body">${escHtml(msg.content || '')}</div>`;
+    } else {
+        div.className = 'cx-nova-msg';
+        div.innerHTML = `<div class="cx-nova-msg-body">${escHtml(msg.content || '')}</div>`;
+    }
+    return div;
+}
+
+/**
+ * Redraw the transcript pane from the active Nova session. If no
+ * active session exists, renders the empty-state glyph so the user
+ * isn't staring at a blank pane.
+ */
+function renderNovaTranscript() {
+    const novaView = _novaContainer();
+    if (!novaView) return;
+    const pane = novaView.querySelector('#cx-nova-transcript');
+    if (!pane) return;
+    const ctx = getContext?.();
+    const state = ctx ? getNovaState(ctx) : null;
+    const session = state?.sessions?.find(s => s && s.id === state.activeSessionId);
+    pane.innerHTML = '';
+    if (!session || !Array.isArray(session.messages) || session.messages.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'cx-nova-empty';
+        empty.id = 'cx-nova-empty';
+        const nova = settings?.nova || NOVA_DEFAULTS;
+        const needsProfile = !nova.profileName;
+        empty.innerHTML = needsProfile
+            ? `<div class="cx-nova-empty-glyph">✴︎</div>
+               <div class="cx-nova-empty-title">Pick a connection profile</div>
+               <div class="cx-nova-empty-body">Tap the <strong>Profile</strong> pill above to choose a SillyTavern connection profile. Nova will swap into that profile for each turn and restore your original profile when done.</div>`
+            : `<div class="cx-nova-empty-glyph">✴︎</div>
+               <div class="cx-nova-empty-title">Nova is ready</div>
+               <div class="cx-nova-empty-body">Ask anything. Reads are instant; writes &amp; shell commands ask for approval first.</div>`;
+        pane.appendChild(empty);
+        return;
+    }
+    // Render tail up to the render cap.
+    const msgs = session.messages.slice(-NOVA_TRANSCRIPT_RENDER_CAP);
+    for (const m of msgs) pane.appendChild(_novaRenderMessageNode(m));
+    pane.scrollTop = pane.scrollHeight;
+}
+
+/**
+ * Append a single ad-hoc transcript line (e.g. "🔌 Switched to Foo").
+ * NOT persisted in session.messages — purely a UI hint.
+ */
+function appendNovaTranscriptLine(text, variant = 'system') {
+    const novaView = _novaContainer();
+    if (!novaView) return;
+    const pane = novaView.querySelector('#cx-nova-transcript');
+    if (!pane) return;
+    // Strip the empty-state placeholder on first append.
+    pane.querySelector('#cx-nova-empty')?.remove();
+    const node = _novaRenderMessageNode({ role: variant, content: text });
+    pane.appendChild(node);
+    pane.scrollTop = pane.scrollHeight;
+}
+
+/**
+ * Promise-based picker that reuses the cxConfirm modal shell. Returns
+ * the chosen value, or `null` if the user cancelled. Renders a list of
+ * `{ value, label, hint? }` options as radio-style rows.
+ */
+function cxPickList(title, options, { initial = null, confirmLabel = 'Choose' } = {}) {
+    return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'cx-modal-overlay';
+        let selected = initial;
+        const rowsHtml = options.length
+            ? options.map((opt, i) => {
+                const active = opt.value === selected;
+                const hint = opt.hint ? `<div class="cx-pick-hint">${escHtml(opt.hint)}</div>` : '';
+                return `<div class="cx-pick-row ${active ? 'cx-pick-active' : ''}" data-pick-value="${escAttr(String(opt.value))}" role="button" tabindex="0" aria-label="${escAttr(String(opt.label))}">
+                    <div class="cx-pick-dot"></div>
+                    <div class="cx-pick-body">
+                        <div class="cx-pick-label">${escHtml(String(opt.label))}</div>
+                        ${hint}
+                    </div>
+                </div>`;
+            }).join('')
+            : '<div class="cx-pick-empty">No options available.</div>';
+        overlay.innerHTML = `
+            <div class="cx-modal-box cx-pick-box" role="dialog" aria-modal="true" aria-labelledby="cx-modal-title">
+                <div class="cx-modal-title" id="cx-modal-title">${escHtml(String(title))}</div>
+                <div class="cx-modal-body cx-pick-list">${rowsHtml}</div>
+                <div class="cx-modal-actions">
+                    <button class="cx-modal-btn cx-modal-btn-secondary" id="cx-pick-cancel">Cancel</button>
+                    <button class="cx-modal-btn cx-modal-btn-primary" id="cx-pick-confirm">${escHtml(confirmLabel)}</button>
+                </div>
+            </div>`;
+        const close = (result) => { overlay.remove(); document.removeEventListener('keydown', onKey); resolve(result); };
+        const onKey = (e) => { if (e.key === 'Escape') close(null); };
+        const selectRow = (row) => {
+            selected = row.dataset.pickValue;
+            overlay.querySelectorAll('.cx-pick-row').forEach(r => r.classList.remove('cx-pick-active'));
+            row.classList.add('cx-pick-active');
+        };
+        overlay.querySelectorAll('.cx-pick-row').forEach(row => {
+            row.addEventListener('click', () => selectRow(row));
+            row.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+                    e.preventDefault();
+                    selectRow(row);
+                }
+            });
+        });
+        overlay.querySelector('#cx-pick-cancel').addEventListener('click', () => close(null));
+        overlay.querySelector('#cx-pick-confirm').addEventListener('click', () => close(selected));
+        document.addEventListener('keydown', onKey);
+        document.body.appendChild(overlay);
+        overlay.querySelector('#cx-pick-confirm').focus();
+    });
+}
+
+async function novaGetExecuteSlash() {
+    const ctx = getContext();
+    if (typeof ctx?.executeSlashCommandsWithOptions !== 'function') return null;
+    return async (cmd) => ctx.executeSlashCommandsWithOptions(cmd, { handleParserErrors: false, handleExecutionErrors: true });
+}
+
+async function novaPickProfile() {
+    const exec = await novaGetExecuteSlash();
+    if (!exec) { await cxAlert('This SillyTavern build does not expose executeSlashCommandsWithOptions().', 'Nova'); return; }
+    const list = await listNovaProfiles({ executeSlash: exec });
+    if (!list.ok || !list.profiles.length) {
+        await cxAlert('No connection profiles found. Create one in SillyTavern → API Connections first.', 'Nova');
+        return;
+    }
+    const options = list.profiles.map(p => ({ value: p, label: p }));
+    const chosen = await cxPickList('Connection profile', options, {
+        initial: settings.nova?.profileName || null,
+        confirmLabel: 'Use profile',
+    });
+    if (!chosen) return;
+    settings.nova.profileName = String(chosen);
+    getContext().extensionSettings[EXT] = { ...settings };
+    getContext().saveSettingsDebounced();
+    refreshNovaPills();
+    appendNovaTranscriptLine(`🔌 Profile set to ${chosen}.`, 'system');
+}
+
+async function novaPickSkill() {
+    const options = NOVA_SKILLS.map(s => ({
+        value: s.id,
+        label: `${s.icon} ${s.label}`,
+        hint: `Default tier: ${_novaTierLabel(s.defaultTier)}`,
+    }));
+    const chosen = await cxPickList('Skill', options, {
+        initial: settings.nova?.activeSkill || 'freeform',
+        confirmLabel: 'Use skill',
+    });
+    if (!chosen) return;
+    const skill = resolveNovaSkill(chosen);
+    if (!skill) return;
+    settings.nova.activeSkill = skill.id;
+    // Snap tier to the skill's default (user can escalate after).
+    if (skill.defaultTier) settings.nova.defaultTier = skill.defaultTier;
+    getContext().extensionSettings[EXT] = { ...settings };
+    getContext().saveSettingsDebounced();
+    refreshNovaPills();
+    appendNovaTranscriptLine(`✴︎ Skill set to ${skill.label} (tier: ${_novaTierLabel(settings.nova.defaultTier)}).`, 'system');
+}
+
+async function novaPickTier() {
+    const options = [
+        { value: 'read', label: 'Read', hint: 'Tools can read files, characters, worldbooks. No writes.' },
+        { value: 'write', label: 'Write', hint: 'Tools can write files + run ST slashes. Each write asks for approval.' },
+        { value: 'full', label: 'Full', hint: 'Write + shell_run. Destructive — use only if you understand what Nova may execute.' },
+    ];
+    const chosen = await cxPickList('Permission tier', options, {
+        initial: settings.nova?.defaultTier || 'read',
+        confirmLabel: 'Use tier',
+    });
+    if (!chosen) return;
+    settings.nova.defaultTier = String(chosen);
+    getContext().extensionSettings[EXT] = { ...settings };
+    getContext().saveSettingsDebounced();
+    refreshNovaPills();
+    appendNovaTranscriptLine(`🛡️ Tier set to ${_novaTierLabel(chosen)}.`, 'system');
+}
+
+/**
+ * Build the `sendRequest` function for `sendNovaTurn`. Tries the full
+ * tool-calling path (`ConnectionManagerRequestService.sendRequest`) first;
+ * falls back to `generateRaw` for text-only mode on older ST builds.
+ *
+ * Returns an async function with signature:
+ *   ({ messages, tools, tool_choice, signal }) => Promise<{ content, tool_calls }>
+ */
+function buildNovaSendRequest(ctx) {
+    const svc = ctx?.ConnectionManagerRequestService;
+    // Preferred: full chat-completion request with tools support.
+    if (svc && typeof svc.sendRequest === 'function') {
+        return async ({ messages, tools, tool_choice, signal }) => {
+            const resp = await svc.sendRequest({
+                messages,
+                tools: Array.isArray(tools) ? tools : [],
+                tool_choice,
+                signal,
+            });
+            // Normalise to { content, tool_calls } shape the dispatcher expects.
+            if (resp && typeof resp === 'object') {
+                if (resp.content !== undefined || resp.tool_calls !== undefined) return resp;
+                if (resp.message && typeof resp.message === 'object') {
+                    return { content: resp.message.content || '', tool_calls: resp.message.tool_calls || [] };
+                }
+                if (resp.choices && Array.isArray(resp.choices) && resp.choices[0]?.message) {
+                    const m = resp.choices[0].message;
+                    return { content: m.content || '', tool_calls: m.tool_calls || [] };
+                }
+            }
+            return { content: typeof resp === 'string' ? resp : '', tool_calls: [] };
+        };
+    }
+    // Fallback: `generateRaw` returns plain text — no tool_calls available.
+    if (typeof ctx?.generateRaw === 'function') {
+        return async ({ messages, signal }) => {
+            // Translate our {role, content} messages to generateRaw's
+            // {systemPrompt, prompt} shape. Keep the system concatenation
+            // for provenance; any tool/tool-result entries get flattened
+            // into the user prompt.
+            const systemParts = [];
+            const convoParts = [];
+            for (const m of (messages || [])) {
+                if (m.role === 'system') systemParts.push(m.content || '');
+                else if (m.role === 'user') convoParts.push(`User: ${m.content || ''}`);
+                else if (m.role === 'assistant') convoParts.push(`Assistant: ${m.content || ''}`);
+                else convoParts.push(`${m.role}: ${m.content || ''}`);
+            }
+            const text = await ctx.generateRaw({
+                systemPrompt: systemParts.join('\n\n'),
+                prompt: convoParts.join('\n\n'),
+                signal,
+            });
+            return { content: String(text || ''), tool_calls: [] };
+        };
+    }
+    // No sendRequest available at all — caller will bail on `no-send-request`.
+    return null;
+}
+
+/**
+ * Show / hide the in-flight UI: disable Send, reveal Cancel, dim input.
+ */
+function setNovaInFlight(inFlight) {
+    const novaView = _novaContainer();
+    if (!novaView) return;
+    const sendBtn = novaView.querySelector('#cx-nova-send');
+    const cancelBtn = novaView.querySelector('#cx-nova-cancel');
+    const input = novaView.querySelector('#cx-nova-input');
+    if (sendBtn) { sendBtn.disabled = !!inFlight; sendBtn.textContent = inFlight ? 'Thinking…' : 'Send'; }
+    if (cancelBtn) cancelBtn.classList.toggle('cx-hidden', !inFlight);
+    if (input) input.disabled = !!inFlight;
+}
+
+/**
+ * Click handler for the Nova Send button. Routes through
+ * `withNovaProfileMutex` → `sendNovaTurn`.
+ */
+async function novaHandleSend() {
+    const novaView = _novaContainer();
+    if (!novaView) return;
+    const input = novaView.querySelector('#cx-nova-input');
+    const text = String(input?.value || '').trim();
+    if (!text) return;
+
+    const ctx = getContext();
+    const nova = settings.nova || NOVA_DEFAULTS;
+
+    if (!nova.profileName) {
+        await cxAlert('Pick a connection profile first (tap the Profile pill).', 'Nova');
+        return;
+    }
+
+    const sendRequest = buildNovaSendRequest(ctx);
+    if (!sendRequest) {
+        await cxAlert('This SillyTavern build exposes neither ConnectionManagerRequestService nor generateRaw. Nova cannot dispatch a turn.', 'Nova');
+        return;
+    }
+    const textOnlyFallback = !ctx?.ConnectionManagerRequestService?.sendRequest;
+
+    const exec = await novaGetExecuteSlash();
+    if (!exec) {
+        await cxAlert('This SillyTavern build does not expose executeSlashCommandsWithOptions() for profile swap.', 'Nova');
+        return;
+    }
+
+    // Push the user message into the DOM immediately for snappy feedback,
+    // then clear the input. sendNovaTurn will persist it to the session.
+    appendNovaTranscriptLine(text, 'user-preview');
+    if (input) { input.value = ''; input.focus(); }
+
+    const { soul, memory } = await loadNovaSoulMemory();
+
+    // Build the tool handler set. Soul/memory self-edit tools are the
+    // only ones we ship handlers for today — other registered tools
+    // (fs_*, shell_*, st_*, phone_*) return { error: 'no-handler' } when
+    // dispatched without a handler, while missing tools use the
+    // dispatcher's unknown-tool failure surface.
+    const toolHandlers = buildNovaSoulMemoryHandlers({});
+
+    setNovaInFlight(true);
+    if (textOnlyFallback) {
+        appendNovaTranscriptLine('⚠︎ Text-only mode — ConnectionManagerRequestService unavailable; tool calls are disabled this turn.', 'notice');
+    }
+
+    const run = () => sendNovaTurn({
+        ctx,
+        userText: text,
+        skillId: nova.activeSkill || 'freeform',
+        profileName: nova.profileName,
+        soul,
+        memory,
+        maxToolCalls: Math.max(1, Number(nova.maxToolCalls) || NOVA_DEFAULTS.maxToolCalls),
+        turnTimeoutMs: Math.max(10000, Number(nova.turnTimeoutMs) || NOVA_DEFAULTS.turnTimeoutMs),
+        tools: textOnlyFallback ? [] : NOVA_TOOLS,
+        sendRequest,
+        executeSlash: exec,
+        isToolCallingSupported: typeof ctx?.isToolCallingSupported === 'function' ? ctx.isToolCallingSupported : undefined,
+        tier: nova.defaultTier || 'read',
+        toolHandlers,
+        confirmApproval: async ({ tool, args }) => {
+            return cxNovaApprovalModal({ tool, args, permission: tool?.permission });
+        },
+    });
+
+    let result;
+    try {
+        // Announce swap + restore around the turn body for user feedback.
+        result = await withNovaProfileMutex(async () => {
+            appendNovaTranscriptLine(`🔌 Switching to profile ${nova.profileName}…`, 'system');
+            const out = await run();
+            return out;
+        });
+    } catch (err) {
+        appendNovaTranscriptLine(`❌ Turn threw: ${String(err?.message || err)}`, 'notice');
+    } finally {
+        setNovaInFlight(false);
+    }
+
+    if (result && result.swappedProfile) {
+        appendNovaTranscriptLine(`🔌 Restored profile to ${result.swappedProfile.from || '(none)'}.`, 'system');
+    }
+    if (result && !result.ok) {
+        const reason = result.reason || 'unknown';
+        appendNovaTranscriptLine(`⚠︎ Turn failed: ${reason}${result.error ? ' — ' + result.error : ''}`, 'notice');
+    }
+    // Re-render transcript so the persisted session messages are visible.
+    renderNovaTranscript();
+}
+
+function novaHandleCancel() {
+    try { novaAbortController?.abort(new Error('user-cancel')); } catch (_) { /* noop */ }
+    appendNovaTranscriptLine('🛑 Cancelling turn…', 'notice');
+}
+
+/**
+ * Wire all Nova-view event handlers. Called from `wirePhone()`.
+ */
+function wireNovaView() {
+    const novaView = _novaContainer();
+    if (!novaView) return;
+    novaView.querySelector('#cx-nova-pill-profile')?.addEventListener('click', () => {
+        novaPickProfile().catch(err => cxAlert(String(err?.message || err), 'Nova'));
+    });
+    novaView.querySelector('#cx-nova-pill-skill')?.addEventListener('click', () => {
+        novaPickSkill().catch(err => cxAlert(String(err?.message || err), 'Nova'));
+    });
+    novaView.querySelector('#cx-nova-pill-tier')?.addEventListener('click', () => {
+        novaPickTier().catch(err => cxAlert(String(err?.message || err), 'Nova'));
+    });
+    novaView.querySelector('#cx-nova-send')?.addEventListener('click', () => {
+        novaHandleSend().catch(err => cxAlert(String(err?.message || err), 'Nova'));
+    });
+    novaView.querySelector('#cx-nova-cancel')?.addEventListener('click', () => {
+        novaHandleCancel();
+    });
+    // Enter submits; Shift+Enter = newline.
+    novaView.querySelector('#cx-nova-input')?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            novaHandleSend().catch(err => cxAlert(String(err?.message || err), 'Nova'));
+        }
+    });
+    refreshNovaPills();
+    renderNovaTranscript();
+}
+
 function wirePhone() {
     if (!phoneContainer) return;
     phoneContainer.querySelectorAll('[data-action="unlock"]').forEach(el =>
@@ -4080,6 +4591,16 @@ function wirePhone() {
         settings.autoPrivatePollEveryN = val;
         saveSettings();
     });
+    // --- Nova in-phone settings (v0.13.0) ---
+    const novaOnChange = () => {
+        saveSettings();
+        try { refreshNovaPills(); } catch (_) { /* noop */ }
+    };
+    phoneContainer.querySelector('#cx-set-nova-profile')?.addEventListener('change', novaOnChange);
+    phoneContainer.querySelector('#cx-set-nova-tier')?.addEventListener('change', novaOnChange);
+    phoneContainer.querySelector('#cx-set-nova-max-tools')?.addEventListener('change', novaOnChange);
+    phoneContainer.querySelector('#cx-set-nova-timeout')?.addEventListener('change', novaOnChange);
+    phoneContainer.querySelector('#cx-set-nova-plugin-url')?.addEventListener('change', novaOnChange);
     phoneContainer.querySelector('#cx-set-lock')?.addEventListener('change', (e) => {
         settings.showLockscreen = e.target.checked;
         saveSettings();
@@ -4378,6 +4899,10 @@ saveQuestEditor().catch(error => cxAlert(String(error?.message || error), 'Quest
         const t = now();
         phoneContainer?.querySelectorAll('#cx-clock, .cx-lock-time, .cx-home-time').forEach(el => { el.textContent = t; });
     }, CLOCK_INTERVAL_MS);
+
+    // Wire the Nova view (pills, composer, transcript). Safe to call
+    // even if the view isn't currently active.
+    try { wireNovaView(); } catch (err) { console.warn(`[${EXT}] wireNovaView failed`, err); }
 }
 
 /* ======================================================================
@@ -4765,6 +5290,218 @@ async function probeNovaBridge({
 }
 
 /* ----------------------------------------------------------------------
+   NOVA AGENT — soul.md / memory.md loader (plan §6a, §6b).
+
+   Fetches Nova's `soul.md` (persona) and `memory.md` (durable notes)
+   from the extension folder so they can be inlined into the system
+   prompt by `sendNovaTurn`. Both files are served by ST's static
+   handler at `/scripts/extensions/third-party/<EXT>/nova/*.md` — the
+   same path pattern used for `settings.html` at init time — so no
+   plugin is required for the read path. The write path (editing
+   soul/memory via `nova_write_soul` etc.) lands with Phase 6b via
+   the `fs_write` tool or ST's `/api/files/*` fallback; this helper
+   is read-only.
+
+   Contract:
+   - Never throws. A 404, network error, non-text body, or missing
+     global `fetch` resolves to an empty string for that file.
+   - Both files are fetched in parallel via `Promise.all`. A failure
+     on one does not take down the other.
+   - Result is cached in a module-level cache for
+     `NOVA_SOUL_MEMORY_TTL_MS` (5 min). `invalidateNovaSoulMemoryCache()`
+     drops the cache; callers should invoke it after a `nova_write_soul`
+     / `nova_write_memory` / "Reload soul/memory" action.
+   - `fetchImpl` / `nowImpl` are injectable so
+     `test/nova-soul-memory.test.mjs` can drive the helper without a
+     live network or real timers.
+   ---------------------------------------------------------------------- */
+
+const NOVA_SOUL_MEMORY_TTL_MS = 5 * 60_000; // 5 min
+const NOVA_SOUL_FILENAME = 'soul.md';
+const NOVA_MEMORY_FILENAME = 'memory.md';
+
+// Default URL builder — Phase 6b may override `baseUrl` to read from
+// `SillyTavern/data/<user>/user/files/nova/` via `/api/files/*` once
+// the "user-owned soul/memory" flow lands. For the default read path,
+// the extension-bundled copies are served by ST's static handler.
+function defaultNovaSoulMemoryBaseUrl() {
+    // Mirrors the settings.html path in `jQuery(async () => ...)` — uses
+    // the same `EXT` constant so a rename of the extension folder only
+    // has to happen in one place.
+    return `/scripts/extensions/third-party/${EXT}/nova`;
+}
+
+// Module-level cache. Shape: `{ result: { soul, memory }, expiresAt }` or `null` when cold.
+let _novaSoulMemoryCache = null;
+
+function invalidateNovaSoulMemoryCache() {
+    _novaSoulMemoryCache = null;
+}
+
+/**
+ * Fetch one file, coerce to a string, swallow every error. Used as the
+ * per-file primitive inside `loadNovaSoulMemory`. Never throws.
+ */
+async function _fetchNovaMarkdown(url, { fetchImpl }) {
+    const doFetch = typeof fetchImpl === 'function'
+        ? fetchImpl
+        : (typeof fetch === 'function' ? fetch : null);
+    if (!doFetch) return '';
+    let resp;
+    try {
+        resp = await doFetch(url, { method: 'GET' });
+    } catch (_) {
+        return '';
+    }
+    if (!resp || !resp.ok) return '';
+    let text;
+    try {
+        text = await resp.text();
+    } catch (_) {
+        return '';
+    }
+    return typeof text === 'string' ? text : '';
+}
+
+/**
+ * Load Nova's `soul.md` + `memory.md`. See header comment for contract.
+ *
+ * @param {object} [opts]
+ * @param {string}   [opts.baseUrl]   - URL folder containing the two files. Default: extension-bundled path.
+ * @param {function} [opts.fetchImpl] - Test-injectable `fetch` replacement.
+ * @param {function} [opts.nowImpl]   - Test-injectable `Date.now` replacement.
+ * @param {number}   [opts.ttlMs]     - Cache TTL. Default 5 min.
+ * @param {boolean}  [opts.force]     - Bypass the cache. Default false.
+ * @returns {Promise<{ soul: string, memory: string }>}
+ */
+async function loadNovaSoulMemory({
+    baseUrl,
+    fetchImpl,
+    nowImpl,
+    ttlMs = NOVA_SOUL_MEMORY_TTL_MS,
+    force = false,
+} = {}) {
+    const now = typeof nowImpl === 'function' ? nowImpl : Date.now;
+
+    if (!force && _novaSoulMemoryCache && _novaSoulMemoryCache.expiresAt > now()) {
+        return _novaSoulMemoryCache.result;
+    }
+
+    const root = String(baseUrl || defaultNovaSoulMemoryBaseUrl()).replace(/\/+$/, '');
+    const soulUrl = `${root}/${NOVA_SOUL_FILENAME}`;
+    const memoryUrl = `${root}/${NOVA_MEMORY_FILENAME}`;
+
+    // Fetch in parallel. A failure on one file must not take down the
+    // other — each primitive is independently swallowed.
+    const [soul, memory] = await Promise.all([
+        _fetchNovaMarkdown(soulUrl, { fetchImpl }),
+        _fetchNovaMarkdown(memoryUrl, { fetchImpl }),
+    ]);
+
+    const result = { soul, memory };
+    _novaSoulMemoryCache = { result, expiresAt: now() + ttlMs };
+    return result;
+}
+
+/* ----------------------------------------------------------------------
+   NOVA AGENT — tool tier + approval gate (plan §3c precursor, §5).
+
+   Pure synchronous decision helper used by the Phase 3c dispatch loop
+   BEFORE any tool handler runs. Answers two independent questions:
+
+     1. Is this tool *allowed* at the session's current tier?
+        (`tier: 'read'` blocks write + shell; `'write'` blocks shell;
+         `'full'` allows everything.)
+     2. If allowed, does the call require a user approval modal?
+        (Reads never do. Writes + shell do, unless the session has
+         pre-approved the tool via `rememberApprovalsSession`.)
+
+   Keeping these two decisions in one helper means there is exactly
+   one place the Phase 3c dispatcher calls before showing `cxConfirm`,
+   and exactly one place `test/nova-tool-gate.test.mjs` needs to
+   exhaustively cover the 3×3 matrix.
+
+   Return shape: `{ allowed: boolean, requiresApproval: boolean,
+   reason?: string }`. `reason` is only set on `allowed:false`; valid
+   values are `tier-too-low`, `unknown-permission`,
+   `missing-permission`. Callers should treat unknown reasons
+   conservatively — default to "deny and surface the reason to the
+   user" rather than trying to interpret them.
+
+   Defensive defaults:
+     - Malformed / missing `tier`   → treated as `'read'` (strictest).
+     - Malformed / missing `permission` → denied with
+       `missing-permission`. Not treated as `'read'` because an
+       unrecognised permission on a production tool is a bug, not a
+       no-op we should silently run.
+     - `rememberedApprovals` may be a `Set<string>`, array, or nullish.
+       Anything else (object, string, etc.) is ignored — the gate
+       returns `requiresApproval: true` as if no approvals were
+       remembered. This mirrors ST's permissive settings round-trip
+       where a corrupted key shouldn't brick the agent.
+   ---------------------------------------------------------------------- */
+
+const NOVA_TIERS = Object.freeze(['read', 'write', 'full']);
+const NOVA_PERMISSIONS = Object.freeze(['read', 'write', 'shell']);
+
+// Lookup table: `_NOVA_TIER_ALLOWS[tier]` is the set of permissions
+// that tier can run. Kept as plain Sets so the hot path is an O(1)
+// membership check — this helper runs once per tool_call in the
+// Phase 3c dispatch loop.
+const _NOVA_TIER_ALLOWS = {
+    read: new Set(['read']),
+    write: new Set(['read', 'write']),
+    full: new Set(['read', 'write', 'shell']),
+};
+
+function _novaRememberedApprovalsHas(container, toolName) {
+    if (!container || typeof toolName !== 'string' || !toolName) return false;
+    if (container instanceof Set) return container.has(toolName);
+    if (Array.isArray(container)) return container.includes(toolName);
+    return false;
+}
+
+/**
+ * Decide whether a tool call is (a) allowed under the current tier
+ * and (b) requires a user approval modal before running.
+ *
+ * @param {object} opts
+ * @param {'read'|'write'|'shell'} opts.permission - The tool's declared permission class.
+ * @param {'read'|'write'|'full'}  opts.tier       - The session's current tier.
+ * @param {string}                 [opts.toolName] - Tool name, used for `rememberedApprovals` lookup.
+ * @param {Set<string>|string[]|null} [opts.rememberedApprovals] - Session-scoped pre-approvals.
+ * @returns {{ allowed: boolean, requiresApproval: boolean, reason?: string }}
+ */
+function novaToolGate({ permission, tier, toolName, rememberedApprovals } = {}) {
+    const safeTier = NOVA_TIERS.includes(tier) ? tier : 'read';
+
+    // Unknown/missing permission: deny rather than silently treat as read.
+    // An unrecognised permission on a production tool is a bug, and we
+    // want it surfaced loudly in the audit log, not swallowed.
+    if (permission == null) {
+        return { allowed: false, requiresApproval: false, reason: 'missing-permission' };
+    }
+    if (!NOVA_PERMISSIONS.includes(permission)) {
+        return { allowed: false, requiresApproval: false, reason: 'unknown-permission' };
+    }
+
+    const allows = _NOVA_TIER_ALLOWS[safeTier];
+    if (!allows.has(permission)) {
+        return { allowed: false, requiresApproval: false, reason: 'tier-too-low' };
+    }
+
+    // Allowed. Now decide approval.
+    // Reads never need approval (they can't mutate state).
+    if (permission === 'read') {
+        return { allowed: true, requiresApproval: false };
+    }
+
+    // Write or shell: require approval unless pre-approved for the session.
+    const preApproved = _novaRememberedApprovalsHas(rememberedApprovals, toolName);
+    return { allowed: true, requiresApproval: !preApproved };
+}
+
+/* ----------------------------------------------------------------------
    NOVA AGENT — unified-diff preview helper (plan §4c).
 
    Pure string function used by the `fs_write` approval modal (Phase 3c)
@@ -4977,6 +5714,872 @@ function initNovaOnce(ctx) {
     state._initVersion = NOVA_INIT_VERSION;
     if (ctx?.saveMetadataDebounced) ctx.saveMetadataDebounced();
     return { ran: true, reason: 'initialised', version: NOVA_INIT_VERSION, migration };
+}
+
+/* ----------------------------------------------------------------------
+   NOVA AGENT — turn lifecycle (plan §3b).
+
+   `sendNovaTurn` is the core agent loop. It is written as a fully
+   dependency-injected helper so `test/nova-turn.test.mjs` can exercise
+   it without an ST runtime — all I/O (slash commands, LLM calls, now(),
+   signal factories) arrives via the `deps` parameter. UI wiring (the
+   phone composer → this function) lands in Phase 3c together with the
+   tool-dispatch loop and streaming; this slice ships the skeleton that
+   locks in the subtlest contract: profile snapshot + swap + restore
+   in a `try…finally` that survives errors and aborts.
+
+   Eight-step contract (see plan §3b). This slice implements 1, 2, 3, 4,
+   5, 7 (wall-clock cap), 8. Step 6 (tool_calls loop) and streaming are
+   stubs — if the LLM returns `tool_calls`, we append the assistant
+   content (if any), audit-log `tool-calls-deferred`, and hand the
+   unresolved calls back to the caller. Phase 3c replaces that stub with
+   real dispatch.
+
+   Re-entrancy: guarded by `novaTurnInFlight`. Second concurrent call
+   returns `{ ok: false, reason: 'in-flight' }` without touching state.
+   Abort: `novaAbortController` holds the controller whose `.signal` is
+   forwarded to the LLM call. Phase 3c's Cancel button calls `.abort()`.
+
+   Never throws. Errors become `{ ok: false, reason, error }`. The
+   `finally` block always restores the pre-turn profile (if a swap
+   occurred) and clears `novaTurnInFlight` / `novaAbortController`.
+
+   Return shape:
+     { ok: true, assistantMessage, toolCalls?, toolCallsDeferred?, swappedProfile }
+     { ok: false, reason, error? }
+   ---------------------------------------------------------------------- */
+
+const NOVA_DEFAULT_MAX_TOOL_CALLS = 24;
+const NOVA_DEFAULT_TURN_TIMEOUT_MS = 300_000; // 5 min wall clock
+
+// The base system prompt + tool-use contract sit here rather than in NOVA_SKILLS
+// so every skill inherits them. Phase 3c may expand the tool contract once the
+// dispatcher shape is finalised.
+const NOVA_BASE_PROMPT = [
+    'You are Nova, an interactive SillyTavern assistant living inside the',
+    'Command-X phone. Say what you are about to do in one short sentence,',
+    'then call the appropriate tool. Prefer the smallest correct edit.',
+    'Confirm destructive operations by letting the approval modal fire — do',
+    'not try to route around it.',
+].join('\n');
+
+const NOVA_TOOL_CONTRACT = [
+    'Tool-use contract:',
+    '- Call one tool at a time. Wait for the result before calling the next.',
+    '- If a tool errors, explain what went wrong and propose a recovery.',
+    '- Stop calling tools once the user\'s request is satisfied — do not',
+    '  loop for the sake of looping.',
+    '- Never invent tool names; only call tools from the provided schema.',
+].join('\n');
+
+/**
+ * Resolve the active skill definition by id. Falls back to `freeform`.
+ * Pure helper — no side effects.
+ */
+function resolveNovaSkill(skillId, skills = NOVA_SKILLS) {
+    const id = String(skillId || 'freeform');
+    return skills.find(s => s.id === id) || skills.find(s => s.id === 'freeform') || null;
+}
+
+/**
+ * Build the `messages` array fed to `sendRequest`. Pure: caller owns
+ * composing soul/memory/base/skill prompts before calling.
+ */
+function buildNovaRequestMessages({ systemPrompt, sessionMessages = [] }) {
+    const out = [];
+    if (systemPrompt) out.push({ role: 'system', content: String(systemPrompt) });
+    for (const m of sessionMessages) {
+        if (!m || typeof m !== 'object') continue;
+        if (!m.role) continue;
+        out.push({ role: String(m.role), content: String(m.content ?? '') });
+    }
+    return out;
+}
+
+/* ----------------------------------------------------------------------
+   NOVA AGENT — tool-dispatch loop (plan §3c, §3d, §4c wiring).
+
+   Pure async helper called by `sendNovaTurn` when the LLM returns
+   `tool_calls`. It owns the "assistant → tool results → re-call LLM"
+   loop until one of:
+
+     - the LLM returns an assistant message with no `tool_calls`   (normal finish)
+     - `maxToolCalls` has been reached                              (cap-hit)
+     - the abort signal fires                                       (aborted)
+
+   For each tool_call it runs, in order:
+
+     1. Resolve the tool in `toolRegistry` by name. Missing name is a
+        deny with reason `unknown-tool`. The loop still appends a
+        `role:'tool'` message with `{ error: 'unknown-tool' }` so the
+        LLM can recover.
+     2. Parse `function.arguments` as JSON. Malformed JSON is a deny
+        with reason `malformed-arguments`.
+     3. Call the injected `gate` (default: `novaToolGate`) with the
+        tool's permission + current tier + rememberedApprovals. On
+        `allowed:false`, deny with the gate's `reason`. On
+        `requiresApproval:true`, call `confirmApproval`; a falsy
+        return denies with reason `user-rejected`.
+     4. Call `handlers[name](args, { signal })`. Any thrown value is
+        caught and becomes a `role:'tool'` message with
+        `{ error: <message> }`.
+     5. Append a `role:'tool'` message with the stringified result and
+        the original `tool_call_id`. Increment the executed-call
+        counter.
+
+   Between batches, the helper calls `sendRequest({ messages, tools,
+   tool_choice, signal })` with the *accumulated* messages (including
+   every tool result just appended). The returned assistant message
+   is pushed to the working `messages` array AND to the `events`
+   output; if it carries a new `tool_calls` array, the loop iterates.
+
+   The helper MUTATES the `messages` array it is given — this is the
+   contract `sendNovaTurn` relies on to build a coherent session
+   transcript. If you want a read-only view, clone before calling.
+
+   Never throws. All failure modes resolve to one of:
+     { ok: true, rounds, toolsExecuted, toolsDenied, toolsFailed,       capHit, aborted, finalAssistant }
+     { ok: false, reason, error? }
+
+   Where `reason` ∈ 'send-failed' | 'aborted'. (Cap-hit and gate-deny
+   are NOT `ok:false` — they finish the dispatch normally with the
+   flags set, because the transcript is still valid and the user
+   should still see the partial result.)
+   ---------------------------------------------------------------------- */
+
+function _stringifyNovaToolResult(value) {
+    if (value == null) return '';
+    if (typeof value === 'string') return value;
+    try { return JSON.stringify(value); } catch (_) { return String(value); }
+}
+
+async function runNovaToolDispatch({
+    initialResponse,           // { content, tool_calls } from the first LLM call
+    messages,                  // mutable array — dispatcher appends assistant + tool results
+    toolRegistry = NOVA_TOOLS,
+    handlers = {},
+    tier = 'read',
+    rememberedApprovals = null,
+    maxToolCalls = NOVA_DEFAULT_MAX_TOOL_CALLS,
+    confirmApproval,           // async ({ tool, args, permission, toolCallId }) => boolean
+    sendRequest,               // re-used for follow-up turns
+    tools = [],                // tool schemas forwarded to follow-up sendRequest calls
+    signal,                    // AbortSignal; checked between rounds
+    gate = novaToolGate,       // DI seam for tests
+    nowImpl = Date.now,
+    onAudit,                   // (entry:{tool, argsSummary, outcome}) => void — fires per tool_call
+} = {}) {
+    if (typeof sendRequest !== 'function') {
+        return { ok: false, reason: 'no-send-request' };
+    }
+
+    const events = [];
+    let rounds = 0;
+    let toolsExecuted = 0;
+    let toolsDenied = 0;
+    let toolsFailed = 0;
+    let capHit = false;
+    let response = initialResponse;
+    let finalAssistant = null;
+
+    const audit = (tool, argsSummary, outcome) => {
+        if (typeof onAudit === 'function') {
+            try { onAudit({ tool, argsSummary, outcome }); } catch (_) { /* noop */ }
+        }
+    };
+
+    // The outer loop: one iteration per LLM round. We start by treating
+    // `initialResponse` as "round 0's response" — we didn't call the LLM
+    // here, the caller did, so we don't count it toward `rounds`.
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+        if (signal && signal.aborted) {
+            return { ok: false, reason: 'aborted' };
+        }
+
+        const assistantContent = String(response?.content ?? '');
+        const toolCalls = Array.isArray(response?.tool_calls) ? response.tool_calls : [];
+        const assistantMsg = {
+            role: 'assistant',
+            content: assistantContent,
+            ts: nowImpl(),
+        };
+        if (toolCalls.length > 0) assistantMsg.tool_calls = toolCalls;
+        messages.push(assistantMsg);
+        events.push(assistantMsg);
+        finalAssistant = assistantMsg;
+
+        // No tool_calls → LLM is done, we're done.
+        if (toolCalls.length === 0) break;
+
+        // Dispatch this round's tool calls in order. Each appends a
+        // `role:'tool'` message to `messages`.
+        for (const call of toolCalls) {
+            if (signal && signal.aborted) {
+                return { ok: false, reason: 'aborted' };
+            }
+            if (toolsExecuted >= maxToolCalls) {
+                capHit = true;
+                audit('dispatch', `executed=${toolsExecuted} cap=${maxToolCalls}`, 'cap-hit');
+                break;
+            }
+
+            const callId = String(call?.id ?? '');
+            const fn = call?.function || {};
+            const name = String(fn.name || '');
+            const rawArgs = fn.arguments;
+
+            // 1. Tool lookup.
+            const tool = toolRegistry.find(t => t && t.name === name);
+            if (!tool) {
+                toolsDenied++;
+                audit(name || '(unnamed)', '', 'denied:unknown-tool');
+                const toolMsg = {
+                    role: 'tool', tool_call_id: callId, name,
+                    content: JSON.stringify({ error: 'unknown-tool' }),
+                    ts: nowImpl(),
+                };
+                messages.push(toolMsg);
+                events.push(toolMsg);
+                continue;
+            }
+
+            // 2. Parse arguments JSON. Empty string / nullish → {}.
+            let args;
+            if (rawArgs == null || rawArgs === '') {
+                args = {};
+            } else if (typeof rawArgs === 'object') {
+                args = rawArgs;
+            } else {
+                try {
+                    args = JSON.parse(String(rawArgs));
+                } catch (_) {
+                    toolsDenied++;
+                    audit(name, 'raw-args=<unparsable>', 'denied:malformed-arguments');
+                    const toolMsg = {
+                        role: 'tool', tool_call_id: callId, name,
+                        content: JSON.stringify({ error: 'malformed-arguments' }),
+                        ts: nowImpl(),
+                    };
+                    messages.push(toolMsg);
+                    events.push(toolMsg);
+                    continue;
+                }
+            }
+
+            // 3. Gate.
+            const gateResult = gate({
+                permission: tool.permission,
+                tier,
+                toolName: name,
+                rememberedApprovals,
+            });
+            if (!gateResult.allowed) {
+                toolsDenied++;
+                audit(name, `tier=${tier}`, `denied:${gateResult.reason}`);
+                const toolMsg = {
+                    role: 'tool', tool_call_id: callId, name,
+                    content: JSON.stringify({ error: 'denied', reason: gateResult.reason }),
+                    ts: nowImpl(),
+                };
+                messages.push(toolMsg);
+                events.push(toolMsg);
+                continue;
+            }
+
+            // 4. Approval (when required).
+            if (gateResult.requiresApproval) {
+                if (typeof confirmApproval !== 'function') {
+                    // No confirmer wired → treat as rejection, never as silent approval.
+                    toolsDenied++;
+                    audit(name, `tier=${tier}`, 'denied:no-confirmer');
+                    const toolMsg = {
+                        role: 'tool', tool_call_id: callId, name,
+                        content: JSON.stringify({ error: 'denied', reason: 'no-confirmer' }),
+                        ts: nowImpl(),
+                    };
+                    messages.push(toolMsg);
+                    events.push(toolMsg);
+                    continue;
+                }
+                let approved;
+                try {
+                    approved = await confirmApproval({
+                        tool,
+                        args,
+                        permission: tool.permission,
+                        toolCallId: callId,
+                    });
+                } catch (err) {
+                    // Confirmer crashed → treat as rejection, surface in audit.
+                    toolsDenied++;
+                    audit(name, `tier=${tier}`, `denied:confirmer-error:${String(err?.message || err)}`);
+                    const toolMsg = {
+                        role: 'tool', tool_call_id: callId, name,
+                        content: JSON.stringify({ error: 'denied', reason: 'confirmer-error' }),
+                        ts: nowImpl(),
+                    };
+                    messages.push(toolMsg);
+                    events.push(toolMsg);
+                    continue;
+                }
+                if (!approved) {
+                    toolsDenied++;
+                    audit(name, `tier=${tier}`, 'denied:user-rejected');
+                    const toolMsg = {
+                        role: 'tool', tool_call_id: callId, name,
+                        content: JSON.stringify({ error: 'denied', reason: 'user-rejected' }),
+                        ts: nowImpl(),
+                    };
+                    messages.push(toolMsg);
+                    events.push(toolMsg);
+                    continue;
+                }
+            }
+
+            // 5. Run handler.
+            const handler = handlers[name];
+            if (typeof handler !== 'function') {
+                toolsFailed++;
+                audit(name, '', 'error:no-handler');
+                const toolMsg = {
+                    role: 'tool', tool_call_id: callId, name,
+                    content: JSON.stringify({ error: 'no-handler' }),
+                    ts: nowImpl(),
+                };
+                messages.push(toolMsg);
+                events.push(toolMsg);
+                continue;
+            }
+            let result;
+            try {
+                result = await handler(args, { signal });
+            } catch (err) {
+                toolsFailed++;
+                audit(name, `tier=${tier}`, `error:${String(err?.message || err)}`);
+                const toolMsg = {
+                    role: 'tool', tool_call_id: callId, name,
+                    content: JSON.stringify({ error: String(err?.message || err) }),
+                    ts: nowImpl(),
+                };
+                messages.push(toolMsg);
+                events.push(toolMsg);
+                continue;
+            }
+
+            toolsExecuted++;
+            audit(name, `tier=${tier}`, 'ok');
+            const toolMsg = {
+                role: 'tool', tool_call_id: callId, name,
+                content: _stringifyNovaToolResult(result),
+                ts: nowImpl(),
+            };
+            messages.push(toolMsg);
+            events.push(toolMsg);
+        }
+
+        if (capHit) break;
+        if (signal && signal.aborted) {
+            return { ok: false, reason: 'aborted' };
+        }
+
+        // Re-call the LLM with the accumulated messages.
+        rounds++;
+        try {
+            response = await sendRequest({
+                messages,
+                tools,
+                tool_choice: 'auto',
+                signal,
+            });
+        } catch (err) {
+            const aborted = (signal && signal.aborted) || err?.name === 'AbortError';
+            audit('send-request', `round=${rounds}`, aborted ? 'aborted' : `send-failed:${String(err?.message || err)}`);
+            return { ok: false, reason: aborted ? 'aborted' : 'send-failed', error: String(err?.message || err) };
+        }
+    }
+
+    return {
+        ok: true,
+        rounds,
+        toolsExecuted,
+        toolsDenied,
+        toolsFailed,
+        capHit,
+        aborted: false,
+        finalAssistant,
+        events,
+    };
+}
+
+/* ----------------------------------------------------------------------
+   NOVA AGENT — approval modal (plan §2c, §4c wiring).
+
+   `buildNovaApprovalModalBody` is the PURE HTML builder used by the
+   DOM wrapper `cxNovaApprovalModal`. Split so tests can assert escape
+   behaviour without spinning up JSDOM.
+
+   The modal body has three zones:
+     - intent line: "Nova wants to <permission> <toolName>"
+     - args block : pretty-printed JSON of the parsed arguments
+     - diff block : unified diff string from `buildNovaUnifiedDiff`
+                    (only for fs_write / file mutations; empty string
+                    elsewhere)
+
+   Every user-controlled string (tool name, args, diff) is escaped
+   via `escHtml`. The modal shell is added by the DOM wrapper so this
+   helper stays unit-testable.
+   ---------------------------------------------------------------------- */
+
+function _novaJsonPretty(value) {
+    try { return JSON.stringify(value, null, 2); } catch (_) { return String(value); }
+}
+
+function buildNovaApprovalModalBody({ tool, args, diffText = '', permission } = {}) {
+    const displayName = (tool && (tool.displayName || tool.name)) || 'tool';
+    const perm = String(permission || tool?.permission || 'read');
+    const permLabel = perm === 'shell' ? 'run shell command' : (perm === 'write' ? 'write' : 'read');
+    const argsJson = _novaJsonPretty(args ?? {});
+    const parts = [
+        `<div class="cx-nova-approval-intent">Nova wants to <strong>${escHtml(permLabel)}</strong>: <code>${escHtml(displayName)}</code></div>`,
+        `<div class="cx-nova-approval-label">Arguments</div>`,
+        `<pre class="cx-nova-approval-args">${escHtml(argsJson)}</pre>`,
+    ];
+    if (diffText && String(diffText).trim()) {
+        parts.push(`<div class="cx-nova-approval-label">Preview</div>`);
+        parts.push(`<pre class="cx-nova-approval-diff">${escHtml(String(diffText))}</pre>`);
+    }
+    return parts.join('\n');
+}
+
+/**
+ * In-phone approval modal for a Nova tool call. Mirrors `cxConfirm`'s
+ * DOM shape but (a) renders an HTML body (args + diff), and (b) uses
+ * the `danger` styling for write/shell permissions so the user has
+ * to intentionally click the red button. Returns Promise<boolean>.
+ *
+ * Pure presentation — all gate decisions happen upstream in the
+ * dispatcher. By the time this fires, the tool is already
+ * tier-allowed and approval is required.
+ */
+function cxNovaApprovalModal({ tool, args, diffText = '', permission, title = 'Approve tool call?' } = {}) {
+    return new Promise((resolve) => {
+        const perm = String(permission || tool?.permission || 'read');
+        const danger = perm !== 'read';
+        const bodyHtml = buildNovaApprovalModalBody({ tool, args, diffText, permission: perm });
+        const confirmLabel = perm === 'shell' ? 'Run' : (perm === 'write' ? 'Write' : 'Run');
+
+        const overlay = document.createElement('div');
+        overlay.className = 'cx-modal-overlay';
+        overlay.innerHTML = `
+        <div class="cx-modal-box cx-nova-approval" role="alertdialog" aria-modal="true" aria-labelledby="cx-modal-title" aria-describedby="cx-modal-body">
+            <div class="cx-modal-title" id="cx-modal-title">${escHtml(title)}</div>
+            <div class="cx-modal-body" id="cx-modal-body">${bodyHtml}</div>
+            <div class="cx-modal-actions">
+                <button class="cx-modal-btn cx-modal-btn-secondary" id="cx-modal-cancel">Cancel</button>
+                <button class="cx-modal-btn ${danger ? 'cx-modal-btn-danger' : 'cx-modal-btn-primary'}" id="cx-modal-confirm">${escHtml(confirmLabel)}</button>
+            </div>
+        </div>`;
+        const close = (result) => { overlay.remove(); document.removeEventListener('keydown', onKey); resolve(result); };
+        const onKey = (e) => { if (e.key === 'Escape') close(false); };
+        overlay.querySelector('#cx-modal-cancel').addEventListener('click', () => close(false));
+        overlay.querySelector('#cx-modal-confirm').addEventListener('click', () => close(true));
+        document.addEventListener('keydown', onKey);
+        document.body.appendChild(overlay);
+        // Destructive actions default to Cancel focus to prevent accidental Enter.
+        overlay.querySelector(danger ? '#cx-modal-cancel' : '#cx-modal-confirm').focus();
+    });
+}
+
+/**
+ * Extract the current profile name from the pipe returned by `/profile`
+ * (no args). ST returns the active profile name in the pipe. Returns
+ * `''` when no profile is active or the pipe is empty / non-string.
+ */
+function parseNovaProfilePipe(pipeValue) {
+    if (pipeValue == null) return '';
+    const s = String(pipeValue).trim();
+    // ST's /profile can return "None" or an empty string when no profile is
+    // selected; treat both as "no active profile" so the restore step is a
+    // no-op rather than trying to swap to a literal name of "None".
+    if (!s || s.toLowerCase() === 'none') return '';
+    return s;
+}
+
+/**
+ * Run `/profile` (no args) through the injected slash executor and return
+ * the currently-active profile name (or '' if none). Never throws —
+ * failure resolves to '' so the caller can still attempt a swap.
+ */
+async function getActiveNovaProfile({ executeSlash }) {
+    if (typeof executeSlash !== 'function') return '';
+    try {
+        const res = await executeSlash('/profile');
+        return parseNovaProfilePipe(res && res.pipe);
+    } catch (_) {
+        return '';
+    }
+}
+
+/**
+ * Parse the pipe value returned by `/profile-list` into a de-duplicated
+ * array of profile names. ST returns a JSON-serialised array; accept
+ * both a stringified array and a whitespace-separated fallback for
+ * forward-compat. Never throws — a bad pipe resolves to `[]`.
+ */
+function parseNovaProfileListPipe(pipeValue) {
+    if (pipeValue == null) return [];
+    const s = String(pipeValue).trim();
+    if (!s) return [];
+    // Preferred shape: JSON-serialised array of strings.
+    if (s.startsWith('[')) {
+        try {
+            const arr = JSON.parse(s);
+            if (Array.isArray(arr)) {
+                return Array.from(new Set(
+                    arr.map(x => String(x ?? '').trim()).filter(Boolean),
+                ));
+            }
+        } catch (_) { /* fallthrough to whitespace split */ }
+    }
+    // Fallback: newline / comma-separated.
+    return Array.from(new Set(
+        s.split(/[\n,]+/).map(x => x.trim()).filter(Boolean),
+    ));
+}
+
+/**
+ * Fetch the list of connection profiles via `/profile-list`. Returns
+ * `{ ok: true, profiles: [...] }` on success, `{ ok: false, reason }`
+ * on failure. Never throws.
+ */
+async function listNovaProfiles({ executeSlash }) {
+    if (typeof executeSlash !== 'function') {
+        return { ok: false, reason: 'no-executor', profiles: [] };
+    }
+    let res;
+    try {
+        res = await executeSlash('/profile-list');
+    } catch (err) {
+        return { ok: false, reason: 'executor-failed', error: String(err?.message || err), profiles: [] };
+    }
+    const profiles = parseNovaProfileListPipe(res && res.pipe);
+    return { ok: true, profiles };
+}
+
+/* ----------------------------------------------------------------------
+   NOVA AGENT — profile-swap mutex (plan §9).
+
+   Every concurrent caller of `sendNovaTurn` must serialise around the
+   profile slash-command pair (`/profile <target>` … restore). The mutex
+   below is a tail-chained Promise — each `withNovaProfileMutex(fn)` call
+   awaits the previous tail and replaces it with its own. Failures do
+   NOT poison the chain: the tail is always replaced with a resolved
+   sentinel in a `finally` so a rejected predecessor can't block future
+   callers.
+
+   The helper is pure and test-friendly: pass `mutex: { chain }` to run
+   in an isolated mutex instance; omitting it uses the module-level
+   chain that production callers share.
+   ---------------------------------------------------------------------- */
+
+const _novaProfileSwapMutex = { chain: Promise.resolve() };
+
+async function withNovaProfileMutex(fn, { mutex = _novaProfileSwapMutex } = {}) {
+    const prev = mutex.chain;
+    let release;
+    // Replace the tail BEFORE awaiting the predecessor so a second caller
+    // sees a tail that resolves only after WE resolve, not before.
+    mutex.chain = new Promise((resolve) => { release = resolve; });
+    try {
+        await prev.catch(() => {}); // predecessor failure must not poison us
+        return await fn();
+    } finally {
+        release();
+    }
+}
+
+/**
+ * Turn-lifecycle entry point. See header comment for the full contract.
+ *
+ * @param {object} opts
+ * @param {object} opts.ctx                    - SillyTavern context (for saveNovaState / state mutation)
+ * @param {string} opts.userText               - User message text (required, non-empty)
+ * @param {string} [opts.skillId]              - Skill id to resolve against NOVA_SKILLS. Default 'freeform'.
+ * @param {string} [opts.profileName]          - Connection profile to run under. Required for the turn to proceed.
+ * @param {string} [opts.soul]                 - soul.md contents (inlined verbatim).
+ * @param {string} [opts.memory]               - memory.md contents (tail-truncated by composeNovaSystemPrompt).
+ * @param {number} [opts.maxToolCalls]         - Cap on tool calls this turn. Default 24.
+ * @param {number} [opts.turnTimeoutMs]        - Wall-clock cap. Default 300_000.
+ * @param {Array}  [opts.tools]                - Tool schemas forwarded to `sendRequest`. Default [].
+ *
+ * Injected deps (all optional where noted):
+ * @param {function} opts.sendRequest          - ({messages, tools, tool_choice, signal}) => Promise<{content?, tool_calls?}>
+ * @param {function} [opts.executeSlash]       - (cmd:string) => Promise<{pipe?:string}> — for /profile snapshot/restore
+ * @param {function} [opts.isToolCallingSupported] - () => boolean; when defined and returns false we bail.
+ * @param {function} [opts.nowImpl]            - () => number; defaults to Date.now
+ */
+async function sendNovaTurn({
+    ctx,
+    userText,
+    skillId = 'freeform',
+    profileName = '',
+    soul = '',
+    memory = '',
+    maxToolCalls = NOVA_DEFAULT_MAX_TOOL_CALLS,
+    turnTimeoutMs = NOVA_DEFAULT_TURN_TIMEOUT_MS,
+    tools = [],
+    sendRequest,
+    executeSlash,
+    isToolCallingSupported,
+    nowImpl = Date.now,
+    // Phase 3c dispatch-loop deps (all optional; when absent the turn
+    // behaves exactly like the Phase 3b deferred stub so existing tests
+    // stay green). Providing `toolHandlers` + `confirmApproval` activates
+    // the full loop.
+    tier = 'read',
+    rememberedApprovals = null,
+    toolHandlers = null,
+    confirmApproval = null,
+} = {}) {
+    // --- Step 0: re-entrancy guard ---
+    if (novaTurnInFlight) {
+        return { ok: false, reason: 'in-flight' };
+    }
+
+    // --- Step 1: precondition validation ---
+    const text = String(userText ?? '').trim();
+    if (!text) return { ok: false, reason: 'empty-text' };
+    if (typeof sendRequest !== 'function') {
+        return { ok: false, reason: 'no-send-request' };
+    }
+    if (typeof isToolCallingSupported === 'function' && !isToolCallingSupported()) {
+        return { ok: false, reason: 'no-tool-calling' };
+    }
+    const targetProfile = String(profileName || '').trim();
+    if (!targetProfile) return { ok: false, reason: 'no-profile' };
+
+    const skill = resolveNovaSkill(skillId);
+    if (!skill) return { ok: false, reason: 'no-skill' };
+
+    // Resolve state + active session up front so "turn in flight" + the
+    // audit-log entries always land on the right session even if a later
+    // step aborts.
+    const state = getNovaState(ctx);
+    let session = state.sessions.find(s => s && s.id === state.activeSessionId);
+    if (!session) {
+        session = createNovaSession(state, {
+            skill: skill.id,
+            tier: skill.defaultTier || 'read',
+            profileName: targetProfile,
+        });
+    }
+
+    // --- Step 2: push user message, persist ---
+    const turnStartedAt = nowImpl();
+    session.messages.push({ role: 'user', content: text, ts: turnStartedAt });
+    session.updatedAt = turnStartedAt;
+    saveNovaState(ctx);
+
+    // --- Set up cancellation + wall-clock timeout ---
+    // `novaAbortController` is the canonical handle; Phase 3c's Cancel
+    // button reads the module-level binding and calls `.abort()` on it.
+    let timeoutHandle;
+    const controller = new AbortController();
+    novaAbortController = controller;
+    novaTurnInFlight = true;
+    if (turnTimeoutMs > 0 && turnTimeoutMs < Infinity) {
+        timeoutHandle = setTimeout(() => {
+            try { controller.abort(new Error('turn-timeout')); } catch (_) { /* noop */ }
+        }, turnTimeoutMs);
+    }
+
+    let swappedFrom = '';
+    let swapPerformed = false;
+
+    try {
+        // --- Step 3: profile snapshot + swap ---
+        if (typeof executeSlash === 'function') {
+            swappedFrom = await getActiveNovaProfile({ executeSlash });
+            // Skip swap if already on the target profile — avoids a noisy
+            // slash round-trip and preserves whatever chat state the user
+            // already had active.
+            if (swappedFrom !== targetProfile) {
+                try {
+                    await executeSlash(`/profile ${targetProfile}`);
+                    swapPerformed = true;
+                } catch (err) {
+                    appendNovaAuditLog(state, {
+                        tool: 'profile-swap',
+                        argsSummary: `to=${targetProfile}`,
+                        outcome: `error:${String(err?.message || err)}`,
+                    });
+                    saveNovaState(ctx);
+                    return { ok: false, reason: 'profile-swap-failed', error: String(err?.message || err) };
+                }
+            }
+        }
+
+        // --- Step 4: build messages ---
+        const systemPrompt = composeNovaSystemPrompt({
+            basePrompt: NOVA_BASE_PROMPT,
+            skillPrompt: skill.systemPrompt || '',
+            soul,
+            memory,
+            toolContract: NOVA_TOOL_CONTRACT,
+        });
+        const messages = buildNovaRequestMessages({
+            systemPrompt,
+            sessionMessages: session.messages,
+        });
+
+        // --- Step 5: call LLM ---
+        let response;
+        try {
+            response = await sendRequest({
+                messages,
+                tools: Array.isArray(tools) ? tools : [],
+                tool_choice: 'auto',
+                signal: controller.signal,
+            });
+        } catch (err) {
+            // Distinguish abort from other failures so the caller (and tests)
+            // can render the right UI affordance.
+            const aborted = controller.signal?.aborted || err?.name === 'AbortError';
+            const reason = aborted ? 'aborted' : 'send-failed';
+            appendNovaAuditLog(state, {
+                tool: 'send-request',
+                argsSummary: `skill=${skill.id} profile=${targetProfile} msgs=${messages.length}`,
+                outcome: `${reason}:${String(err?.message || err)}`,
+            });
+            saveNovaState(ctx);
+            return { ok: false, reason, error: String(err?.message || err) };
+        }
+
+        // --- Step 6: tool_calls dispatch (Phase 3c) ---
+        const assistantContent = String(response?.content ?? '');
+        const toolCalls = Array.isArray(response?.tool_calls) ? response.tool_calls : [];
+
+        // Dispatcher activates when `toolHandlers` is provided. The dispatcher
+        // handles the "approval required but no confirmer wired" case
+        // internally by denying with reason `no-confirmer` — callers that want
+        // Phase 3b's deferred behaviour simply omit `toolHandlers`.
+        const dispatchActive = toolCalls.length > 0
+            && toolHandlers && typeof toolHandlers === 'object';
+
+        if (dispatchActive) {
+            const dispatchResult = await runNovaToolDispatch({
+                initialResponse: { content: assistantContent, tool_calls: toolCalls },
+                messages,
+                toolRegistry: NOVA_TOOLS,
+                handlers: toolHandlers,
+                tier,
+                rememberedApprovals,
+                maxToolCalls,
+                confirmApproval,
+                sendRequest,
+                tools,
+                signal: controller.signal,
+                nowImpl,
+                onAudit: (entry) => {
+                    appendNovaAuditLog(state, entry);
+                },
+            });
+
+            if (!dispatchResult.ok) {
+                // Persist any events the dispatcher already emitted before
+                // the error so the transcript reflects what really happened.
+                // `events` is the append-only list of messages the
+                // dispatcher added this turn (assistant rounds + tool
+                // results), in order.
+                for (const ev of (dispatchResult.events || [])) {
+                    session.messages.push(ev);
+                }
+                session.updatedAt = nowImpl();
+                saveNovaState(ctx);
+                return {
+                    ok: false,
+                    reason: dispatchResult.reason,
+                    error: dispatchResult.error,
+                };
+            }
+
+            // Append every event the dispatcher produced to the session.
+            for (const ev of dispatchResult.events) {
+                session.messages.push(ev);
+            }
+            session.updatedAt = nowImpl();
+            saveNovaState(ctx);
+
+            return {
+                ok: true,
+                assistantMessage: dispatchResult.finalAssistant,
+                toolsExecuted: dispatchResult.toolsExecuted,
+                toolsDenied: dispatchResult.toolsDenied,
+                toolsFailed: dispatchResult.toolsFailed,
+                rounds: dispatchResult.rounds,
+                capHit: dispatchResult.capHit,
+                swappedProfile: swapPerformed ? { from: swappedFrom, to: targetProfile } : null,
+            };
+        }
+
+        // --- Fallback: Phase 3b deferred behaviour (no dispatcher wired) ---
+        const assistantMessage = {
+            role: 'assistant',
+            content: assistantContent,
+            ts: nowImpl(),
+        };
+        if (toolCalls.length > 0) {
+            // Record the raw call shapes so the caller can replay them.
+            assistantMessage.tool_calls = toolCalls;
+            appendNovaAuditLog(state, {
+                tool: 'tool-calls',
+                argsSummary: `count=${toolCalls.length} cap=${maxToolCalls}`,
+                outcome: 'deferred-no-dispatcher',
+            });
+        }
+        session.messages.push(assistantMessage);
+        session.updatedAt = assistantMessage.ts;
+        saveNovaState(ctx);
+
+        return {
+            ok: true,
+            assistantMessage,
+            toolCalls,
+            toolCallsDeferred: toolCalls.length > 0,
+            swappedProfile: swapPerformed ? { from: swappedFrom, to: targetProfile } : null,
+        };
+    } finally {
+        // --- Step 8: always restore profile + clear turn state ---
+        if (timeoutHandle !== undefined) {
+            try { clearTimeout(timeoutHandle); } catch (_) { /* noop */ }
+        }
+        // Order matters: restore the profile BEFORE clearing the turn-state
+        // flags. A second turn waiting on the re-entrancy guard must not
+        // see `inFlight: false` until we're fully back on the user's
+        // original profile.
+        if (swapPerformed && typeof executeSlash === 'function') {
+            // `swappedFrom` may be empty when the user had no active profile
+            // before the turn — we can't restore "no profile" via a slash
+            // (ST has no `/profile` clear syntax), so we simply leave
+            // Nova's profile active. The user's next non-Nova turn picks
+            // up whatever profile their workflow selects.
+            try {
+                if (swappedFrom) {
+                    await executeSlash(`/profile ${swappedFrom}`);
+                }
+            } catch (err) {
+                appendNovaAuditLog(state, {
+                    tool: 'profile-restore',
+                    argsSummary: `to=${swappedFrom}`,
+                    outcome: `error:${String(err?.message || err)}`,
+                });
+                saveNovaState(ctx);
+            }
+        }
+        novaTurnInFlight = false;
+        novaAbortController = null;
+    }
 }
 
 /* ----------------------------------------------------------------------
@@ -5294,6 +6897,57 @@ const NOVA_TOOLS = [
             additionalProperties: false,
         },
     },
+    // --- Nova self-edit tools (plan §6b) -----------------------------
+    // Soul + memory live under the extension's `nova/` folder. Reads
+    // re-use `loadNovaSoulMemory` (force-refresh); writes go through the
+    // plugin `fs_write` route under the hood. Every write MUST invalidate
+    // the in-memory soul/memory cache so the next turn sees fresh text.
+    {
+        name: 'nova_read_soul', displayName: 'Read Nova soul', permission: 'read', backend: 'phone',
+        description: 'Read Nova\'s soul.md verbatim. Soul is Nova\'s voice/persona and persists across chats.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+    },
+    {
+        name: 'nova_write_soul', displayName: 'Write Nova soul', permission: 'write', backend: 'phone',
+        description: 'Replace Nova\'s soul.md with the provided content. Use sparingly — this changes Nova\'s voice.',
+        parameters: {
+            type: 'object',
+            properties: {
+                content: { type: 'string' },
+            },
+            required: ['content'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'nova_read_memory', displayName: 'Read Nova memory', permission: 'read', backend: 'phone',
+        description: 'Read Nova\'s memory.md verbatim. Memory is Nova\'s long-term scratchpad across chats.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+    },
+    {
+        name: 'nova_append_memory', displayName: 'Append Nova memory', permission: 'write', backend: 'phone',
+        description: 'Append a new entry to the end of Nova\'s memory.md. Prefer this over overwrite.',
+        parameters: {
+            type: 'object',
+            properties: {
+                entry: { type: 'string' },
+            },
+            required: ['entry'],
+            additionalProperties: false,
+        },
+    },
+    {
+        name: 'nova_overwrite_memory', displayName: 'Overwrite Nova memory', permission: 'write', backend: 'phone',
+        description: 'Replace Nova\'s memory.md with the provided content. Destructive — prefer nova_append_memory.',
+        parameters: {
+            type: 'object',
+            properties: {
+                content: { type: 'string' },
+            },
+            required: ['content'],
+            additionalProperties: false,
+        },
+    },
 ];
 
 const NOVA_TOOL_NAMES = new Set(NOVA_TOOLS.map(t => t.name));
@@ -5397,9 +7051,138 @@ const NOVA_SKILLS = [
     },
 ];
 
-/* ======================================================================
-   SETTINGS
-   ====================================================================== */
+/* ----------------------------------------------------------------------
+   NOVA AGENT — soul/memory self-edit tool handlers (plan §6b).
+
+   `buildNovaSoulMemoryHandlers` is a pure factory that returns the 5
+   `nova_read_soul` / `nova_write_soul` / `nova_read_memory` /
+   `nova_append_memory` / `nova_overwrite_memory` tool handlers.
+
+   Contract for every handler:
+   - Returns a plain JSON-serialisable object on success.
+   - NEVER throws; errors resolve to `{ error: <string> }` so the
+     dispatch loop can surface them back to the LLM per plan §3d.
+   - Writes ALWAYS call `invalidateCache()` so the next turn's
+     `loadNovaSoulMemory` re-reads fresh content.
+   - Writes go through the server plugin `POST /fs/write` route.
+     When the plugin is unreachable, the handler returns
+     `{ error: 'nova-bridge-unreachable', ... }` — the LLM can then
+     explain the issue to the user.
+
+   Injected deps (all optional; defaults fall back to module globals):
+     - `fetchImpl`        : fetch-shaped function (default: global `fetch`)
+     - `loadSoulMemory`   : `loadNovaSoulMemory`-shaped function
+     - `invalidateCache`  : `invalidateNovaSoulMemoryCache`-shaped function
+     - `pluginBaseUrl`    : `settings.nova.pluginBaseUrl` default
+     - `soulPath`         : relative path under bridge root (default `nova/soul.md`)
+     - `memoryPath`       : relative path under bridge root (default `nova/memory.md`)
+   ---------------------------------------------------------------------- */
+
+/**
+ * POST to `<pluginBaseUrl>/fs/write` with `{ path, content }`. Shared
+ * primitive used by soul/memory write handlers. Never throws.
+ *
+ * Returns `{ ok: true, path }` on 2xx, or `{ error: '<reason>' }` otherwise.
+ */
+async function _novaBridgeWrite({ pluginBaseUrl, path, content, fetchImpl }) {
+    const doFetch = typeof fetchImpl === 'function'
+        ? fetchImpl
+        : (typeof fetch === 'function' ? fetch : null);
+    if (!doFetch) return { error: 'no-fetch' };
+    const base = String(pluginBaseUrl || NOVA_DEFAULTS.pluginBaseUrl).replace(/\/+$/, '');
+    const url = `${base}/fs/write`;
+    let resp;
+    try {
+        resp = await doFetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path, content, overwrite: true, createParents: true }),
+        });
+    } catch (err) {
+        return { error: 'nova-bridge-unreachable', message: String(err?.message || err) };
+    }
+    if (!resp || !resp.ok) {
+        let text = '';
+        try { text = await resp.text(); } catch (_) { /* noop */ }
+        return { error: 'nova-bridge-error', status: resp?.status || 0, body: String(text).slice(0, 400) };
+    }
+    return { ok: true, path };
+}
+
+/**
+ * Build the 5 nova_* soul/memory tool handlers. Returns `{ name: handler }`
+ * map compatible with the `toolHandlers` argument of `sendNovaTurn`.
+ */
+function buildNovaSoulMemoryHandlers({
+    fetchImpl,
+    loadSoulMemory,
+    invalidateCache,
+    pluginBaseUrl,
+    soulPath = 'nova/soul.md',
+    memoryPath = 'nova/memory.md',
+} = {}) {
+    const load = typeof loadSoulMemory === 'function' ? loadSoulMemory : loadNovaSoulMemory;
+    const invalidate = typeof invalidateCache === 'function' ? invalidateCache : invalidateNovaSoulMemoryCache;
+    const base = pluginBaseUrl || (typeof settings !== 'undefined' && settings?.nova?.pluginBaseUrl) || NOVA_DEFAULTS.pluginBaseUrl;
+
+    return {
+        nova_read_soul: async () => {
+            try {
+                const { soul } = await load({ force: true });
+                return { content: String(soul || ''), bytes: String(soul || '').length };
+            } catch (err) {
+                return { error: String(err?.message || err) };
+            }
+        },
+        nova_read_memory: async () => {
+            try {
+                const { memory } = await load({ force: true });
+                return { content: String(memory || ''), bytes: String(memory || '').length };
+            } catch (err) {
+                return { error: String(err?.message || err) };
+            }
+        },
+        nova_write_soul: async ({ content } = {}) => {
+            if (typeof content !== 'string') return { error: 'content must be a string' };
+            const res = await _novaBridgeWrite({ pluginBaseUrl: base, path: soulPath, content, fetchImpl });
+            if (res.ok) {
+                try { invalidate(); } catch (_) { /* noop */ }
+                return { ok: true, path: soulPath, bytes: content.length };
+            }
+            return res;
+        },
+        nova_append_memory: async ({ entry } = {}) => {
+            if (typeof entry !== 'string') return { error: 'entry must be a string' };
+            if (!entry.trim()) return { error: 'entry must be non-empty' };
+            // Read-modify-write under `force:true` so we don't append to a
+            // stale cached copy. Note: not race-safe — acceptable because
+            // all writes funnel through the single-turn dispatcher.
+            let existing = '';
+            try {
+                const cur = await load({ force: true });
+                existing = String(cur.memory || '');
+            } catch (_) { /* start from empty */ }
+            const nextContent = existing.endsWith('\n') || existing === ''
+                ? existing + entry + (entry.endsWith('\n') ? '' : '\n')
+                : existing + '\n' + entry + (entry.endsWith('\n') ? '' : '\n');
+            const res = await _novaBridgeWrite({ pluginBaseUrl: base, path: memoryPath, content: nextContent, fetchImpl });
+            if (res.ok) {
+                try { invalidate(); } catch (_) { /* noop */ }
+                return { ok: true, path: memoryPath, appended: entry.length, bytes: nextContent.length };
+            }
+            return res;
+        },
+        nova_overwrite_memory: async ({ content } = {}) => {
+            if (typeof content !== 'string') return { error: 'content must be a string' };
+            const res = await _novaBridgeWrite({ pluginBaseUrl: base, path: memoryPath, content, fetchImpl });
+            if (res.ok) {
+                try { invalidate(); } catch (_) { /* noop */ }
+                return { ok: true, path: memoryPath, bytes: content.length };
+            }
+            return res;
+        },
+    };
+}
 
 function loadSettings() {
     const ctx = getContext();
@@ -5442,6 +7225,18 @@ function loadSettings() {
     if (mapN) mapN.value = Math.max(1, Number(settings.mapInjectEveryN) || 3);
     const autoPollN = document.getElementById('cx_ext_auto_private_poll_n');
     if (autoPollN) autoPollN.value = Math.max(0, Number(settings.autoPrivatePollEveryN) || 0);
+    // --- Nova settings (v0.13.0) ---
+    const nova = settings.nova || NOVA_DEFAULTS;
+    const novaProfile = document.getElementById('cx_nova_profile');
+    if (novaProfile) novaProfile.value = String(nova.profileName || '');
+    const novaTier = document.getElementById('cx_nova_default_tier');
+    if (novaTier) novaTier.value = String(nova.defaultTier || 'read');
+    const novaMax = document.getElementById('cx_nova_max_tool_calls');
+    if (novaMax) novaMax.value = Math.max(1, Number(nova.maxToolCalls) || NOVA_DEFAULTS.maxToolCalls);
+    const novaTimeout = document.getElementById('cx_nova_turn_timeout_ms');
+    if (novaTimeout) novaTimeout.value = Math.max(10000, Number(nova.turnTimeoutMs) || NOVA_DEFAULTS.turnTimeoutMs);
+    const novaBase = document.getElementById('cx_nova_plugin_base_url');
+    if (novaBase) novaBase.value = String(nova.pluginBaseUrl || NOVA_DEFAULTS.pluginBaseUrl);
 }
 
 function saveSettings() {
@@ -5463,6 +7258,27 @@ function saveSettings() {
     // cx_ext_auto_private_poll_n = ST settings panel; cx-set-auto-poll-n = in-phone settings view
     const autoPollNRaw = Number(document.getElementById('cx_ext_auto_private_poll_n')?.value ?? document.getElementById('cx-set-auto-poll-n')?.value);
     settings.autoPrivatePollEveryN = Number.isFinite(autoPollNRaw) && autoPollNRaw >= 0 ? Math.floor(autoPollNRaw) : (settings.autoPrivatePollEveryN || 0);
+    // --- Nova settings (v0.13.0) ---
+    settings.nova = settings.nova || { ...NOVA_DEFAULTS };
+    const novaProfileRaw = document.getElementById('cx_nova_profile')?.value ?? document.getElementById('cx-set-nova-profile')?.value;
+    if (novaProfileRaw !== undefined) settings.nova.profileName = String(novaProfileRaw || '').trim();
+    const novaTierRaw = document.getElementById('cx_nova_default_tier')?.value ?? document.getElementById('cx-set-nova-tier')?.value;
+    if (novaTierRaw !== undefined && ['read', 'write', 'full'].includes(String(novaTierRaw))) {
+        settings.nova.defaultTier = String(novaTierRaw);
+    }
+    const novaMaxRaw = Number(document.getElementById('cx_nova_max_tool_calls')?.value ?? document.getElementById('cx-set-nova-max-tools')?.value);
+    if (Number.isFinite(novaMaxRaw) && novaMaxRaw >= 1) {
+        settings.nova.maxToolCalls = Math.min(100, Math.floor(novaMaxRaw));
+    }
+    const novaTimeoutRaw = Number(document.getElementById('cx_nova_turn_timeout_ms')?.value ?? document.getElementById('cx-set-nova-timeout')?.value);
+    if (Number.isFinite(novaTimeoutRaw) && novaTimeoutRaw >= 10000) {
+        settings.nova.turnTimeoutMs = Math.min(3600000, Math.floor(novaTimeoutRaw));
+    }
+    const novaBaseRaw = document.getElementById('cx_nova_plugin_base_url')?.value ?? document.getElementById('cx-set-nova-plugin-url')?.value;
+    if (novaBaseRaw !== undefined) {
+        const trimmed = String(novaBaseRaw || '').trim();
+        settings.nova.pluginBaseUrl = trimmed || NOVA_DEFAULTS.pluginBaseUrl;
+    }
     const ctx = getContext();
     ctx.extensionSettings[EXT] = { ...settings };
     ctx.saveSettingsDebounced();
@@ -5483,7 +7299,7 @@ jQuery(async () => {
 
         loadSettings();
         refreshPrivatePhonePrompt();
-        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_contacts_every_n, #cx_ext_quests_every_n, #cx_ext_auto_private_poll_n, #cx_ext_track_locations, #cx_ext_auto_register_places, #cx_ext_show_trails, #cx_ext_map_every_n').on('change', () => {
+        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_contacts_every_n, #cx_ext_quests_every_n, #cx_ext_auto_private_poll_n, #cx_ext_track_locations, #cx_ext_auto_register_places, #cx_ext_show_trails, #cx_ext_map_every_n, #cx_nova_profile, #cx_nova_default_tier, #cx_nova_max_tool_calls, #cx_nova_turn_timeout_ms, #cx_nova_plugin_base_url').on('change', () => {
             saveSettings();
             if (settings.enabled) {
                 createPanel();
@@ -5500,6 +7316,45 @@ jQuery(async () => {
                 clearQuestPrompt();
                 clearMapPrompt();
                 refreshPrivatePhonePrompt();
+            }
+            // Nova changes don't require a phone rebuild, but pills should
+            // re-render to pick up the new profile / tier labels.
+            try { refreshNovaPills(); } catch (_) { /* noop */ }
+        });
+
+        $('#cx_nova_install_preset').on('click', async () => {
+            const btn = document.getElementById('cx_nova_install_preset');
+            if (!btn) return;
+            const originalText = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = 'Installing…';
+            try {
+                // Read the bundled preset JSON and POST it to /api/presets/save-openai.
+                const resp = await fetch(`/scripts/extensions/third-party/${EXT}/presets/openai/Command-X.json`);
+                if (!resp.ok) {
+                    await cxAlert('Bundled preset file not found. Check the extension install.', 'Nova');
+                    return;
+                }
+                const preset = await resp.json();
+                // Best-effort install: use the documented ST slash command.
+                if (typeof ctx?.executeSlashCommandsWithOptions === 'function') {
+                    // The /preset slash only selects by name; actual preset-save
+                    // in ST is done through the UI or direct file write. We
+                    // offer the user a text prompt they can paste for now, and
+                    // log the JSON to console so a power-user can persist it.
+                    console.log(`[${EXT}] Command-X preset JSON:`, preset);
+                    await cxAlert(
+                        'Preset JSON loaded and logged to DevTools console. To install it permanently: open SillyTavern → API Connections → Preset settings → Import, and paste the JSON from the console.',
+                        'Nova preset',
+                    );
+                } else {
+                    await cxAlert('Slash executor unavailable — preset logged to console.', 'Nova');
+                }
+            } catch (err) {
+                await cxAlert(`Preset install failed: ${err?.message || err}`, 'Nova');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = originalText;
             }
         });
 

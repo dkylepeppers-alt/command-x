@@ -77,6 +77,232 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-24 — Next-session hand-off: v0.13.0 "Nova goes live" (UI wiring + Phase 2c/6b/7/9/10)
+
+**Scope of this PR:** Nova's engine was already built and tested, but its UI was inert (controls `disabled`, no pill wiring, no composer handlers). This PR wires the engine to the view end-to-end and adds the remaining missing glue. Version bumped `0.12.0` → `0.13.0` in both `manifest.json` and `index.js` (the `VERSION` constant + the wiring test that enforces their agreement).
+
+**What shipped (checklist):**
+- ✅ **Phase 2c — UI wiring.** `wireNovaView()` attaches all handlers; `wirePhone()` calls it on every rebuild. Composer, Send, Cancel, three pills all interactive. Enter-to-send (Shift+Enter = newline). In-flight UI swaps placeholder to "Thinking…", shows Cancel, disables input. Empty-state setup card rendered when no profile is picked.
+- ✅ **Transcript rendering.** `renderNovaTranscript()` draws from `session.messages`; `appendNovaTranscriptLine(text, kind)` for ad-hoc lines (`🔌 swap` / `⚠︎ notice` / `🛑 cancel` / user-preview).
+- ✅ **Pill pickers.** Generic `cxPickList({ title, items, current })` modal + three Nova wrappers: `novaPickProfile` probes `/profile-list` at click time; `novaPickSkill` uses `NOVA_SKILLS`; `novaPickTier` offers read / write / full. Each persists to `settings.nova.*` and feedback-logs to transcript. Rows have `role="button"` + `tabindex="0"` **and** keyboard handlers (Enter / Space / Spacebar) — do NOT drop the keyboard handler; it was added after a PR review.
+- ✅ **Profile handling (Phase 9).** `listNovaProfiles` + `parseNovaProfileListPipe` (JSON + newline/comma fallback + dedup). `withNovaProfileMutex` is tail-chained and non-poisoning — any rejected task does not poison the chain. `novaHandleSend` serialises **all** turns through the module-level mutex so a rapid-fire user can't interleave profile swaps with in-flight turns.
+- ✅ **Phase 6b — soul/memory self-edit tools.** Five new `NOVA_TOOLS` entries (`nova_read_soul`, `nova_write_soul`, `nova_read_memory`, `nova_append_memory`, `nova_overwrite_memory`) + `buildNovaSoulMemoryHandlers({ baseUrl?, fetchImpl?, nowImpl?, invalidate? })` factory. Writes POST to `<pluginBaseUrl>/fs/write`; the soul/memory cache is invalidated **only on success**. `nova_append_memory` read-modify-writes with single-trailing-newline discipline (so appending never produces `\n\n\nfoo`). 21 new tests in `nova-self-edit-tools.test.mjs`.
+- ✅ **Phase 7 — settings.** New Nova block in `settings.html` (profile / tier / max-tools / timeout / plugin URL / install-preset). Mirror in-phone `NOVA` section. `loadSettings` / `saveSettings` accept **both** ID sets (settings-panel + in-phone IDs) so editing in either place persists.
+- ✅ **`buildNovaSendRequest(ctx)` adapter.** Prefers `ConnectionManagerRequestService.sendRequest`; falls back to `generateRaw` in **text-only mode** (tool calls disabled, notice posted to transcript).
+- ✅ **CodeQL remediation.** Consolidated the duplicate `escAttr` helpers — the prior one didn't escape apostrophes. The kept version adds `'` → `&#39;` to its replacement set. All dynamic HTML **attribute** interpolations in the v0.13.0 wire-up use `escAttr`; text contexts still use `escHtml`. Don't regress this.
+- ✅ **PR-review follow-ups (2f59808):**
+  - `turnTimeoutMs` clamp floor raised from 1000 → **10000** in **both** `novaHandleSend` (turn dispatch) and `loadSettings` (settings panel display). This matches the settings-UI `min="10000"` and the `saveSettings` validation contract. If you ever see `Math.max(1000, ...)` near `turnTimeoutMs` again, it's a regression.
+  - `cxPickList` rows now have a `keydown` handler (Enter / Space / Spacebar) via a shared `selectRow(row)` helper, making `role="button"` + `tabindex="0"` keyboard-accessible.
+  - Corrected the comment in `novaHandleSend` to describe the dispatcher's two failure surfaces accurately: **`no-handler`** = registered tool without a dispatch handler; **`unknown-tool`** = tool name not in the registry.
+
+**369/369 tests pass** (+48 new across `nova-self-edit-tools.test.mjs` [21], `nova-profile-swap.test.mjs` [16], `nova-ui-wiring.test.mjs` [11]; scaffolding test updated to reflect the view going live). CodeQL clean; Code Review clean.
+
+**Notes for future agents:**
+- **`wireNovaView()` is idempotent and rebuild-safe.** It is called on every `rebuildPhone()` → `wirePhone()` pass. Previous DOM references are stale after a rebuild; always re-query inside `wireNovaView`. Don't cache Nova DOM elements at the module level.
+- **The module-level `novaProfileMutex` is the single serialisation point for ALL Nova work that touches profiles.** Don't bypass it. If you add a new code path that swaps profiles or runs a turn, route it through `withNovaProfileMutex(() => …)`. Tail-chained so a thrown handler does NOT poison the next queued work. Covered by `nova-profile-swap.test.mjs`.
+- **`appendNovaTranscriptLine(text, kind)` is the ONLY way to add ad-hoc lines.** It handles the transcript-scroll-to-bottom + kind-specific styling. Don't write directly to the transcript container.
+- **`NOVA_TOOLS` is the registry; `toolHandlers` is the per-turn dispatch map.** A tool registered in `NOVA_TOOLS` with no handler in the dispatch map returns `{ error: 'no-handler' }` — this is by design so rolling out a new tool is a two-step process (register first, wire a handler later).
+- **Soul/memory cache invalidation is success-gated.** If the `fs/write` POST fails, the cache is NOT invalidated, so the next read returns the pre-write content — which is correct, because the write didn't land. Do not move `invalidate()` above the success check in `buildNovaSoulMemoryHandlers`.
+- **`cxPickList` keyboard handler uses a shared `selectRow(row)` helper.** If you touch the click or keydown paths, keep them behaviourally identical — selection must update `selected` AND toggle the `cx-pick-active` class on exactly one row.
+- **`escAttr` vs `escHtml` is load-bearing.** Attribute interpolations (anything inside `"..."` in an HTML attribute, especially `title="…"` / `data-…="…"` / `aria-label="…"`) **must** use `escAttr` so apostrophes encode. CodeQL will flag regressions. Text content inside tags still uses `escHtml`.
+- **Inline-copy test convention continues to apply.** `nova-self-edit-tools.test.mjs`, `nova-profile-swap.test.mjs`, and `nova-ui-wiring.test.mjs` inline-copy the helpers they test. If you edit the source, edit the inline copy.
+
+**What to do next (in order — each is a single reviewable PR):**
+1. **Phase 8 — `nova-agent-bridge` server plugin.** The dispatcher + tier gate + approval modal + self-edit tool handlers are all live and will start working the moment the plugin answers real data. Ship plugin source under `server-plugin/nova-agent-bridge/` with install instructions. Route list: `/manifest.version`, `/profile-list`, `/fs/read`, `/fs/write`, `/fs/stat`, `/fs/list`, `/shell/run`.
+2. **Real handlers for `fs_*` / `shell_*` / `st_*` / `phone_*` tools.** Currently only the five soul/memory tools have handlers; other registered tools return `{ error: 'no-handler' }`. Each new handler must be pure-ish (DI for `fetchImpl` / `nowImpl`), must NOT reach into the DOM, and must return a stable-shape result or `{ error }`.
+3. **Rich per-turn tool-call cards.** Today, tool calls render as `role:'tool'` text in the transcript. A richer card (collapsible, with args summary + result preview + audit link) would go far; the data is already in `session.messages` + the audit log.
+4. **Diff previews in the approval modal.** The dispatcher passes `{ tool, args, permission, toolCallId }` to `confirmApproval` but NOT `diffText`. For `fs_write`, the composer should `fs_read` the old content first, build the diff via `buildNovaUnifiedDiff(oldContent, args.content, { isNewFile })`, then pass the result into `cxNovaApprovalModal`. Keep this in the composer — don't teach the dispatcher to read the filesystem.
+
+**Hard constraints still active (copy-forward):**
+- `EXT === "command-x"` with a hyphen. Bracket-access only on `extension_settings`.
+- `VERSION` in `index.js` must equal `manifest.json#version`. The wiring test enforces this — don't bump one without the other.
+- `turnTimeoutMs` clamp floor is **10000** everywhere (UI `min`, `saveSettings` validation, `loadSettings` display, `novaHandleSend` dispatch).
+- `buildNovaUnifiedDiff` auto-detect is nullish-only. Pass `isNewFile: true` explicitly when wiring `fs_write` previews against `fs_stat` → ENOENT.
+- `normalizeNovaPath` containment predicate: `relNative === '..' || startsWith('..' + path.sep)`.
+- `novaToolGate` — closed-enum `reason`: `tier-too-low` / `unknown-permission` / `missing-permission`.
+- `runNovaToolDispatch` — closed-enum `reason` on `ok:false`: `aborted` / `send-failed` / `no-send-request`. Tool-error reasons (inside `role:'tool'` content): `unknown-tool` / `malformed-arguments` / `denied` (+ sub-reason) / `no-handler` / handler-stringified-message.
+- Soul/memory cache invalidation is success-gated in `buildNovaSoulMemoryHandlers`.
+- `escAttr` for HTML **attribute** interpolations (escapes `&<>"'`). `escHtml` for text content. Do not use `escHtml` in attributes; CodeQL will flag it.
+- `cxPickList` rows must have BOTH click and keydown handlers. Don't regress the keyboard-accessibility fix.
+- Run tests via `node --test test/helpers.test.mjs test/nova-*.test.mjs` (explicit filenames). **369/369** is the current baseline.
+
+**Validation this sprint:**
+- `node --check index.js` clean.
+- `node --test test/helpers.test.mjs test/nova-*.test.mjs` → **369/369 pass** (+48 new; baseline was 321).
+- CodeQL clean. Code Review clean.
+
+### 2026-04-23 (late evening) — Next-session hand-off: after Phase 3c proper (dispatch loop + approval modal)
+
+**Scope of this PR:** Phase 3c core landed. `sendNovaTurn` now runs a full tool-dispatch loop when `toolHandlers` is passed; absent it, the Phase 3b deferred-stub behaviour is preserved so prior tests stay green. Added:
+
+- `runNovaToolDispatch({ initialResponse, messages, toolRegistry, handlers, tier, rememberedApprovals, maxToolCalls, confirmApproval, sendRequest, tools, signal, gate, nowImpl, onAudit })` — pure async multi-round loop. Mutates `messages` with every assistant + `role:'tool'` message it emits, returns `{ ok, rounds, toolsExecuted, toolsDenied, toolsFailed, capHit, aborted, finalAssistant, events }`. 22 assertions in `test/nova-tool-dispatch.test.mjs`.
+- `buildNovaApprovalModalBody({ tool, args, diffText, permission })` — pure HTML body builder. All user-controlled strings escaped via `escHtml`. 18 assertions in `test/nova-approval-modal.test.mjs`.
+- `cxNovaApprovalModal({ tool, args, diffText, permission, title })` — DOM wrapper reusing `.cx-modal-overlay` + new `.cx-nova-approval` / `.cx-nova-approval-*` styles in `style.css`. Destructive permissions (write/shell) use `cx-modal-btn-danger` and default focus to Cancel.
+- Wired `sendNovaTurn` with four new opt params: `tier`, `rememberedApprovals`, `toolHandlers`, `confirmApproval`. When present, the dispatcher activates and the return shape changes to include `{ toolsExecuted, toolsDenied, toolsFailed, rounds, capHit }` instead of `{ toolCalls, toolCallsDeferred }`.
+
+**Full suite: 321/321 pass (+40 new across the two test files).** Baseline was 281.
+
+**Closed-enum failure contract for the dispatcher.** Every failure mode resolves to one of:
+- A `role:'tool'` message with `{ error: <kind>, reason?: <code> }` (LLM can recover and try again). Kinds: `unknown-tool`, `malformed-arguments`, `denied` (+ reason: `tier-too-low` / `unknown-permission` / `missing-permission` / `user-rejected` / `no-confirmer` / `confirmer-error`), `no-handler`, or the stringified exception message.
+- `{ ok: false, reason }` where `reason ∈ 'aborted' | 'send-failed' | 'no-send-request'`. The partial transcript is still available to the caller via the mutated `messages` array AND the returned `events` list — `sendNovaTurn` uses `events` to persist the partial session on error.
+
+Cap-hit and gate-deny are NOT `ok:false` — the turn finishes normally with the flags set. Rationale: the user should still see the partial result, and the LLM has already been told via `role:'tool'` that the denied call failed.
+
+**Why `toolHandlers` gate-activates the dispatcher, not `confirmApproval`.** Early draft activated only when BOTH were present, then fell back to deferred behaviour. Simpler to activate on `toolHandlers` alone: the dispatcher handles "approval required but no confirmer wired" internally by denying with `no-confirmer`. This means a caller that wants a read-only turn can pass `toolHandlers` without `confirmApproval` and any write call will cleanly fail-closed instead of accidentally running.
+
+**Why the confirmer throw branch denies instead of propagating.** `confirmApproval` is an async UI call; if the modal infrastructure is broken, we do NOT want the tool to execute, and we do NOT want the turn to crash outright (the audit log and transcript would be lost). Denying with `confirmer-error` gives the LLM a chance to apologise and stop, and the user still gets a coherent transcript. Test `treats a throwing confirmer as a rejection (not a crash)` locks this in.
+
+**Dispatcher MUTATES `messages`.** This is intentional and contractual. `sendNovaTurn` builds a `messages` array via `buildNovaRequestMessages`, hands it to the dispatcher, and reads the new tail via `dispatchResult.events` to append to `session.messages` and persist. If Phase 3c's composer wants a read-only snapshot, it MUST clone before calling. Don't change this to return-a-new-array without also updating `sendNovaTurn`'s session-persistence path.
+
+**`runNovaToolDispatch` does NOT re-push the initial assistant message from `initialResponse` if it came from `sendRequest` already**... wait, actually it does. That's a subtle invariant to remember: `sendNovaTurn` calls `sendRequest` once itself, then hands the response to the dispatcher, which pushes an assistant message for that initial response AND for every subsequent round's response. Therefore `sendNovaTurn` must NOT also push the initial assistant message itself before handing off — the dispatcher handles it. This is how the code is currently wired; tests will fail noisily if someone breaks this.
+
+**Notes for future agents:**
+- **`cxNovaApprovalModal` is not unit-tested** — DOM behaviour (focus, Esc handler, button clicks) would need JSDOM. The pure `buildNovaApprovalModalBody` carries the escape-safety contract. If you touch the DOM wrapper, manually test in ST that Esc cancels, Cancel gets default focus on write/shell, and overlay tears down on both paths.
+- **`.cx-nova-approval` widens the modal to 520px.** This is safe at phone widths (380px × scale) because the modal overlay centers and the box is scrollable. If phone scaling changes, revisit.
+- **Dispatcher does not currently surface diff previews to the confirmer.** `confirmApproval` receives `{ tool, args, permission, toolCallId }` but not `diffText` — the composer in Phase 3c must build the diff itself (via `buildNovaUnifiedDiff(oldContent, args.content)` after an `fs_read`) and pass the result into `cxNovaApprovalModal`. Rationale: the dispatcher shouldn't reach into the filesystem to pre-fetch old content — that's the composer's job and it keeps the dispatcher pure.
+- **Inline-copy tests now carry 5+ symbols each.** When editing `runNovaToolDispatch` or `buildNovaApprovalModalBody`, also update the inline copies at the top of `test/nova-tool-dispatch.test.mjs` and `test/nova-approval-modal.test.mjs`. Source-shape tests will catch drift in the parameter list and in file ordering, but NOT in helper logic.
+- **`audit` callback signature: `(entry:{tool, argsSummary, outcome}) => void`.** `sendNovaTurn` wraps `appendNovaAuditLog(state, entry)`. One audit entry per tool_call outcome is guaranteed — the `audit coverage` test locks this in. Don't suppress audits on failure paths; they're the only record of what Nova tried.
+
+**What to do next (in order — each is a single reviewable PR):**
+1. **Phase 2c — composer UI wiring.** Now that `sendNovaTurn` + the dispatcher are real, the Nova composer can call them. This is where the textarea, Send button, Cancel button (→ `novaAbortController.abort()`), and profile/skill pickers live. Touches `wirePhone` + a bunch of DOM — bigger review surface than this PR.
+2. **Phase 6b — self-edit tools** (`nova_read_soul`, `nova_write_soul`, `nova_read_memory`, `nova_append_memory`, `nova_overwrite_memory`). Each write handler must call `invalidateNovaSoulMemoryCache()` after success. These are the first REAL tool handlers — a thin wrapper over the `fs_write` plugin call (when available) with a `POST /api/files/*` fallback.
+3. **Phase 7 — settings surface.** Profile picker from `/profile-list`, tier radio (use `NOVA_TIERS`), caps, plugin URL, "Install preset" button.
+4. **Phase 9 — bridge fs handlers.** The server-plugin stubs currently return `501`. The dispatcher + tier gate + approval modal are all ready; they'll just start working once the plugin answers real data.
+
+**Hard constraints still active (copy-forward):**
+- `EXT === "command-x"` with a hyphen. Bracket-access only on `extension_settings`.
+- `buildNovaUnifiedDiff` auto-detect is nullish-only. Pass `isNewFile: true` explicitly when wiring `fs_write` previews against `fs_stat` → ENOENT.
+- `normalizeNovaPath` containment predicate: `relNative === '..' || startsWith('..' + path.sep)`.
+- Plugin `/manifest.version` comes from `package.json` via `resolvePluginVersion()`.
+- `novaToolGate` — closed-enum `reason`: `tier-too-low` / `unknown-permission` / `missing-permission`.
+- `runNovaToolDispatch` — closed-enum `reason` on `ok:false`: `aborted` / `send-failed` / `no-send-request`. Tool-error reasons (inside `role:'tool'` content): `unknown-tool` / `malformed-arguments` / `denied` (+ sub-reason) / `no-handler` / handler-stringified-message.
+- Inline-copy test convention: when editing helpers in `index.js`, edit the matching inline copies in `test/nova-*.test.mjs`. Multiple test files now carry inline copies of the same symbols — keep ALL in lockstep.
+- Run tests via `node --test test/helpers.test.mjs test/nova-*.test.mjs` (explicit filenames).
+
+**Validation this sprint:**
+- `node --check index.js` clean.
+- `node --test test/helpers.test.mjs test/nova-*.test.mjs` → **321/321 pass** (+40 new; baseline was 281).
+- No new event listeners, no new settings, no new init paths. New DOM is modal-only (inert until `cxNovaApprovalModal` is called from Phase 2c).
+
+### 2026-04-23 (evening) — Next-session hand-off: after Phase 3c precursor (tier + approval gate)
+
+**Scope of this PR (adds to the same branch as the Phase 6a loader):** one new pure helper slice for the Phase 3c dispatch loop. Added `novaToolGate({ permission, tier, toolName, rememberedApprovals })` to `index.js` NOVA AGENT section, placed between `loadNovaSoulMemory` and `buildNovaUnifiedDiff`. Supporting pieces: `NOVA_TIERS` + `NOVA_PERMISSIONS` frozen enums, `_NOVA_TIER_ALLOWS` lookup table (Sets for O(1) checks), `_novaRememberedApprovalsHas` container helper. New `test/nova-tool-gate.test.mjs` (26 assertions across 6 suites). Full suite **281/281 pass** (+26 vs prior 255).
+
+**What this ships (and what remains for Phase 3c):**
+- ✅ Closed-enum decision contract: return `{ allowed, requiresApproval, reason? }`. `reason` values are a closed set: `tier-too-low`, `unknown-permission`, `missing-permission`. The Phase 3c dispatcher should branch on these and surface them verbatim in the audit log — don't map them to generic "denied" strings.
+- ✅ Defensive defaults: missing `permission` → denied (`missing-permission`, not "read"). Missing / malformed `tier` → falls back to strictest (`'read'`). Malformed `rememberedApprovals` (object / string / number / Symbol) is ignored — the gate returns `requiresApproval: true` as if nothing were remembered.
+- ✅ Two independent decisions in one call: tier gate AND approval gate. Design rationale: Phase 3c's dispatch loop needs both before it decides whether to `cxConfirm` — splitting into two helpers would force every caller to sequence them in the same order, and the tests would have to re-assert "approval is never requested for a tier-denied tool" at every call site. Folding both into one decision was the right trade-off; the 3×3 matrix test locks it in.
+- ✅ `toolName` + empty-string toolName defeat the `rememberedApprovals` bypass. Both tests `missing toolName defeats the remembered-approvals bypass` and `empty-string toolName defeats the remembered-approvals bypass` lock this in. Rationale: an LLM could send a tool_call with an empty/missing `function.name` and a matching entry could exist in the set; we want that to re-confirm, not silently run.
+- ⏳ **Not wired from `sendNovaTurn` yet.** Phase 3c replaces the `toolCallsDeferred` branch with a real dispatch loop that calls `novaToolGate` per tool_call, routes through `cxConfirm` when `requiresApproval`, and emits one audit entry per gate decision. Don't wire this from anywhere else — the gate is meant to run exactly once per tool_call, right before approval.
+- ⏳ **`rememberedApprovals` storage shape for Phase 3c.** The plan says `rememberApprovalsSession: false` is a boolean setting in `settings.nova`, but the per-session remembered-tool-names list lives elsewhere. Phase 3c should store it at `ctx.chatMetadata[EXT].nova.sessions[activeSessionId].rememberedApprovals = Set | string[]`. The gate already accepts either shape.
+
+**Notes for future agents:**
+- **Enum additions are breaking.** `NOVA_TIERS` and `NOVA_PERMISSIONS` are frozen and the gate branches on exact membership. If Phase 4/5 adds a new permission class (e.g. `'network'`), update BOTH enums, `_NOVA_TIER_ALLOWS`, AND the inline-copy in `test/nova-tool-gate.test.mjs` or the matrix test silently stops covering it. The `NOVA_TOOLS coverage` test auto-detects new permissions in the registry and fails loudly if they're missing from `NOVA_PERMISSIONS` — don't remove it.
+- **`_NOVA_TIER_ALLOWS` uses Sets, not arrays.** The hot path is `allows.has(permission)` which runs once per tool_call in the dispatch loop. If you swap to arrays for "simplicity" you'll take an `O(n)` hit at a site that already has an LLM round-trip in the critical path; negligible in practice but the convention is set — keep the Sets.
+- **Why approval is "false" on tier-denied tools, not "true".** A denied tool never runs, so asking the user to approve it would be wrong. The gate contract is: `requiresApproval: true` means "run the cxConfirm and, if approved, execute the tool." On a denied call, nothing executes regardless of the user's answer. Test `tier-denied tools never need approval` locks this in.
+- **Inline-copy test convention strikes again.** `test/nova-tool-gate.test.mjs` inline-copies `novaToolGate` + `NOVA_TIERS` + `NOVA_PERMISSIONS` + `_NOVA_TIER_ALLOWS` + `_novaRememberedApprovalsHas`. If you edit the production helper, edit the inline copy too, or the tests silently test the wrong function.
+- **Source-shape tests pin the ordering.** The gate must live between `loadNovaSoulMemory` and `buildNovaUnifiedDiff`. If you reorganise the NOVA AGENT section, update `gate helper lives between soul/memory loader and diff helper` to reflect the new ordering.
+
+**What to do next (in order — each is a single reviewable PR):**
+1. **Phase 3c — tool handler dispatch loop + approval modal DOM.** Now has all its pure helpers shipped (`buildNovaUnifiedDiff`, `loadNovaSoulMemory`, `novaToolGate`, `composeNovaSystemPrompt`, `buildNovaRequestMessages`). The loop: for each tool_call, resolve to `NOVA_TOOLS` entry → call `novaToolGate` → on `allowed:false` skip with audit entry → on `requiresApproval:true` call `cxConfirm` with `buildNovaUnifiedDiff` preview for `fs_write` → on approve, call handler → append `role:'tool'` message → re-call `sendRequest`. Enforce `maxToolCalls` cap with one final audit entry on hit. Also the phase that finally consumes `probeNovaBridge`.
+2. **Phase 2c — approval modal DOM shell + connection-profile picker + skill picker.** Must land alongside 3c (3c's `cxConfirm` call site needs the diff-renderer pane). Use `cxConfirm`, never native.
+3. **Phase 6b — self-edit tools** (`nova_read_soul`, `nova_write_soul`, `nova_read_memory`, `nova_append_memory`, `nova_overwrite_memory`). Each write handler must call `invalidateNovaSoulMemoryCache()` after success.
+4. **Phase 7 — settings surface.** Profile picker from `/profile-list`, tier radio (use `NOVA_TIERS`), caps, plugin URL, "Install preset" button.
+
+**Hard constraints still active (copy-forward):**
+- `EXT === "command-x"` with a hyphen. Bracket-access only on `extension_settings`.
+- `buildNovaUnifiedDiff` auto-detect is nullish-only. Pass `isNewFile: true` explicitly when wiring `fs_write` previews against `fs_stat` → ENOENT.
+- `normalizeNovaPath` containment predicate: `relNative === '..' || startsWith('..' + path.sep)`.
+- Plugin `/manifest.version` comes from `package.json` via `resolvePluginVersion()`.
+- Inline-copy test convention: when editing a helper in `index.js`, edit the matching inline copy in `test/nova-*.test.mjs`. `test/nova-tool-gate.test.mjs` inline-copies **five** symbols; keep them in lockstep.
+- Run tests via `node --test test/helpers.test.mjs test/nova-*.test.mjs` (explicit filenames).
+
+**Validation this sprint:**
+- `node --check index.js` clean.
+- `node --test test/helpers.test.mjs test/nova-*.test.mjs` → **281/281 pass** (+26 new gate tests; baseline was 255).
+- No new DOM, no new LLM calls, no new event listeners, no new settings. Pure decision helper + enums.
+
+### 2026-04-23 — Next-session hand-off: after Phase 6a soul/memory loader
+
+**Scope of this PR:** Phase 6a (read path). Added `loadNovaSoulMemory(...)` pure helper to `index.js` NOVA AGENT section, placed between the `probeNovaBridge` block and the `buildNovaUnifiedDiff` block. Supporting pieces: `NOVA_SOUL_MEMORY_TTL_MS = 5 * 60_000`, `NOVA_SOUL_FILENAME`, `NOVA_MEMORY_FILENAME`, `defaultNovaSoulMemoryBaseUrl()`, `_fetchNovaMarkdown()` per-file primitive, `invalidateNovaSoulMemoryCache()`. New `test/nova-soul-memory.test.mjs` (16 assertions). Full suite **255/255 pass** (+16 vs prior 239).
+
+**What §6a ships (and what remains):**
+- ✅ Pure DI helper (`{ baseUrl, fetchImpl, nowImpl, ttlMs, force }`) that never throws. 404 / network error / decode error / non-string body all coerce to an empty string for that file. Both files fetched in parallel via `Promise.all`; a failure on one does not take down the other.
+- ✅ Module-level cache with TTL (5 min default) + explicit invalidation. **Failure results are cached too** — otherwise a missing `soul.md` would cause the composer to hot-loop fetch on every turn. If that ever becomes undesirable (e.g. user drops the file in live), Phase 6b's "Reload soul/memory" button must call `invalidateNovaSoulMemoryCache()`.
+- ✅ `defaultNovaSoulMemoryBaseUrl()` uses `EXT` interpolation so an extension-folder rename only lives in one place (matches the pattern `settings.html` already uses at init time).
+- ✅ Starter content (`nova/soul.md`, `nova/memory.md`) was already in the repo from an earlier phase; §6d checkboxes now ticked to reflect reality.
+- ⏳ **Not yet wired from Nova init.** `sendNovaTurn` already accepts `soul` / `memory` parameters (added in Phase 3b). Phase 3c's composer wiring is the first caller — it should `await loadNovaSoulMemory({ fetchImpl: fetch })` then forward the result. Don't call it from `initNovaOnce` — the read is lazy by design (5-min TTL handles the steady state).
+- ⏳ **Not yet invalidated on self-edit.** The `nova_write_soul` / `nova_overwrite_memory` tool handlers (Phase 6b) must call `invalidateNovaSoulMemoryCache()` after a successful write so the next turn picks up the change.
+
+**Notes for future agents:**
+- **Failure caching is the right default.** The test `caches failure results too` locks this in. Rationale: `loadNovaSoulMemory` runs once per turn in the Phase 3c path; if `soul.md` is missing, re-hitting a 404 every turn is waste. The TTL (5 min) bounds the staleness for users who drop a new file. If you ever relax this, update the test and document the change in this memory file.
+- **`_fetchNovaMarkdown` is the per-file primitive** — it's the one place that knows how to coerce non-text bodies. `loadNovaSoulMemory` only orchestrates the two parallel calls + caches. Keep them separate; Phase 6b's `nova_read_soul` tool handler will call `_fetchNovaMarkdown` directly with a per-file URL.
+- **`fetchImpl` / `nowImpl` injection is mandatory for tests.** The production path falls through to global `fetch` / `Date.now`. The test file uses a small `makeFetchMock` factory that records `calls[]` for assertion — reuse the pattern if you add more fetch-backed helpers.
+- **Cache shape is `{ result, expiresAt }` or `null`.** Matches the `_novaBridgeProbeCache` convention in `probeNovaBridge`. If Phase 6b adds a separate "user-owned soul/memory" read path (under `SillyTavern/data/<user>/user/files/nova/`), keep them on the same cache key — the baseUrl isn't in the key, so switching `baseUrl` between calls within the TTL returns the first URL's cached result. That matches the probe's semantics and is the right trade-off for the expected usage (users pick a root and stick with it).
+- **Don't merge `loadNovaSoulMemory` into `sendNovaTurn` or `initNovaOnce`.** It's a single-purpose pure helper. The Phase 3c composer calls it; nobody else does. Wiring it into init would force the fetch at chat-change time, which is the wrong timing (users may never open Nova in a given chat).
+- **Source-text tests are brittle by design.** `test/nova-soul-memory.test.mjs` asserts the loader lives strictly between `probeNovaBridge` and `buildNovaUnifiedDiff` (both already had this relative position for §4f / §4c). If you reorganise the section, keep the ordering or update both relative-position asserts.
+
+**What to do next (in order — each is a single reviewable PR):**
+1. **Phase 3c — tool handler dispatch + approval modal DOM.** Still the biggest remaining slice. Replace the `toolCallsDeferred` branch in `sendNovaTurn` with a real dispatch loop. Gate Write/Full tool calls on a `cxConfirm` approval modal using `buildNovaUnifiedDiff` (§4c) for `fs_write`. This is the phase that consumes `probeNovaBridge` (§4f) AND `loadNovaSoulMemory` (§6a) — the composer passes the loader result into `sendNovaTurn`'s `soul` / `memory` args.
+2. **Phase 2c — approval modal DOM + connection-profile picker + skill picker.** Lands alongside 3c since the dispatch loop needs the approval modal.
+3. **Phase 6b — self-edit tools** (`nova_write_soul`, `nova_append_memory`, `nova_overwrite_memory`). Each handler must call `invalidateNovaSoulMemoryCache()` after a successful write.
+4. **Phase 7 — settings surface.** Profile picker, tier radio, caps, plugin URL, "Install preset" button.
+
+**Hard constraints still active (copy-forward):**
+- `EXT === "command-x"` with a hyphen. Bracket-access only on `extension_settings`.
+- `buildNovaUnifiedDiff` auto-detect is nullish-only. Pass `isNewFile: true` explicitly when wiring `fs_write` previews against `fs_stat` → ENOENT.
+- `normalizeNovaPath` containment predicate: `relNative === '..' || startsWith('..' + path.sep)`.
+- Plugin `/manifest.version` comes from `package.json` via `resolvePluginVersion()`.
+- Inline-copy test convention: when editing a helper in `index.js`, edit the matching inline copy in `test/nova-*.test.mjs` or tests silently test the wrong function. `test/nova-soul-memory.test.mjs` inline-copies `loadNovaSoulMemory` + `_fetchNovaMarkdown` + `invalidateNovaSoulMemoryCache` via a `makeCapsule()` closure (needed so the module-level `_novaSoulMemoryCache` binding has per-test isolation — reusing a single capsule would leak cache across tests).
+- Run tests via `node --test test/helpers.test.mjs test/nova-*.test.mjs` (explicit filenames, not `'test/*.test.mjs'`).
+
+**Validation this sprint:**
+- `node --check index.js` clean.
+- `node --test test/helpers.test.mjs test/nova-*.test.mjs` → **255/255 pass** (+16 new soul/memory tests; baseline was 239).
+- No new DOM, no new LLM calls, no new event listeners. Cache invalidation is explicit (callers opt in) rather than tied to `CHAT_CHANGED` — soul/memory are extension-bundled, not per-chat.
+
+### 2026-04-23 — Next-session hand-off: after Phase 3b turn-lifecycle skeleton
+
+**Scope of this PR:** Phase 3b skeleton. Added `sendNovaTurn` to the NOVA AGENT section of `index.js` (dependency-injected async helper that never throws), plus four small supporting pure helpers: `resolveNovaSkill`, `buildNovaRequestMessages`, `parseNovaProfilePipe`, `getActiveNovaProfile`. Added `NOVA_BASE_PROMPT`, `NOVA_TOOL_CONTRACT`, `NOVA_DEFAULT_MAX_TOOL_CALLS`, `NOVA_DEFAULT_TURN_TIMEOUT_MS` constants. New test file `test/nova-turn.test.mjs` (23 assertions). Full suite: **239/239 pass** (+23 vs baseline 216).
+
+**What §3b actually ships (and what it defers):**
+- ✅ Precondition validation (empty text, missing `sendRequest`, `isToolCallingSupported()=false`, blank profile, unknown skill) — all return `{ ok:false, reason }` before mutating any state.
+- ✅ User + assistant message push into the active session (auto-created if none) with `saveNovaState` after each push.
+- ✅ Profile snapshot → swap → restore, all inside `try…finally`. Swap failure returns `profile-swap-failed` early; restore failure is audit-logged but never masks the primary turn result. Skips the swap round-trip when the target profile is already active.
+- ✅ `AbortController` wired to `novaAbortController`. Wall-clock cap = `turnTimeoutMs` → `setTimeout` → `controller.abort('turn-timeout')`. The `clearTimeout` in `finally` is load-bearing — don't drop it or a cancelled turn keeps a timer alive.
+- ✅ `novaTurnInFlight` re-entrancy guard: second concurrent call returns `{ ok:false, reason:'in-flight' }` without stacking controllers. Locked in by a test that suspends the first turn via an unresolved promise.
+- ⏳ **Streaming + real tool-call dispatch loop → Phase 3c.** If `sendRequest` returns `tool_calls`, we store them on the assistant message, audit-log `tool-calls-deferred`, and return `{ ok:true, toolCallsDeferred:true, toolCalls }`. Phase 3c replaces that stub with real dispatch without changing the outer return contract.
+- ⏳ `ConnectionManagerRequestService` vs `generateRaw` probe stays in the caller. This helper takes any Promise-returning `sendRequest({messages, tools, tool_choice, signal}) → {content?, tool_calls?}`.
+
+**Notes for future agents:**
+- **Dependency injection is the testability contract.** `sendNovaTurn` reads nothing from module scope for I/O — `sendRequest`, `executeSlash`, `isToolCallingSupported`, `nowImpl` are all parameters. The caller (Phase 3c composer wiring) will bind them to `ctx.ConnectionManagerRequestService.sendRequest`, `ctx.executeSlashCommandsWithOptions`, `ctx.isToolCallingSupported`, and `Date.now` respectively. **Don't turn these into module-scope reads "for convenience"** — the mock pattern in `test/nova-turn.test.mjs` depends on them staying injectable. Module state IS read for the re-entrancy guard (`novaTurnInFlight` / `novaAbortController`); that's the one intentional global-state touchpoint.
+- **`executeSlash` abstraction shape: `(cmd:string) => Promise<{pipe?:string}>`.** This matches ST's `ctx.executeSlashCommandsWithOptions(cmd)` return shape. When wiring from the caller, pass `cmd => ctx.executeSlashCommandsWithOptions(cmd)` — don't spread options.
+- **"None" / "" from `/profile` both mean "no active profile".** `parseNovaProfilePipe` normalises both to `''`. If `swappedFrom === ''` after the snapshot, the `finally` restore is skipped (ST has no `/profile` clear syntax). This is called out in a comment; don't remove it — switching back to "no profile" via a literal name of `None` would cause a confusing slash error.
+- **Return-shape contract.** On success: `{ ok:true, assistantMessage, toolCalls, toolCallsDeferred, swappedProfile }`. On failure: `{ ok:false, reason, error? }`. `reason` values currently in use: `in-flight`, `empty-text`, `no-send-request`, `no-tool-calling`, `no-profile`, `no-skill`, `profile-swap-failed`, `aborted`, `send-failed`. Phase 3c should treat these as a closed enum — add new reasons rather than overloading existing ones.
+- **Audit log is append-only and never throws.** `appendNovaAuditLog` is called synchronously after `saveNovaState` — if you add new audit entries, keep the ordering (mutate → audit → save). Outcomes used by 3b: `send-failed:<msg>`, `aborted:<msg>`, `error:<msg>` (profile-swap / profile-restore), `deferred-to-phase-3c` (tool-calls). Phase 3c should keep these strings stable for future log-query features.
+- **`resolveNovaSkill` falls back to `'freeform'` silently.** Unknown skill ids don't error — they just land on the free-form skill. When §7b lands the skill picker, make sure it shows the effective skill in the UI (not just the requested id) so users see the fallback.
+- **Don't add `throw` statements to `sendNovaTurn`.** The caller (composer UI) will rely on it always resolving. The test `restores profile even when sendRequest throws` proves the try/finally handles the one place an `await` can explode — add new `await` points inside the same try.
+- **Source-shape test is intentionally brittle in `test/nova-turn.test.mjs`.** It asserts `novaTurnInFlight = false` AND `novaAbortController = null` both live inside the `finally` block. If you refactor the cleanup into a helper, update those two regex assertions to match the new location.
+
+**What to do next (in order — each is a single reviewable PR):**
+1. **Phase 3c — tool handler dispatch + approval modal DOM.** Replace the `toolCallsDeferred` branch in `sendNovaTurn` with a real dispatch loop: for each tool_call, look up the entry in `NOVA_TOOLS`, gate Write/Full on a `cxConfirm` approval modal (use `buildNovaUnifiedDiff` from §4c for `fs_write`), run the handler, append a `role:'tool'` message with the result, re-call `sendRequest`. Bump `novaToolRegistryVersion` when the bridge-probe result flips present/absent. This is the phase that finally consumes `probeNovaBridge` (§4f). Enforce `maxToolCalls` here — emit an audit entry + break the loop on cap hit.
+2. **Phase 2c — approval modal DOM + connection-profile picker + skill picker.** Can land alongside 3c since the dispatch loop needs the approval modal. Use `cxConfirm` never native `confirm`. `buildNovaUnifiedDiff` output should render in a `<pre>` inside the modal body.
+3. **Phase 6a/6b — fetch + cache soul.md/memory.md on init; add Soul/Memory editor to in-phone Settings.** Small and independent. Once this lands, the `soul`/`memory` parameters to `sendNovaTurn` become real non-empty strings.
+4. **Phase 7 — settings surface.** Profile picker, tier radio, caps, plugin URL, "Install preset" button. Gates all Nova UI.
+
+**Hard constraints still active (copy-forward):**
+- `EXT === "command-x"` with a hyphen. Bracket-access only on `extension_settings`.
+- `buildNovaUnifiedDiff` auto-detect is nullish-only. Pass `isNewFile: true` explicitly when wiring `fs_write` previews against `fs_stat` → ENOENT.
+- `normalizeNovaPath` containment predicate: `relNative === '..' || startsWith('..' + path.sep)`.
+- Plugin `/manifest.version` comes from `package.json` via `resolvePluginVersion()`.
+- Inline-copy test convention: when editing a helper in `index.js`, edit the matching inline copy in `test/nova-*.test.mjs` or tests silently test the wrong function. `test/nova-turn.test.mjs` inline-copies **eight** helpers (`getNovaState`, `saveNovaState`, `createNovaSession`, `appendNovaAuditLog`, `composeNovaSystemPrompt`, `resolveNovaSkill`, `buildNovaRequestMessages`, `parseNovaProfilePipe`) plus `sendNovaTurn` itself via a `makeTurnCapsule()` closure (needed because the module-level `novaTurnInFlight` / `novaAbortController` bindings can't be imported standalone). Keep the capsule in lockstep with the production function body.
+- Run tests via `node --test test/helpers.test.mjs test/nova-*.test.mjs` (explicit filenames, not `'test/*.test.mjs'`).
+
+**Validation this sprint:**
+- `node --check index.js` clean.
+- `node --test test/helpers.test.mjs test/nova-*.test.mjs` → **239/239 pass** (+23 new turn-lifecycle tests; baseline was 216).
+- Manual in-ST: none required — `sendNovaTurn` has no callers yet. Phase 3c composer wiring is the first time this runs against a live LLM.
+
 ### 2026-04-23 — Next-session hand-off: after Phase 3a turn-state scaffolding
 
 **Scope of this PR (#18) — cumulative, three Nova phases on one branch:**
@@ -603,3 +829,162 @@ Nova goes live). No DOM, no LLM calls, no event handlers.
 **Validation:** `node --check index.js` clean;
 `node --test 'test/*.test.mjs'` → **136/136 pass** (+26 new: 17 diff,
 9 migration).
+
+---
+
+## 2026-04-23 — v0.13.0 **Nova Goes Live** (Phases 2c / 6b / 7 / 9 / 10)
+
+**Context:** Previous sessions built out the Nova agent backend —
+tool registry, skills, dispatch loop, approval modal, diff preview,
+soul/memory loader, profile-swap lifecycle — but the view was pure
+scaffolding. All composer controls and pills rendered with `disabled`.
+A user loading the phone and tapping the ✴︎ Nova tile hit a dead end.
+This session shipped the end-to-end wiring so Nova is usable today.
+
+**Shipped in this PR:**
+
+- **Version bump** `manifest.json` + `index.js` `VERSION` → `0.13.0`.
+  Tests assert both agree (`nova-ui-wiring.test.mjs`).
+- **Nova view wiring** (`index.js`, ~400 new lines in a fresh
+  `NOVA AGENT — UI wiring` section just above `wirePhone()`):
+  - `wireNovaView()` attaches all handlers; called from `wirePhone()`
+    after the clock interval so every rebuild re-wires.
+  - `refreshNovaPills()` syncs the three pill labels from `settings.nova`.
+  - `renderNovaTranscript()` renders `session.messages` from the active
+    Nova session; empty-state renders a "Pick a connection profile"
+    setup card when `settings.nova.profileName` is empty.
+  - `appendNovaTranscriptLine(text, variant)` for ad-hoc lines
+    (🔌 swap / ⚠︎ notice / 🛑 cancel).
+  - `novaHandleSend()` serialises through `withNovaProfileMutex`,
+    calls `sendNovaTurn`, surfaces `result.swappedProfile.from` as a
+    "🔌 Restored profile to …" transcript line.
+  - `novaHandleCancel()` fires `novaAbortController?.abort()`.
+  - `setNovaInFlight(bool)` disables the composer and reveals Cancel.
+  - `buildNovaSendRequest(ctx)` adapter — prefers
+    `ctx.ConnectionManagerRequestService.sendRequest` (full tool-calling),
+    falls back to `ctx.generateRaw` (text-only, surfaces a
+    "⚠︎ Text-only mode" transcript warning and passes `tools: []`).
+- **Picker modals** — new generic `cxPickList(title, options)` helper
+  (re-uses `cx-modal-overlay`, `cx-modal-box`). Three Nova-specific
+  wrappers: `novaPickProfile` (probes `/profile-list`), `novaPickSkill`
+  (static `NOVA_SKILLS`), `novaPickTier` (read/write/full). Each
+  persists to `settings.nova.*`, re-renders pills, and adds a
+  transcript line for user feedback.
+- **Profile-swap helpers** — `listNovaProfiles({ executeSlash })` +
+  `parseNovaProfileListPipe(pipe)` + `withNovaProfileMutex(fn)` (tail-
+  chained, non-poisoning). `_novaProfileSwapMutex` is the module-level
+  chain used by production callers.
+- **Soul/memory self-edit tools (Phase 6b)** — five new `NOVA_TOOLS`
+  schemas (`nova_read_soul`, `nova_write_soul`, `nova_read_memory`,
+  `nova_append_memory`, `nova_overwrite_memory`) + the
+  `buildNovaSoulMemoryHandlers({ fetchImpl, loadSoulMemory,
+  invalidateCache, pluginBaseUrl })` factory. Writes POST to
+  `<pluginBaseUrl>/fs/write`; every successful write calls
+  `invalidateNovaSoulMemoryCache()` so the next turn re-reads fresh
+  content. Handlers never throw — failures resolve to
+  `{ error: '<reason>' }`. `nova_append_memory` read-modify-writes under
+  `force:true` so it never appends to a stale cache; single trailing
+  newline is preserved.
+- **Settings — Phase 7** — new Nova block in `settings.html` (profile,
+  default tier select, max-tool-calls, turn timeout, plugin base URL,
+  "Install Command-X preset" button). Mirror in-phone `NOVA` section
+  in the Settings view with `cx-set-nova-*` IDs. `loadSettings` /
+  `saveSettings` accept both ID sets via the `??`-chain pattern already
+  used for other in-phone settings. "Install preset" fetches
+  `presets/openai/Command-X.json`, logs it to DevTools, and shows a
+  `cxAlert` with paste instructions — ST has no slash command to save
+  presets server-side, so a manual paste into the UI is the supported
+  path for now.
+- **Transcript message styling** — `.cx-nova-msg`, `.cx-nova-msg-user`,
+  `.cx-nova-msg-assistant`, `.cx-nova-msg-system`, `.cx-nova-msg-notice`
+  CSS added. Picker-modal CSS (`.cx-pick-box`, `.cx-pick-row`,
+  `.cx-pick-active`, `.cx-settings-text-input`) added. The nova-ui
+  scaffolding test was **updated** to assert Nova is now live (composer
+  is NOT `disabled`, pills are NOT `disabled`) — previous assertion
+  that the view was "inert" would flag the wire-up as a regression.
+
+**New tests:**
+
+- `test/nova-self-edit-tools.test.mjs` — 21 assertions covering the
+  5-handler factory: read forces cache bypass, write → POST body shape,
+  cache invalidation on success but NOT on failure, `nova_append_memory`
+  newline discipline (3 variants), empty/whitespace/non-string
+  rejection, bridge-unreachable path, non-2xx path (body truncated to
+  400 chars), trailing-slash stripping, all 5 handler names present.
+- `test/nova-profile-swap.test.mjs` — 16 assertions covering
+  `parseNovaProfileListPipe` (JSON + fallback + dedup),
+  `listNovaProfiles` (ok / no-executor / executor-failed), and
+  `withNovaProfileMutex` (serialisation, non-poisoning after failure,
+  sequential-failure ordering).
+- `test/nova-ui-wiring.test.mjs` — 11 static source-contract
+  assertions: VERSION agreement, helper declarations,
+  `wirePhone → wireNovaView` call, self-edit tool handler keys,
+  `novaHandleSend` calls `withNovaProfileMutex`, settings IDs present
+  in both surfaces, saveSettings reads both ID flavours,
+  `_novaRenderMessageNode` handles all 6 roles,
+  `buildNovaSendRequest` tries both dispatch paths.
+
+**Architectural notes for the next agent:**
+
+- **`sendRequest` dep surface is decoupled from ST APIs.** The Nova
+  dispatch loop (`sendNovaTurn`) consumes
+  `({messages, tools, tool_choice, signal}) => Promise<{content, tool_calls}>`.
+  The new `buildNovaSendRequest(ctx)` adapter is the ONLY place that
+  knows about ST's specific generation APIs. If ST changes its public
+  surface (e.g. renames `ConnectionManagerRequestService`), only this
+  adapter needs updating — the loop and its ~20 tests stay unchanged.
+- **Tool-calling availability is a runtime property, not a setting.**
+  `buildNovaSendRequest` returns `null` when neither
+  `ConnectionManagerRequestService` nor `generateRaw` is available;
+  `novaHandleSend` bails with a `cxAlert` in that case. When only
+  `generateRaw` is available, we still let Nova run but pass
+  `tools: []` and surface a `⚠︎ Text-only mode` transcript notice.
+  The dispatcher test suite is unchanged — text-only mode is
+  indistinguishable from a tool-less configuration upstream.
+- **Inline-copy test pattern still applies** for the two new pure
+  helpers. When you edit `buildNovaSoulMemoryHandlers`,
+  `_novaBridgeWrite`, `listNovaProfiles`, `parseNovaProfileListPipe`,
+  or `withNovaProfileMutex` in `index.js`, mirror the edit into the
+  matching test — there is no JSDOM / ST runtime harness yet.
+- **Pill persistence uses `getContext().extensionSettings[EXT]` +
+  `saveSettingsDebounced()`** — same channel as every other phone
+  setting. Do NOT stash profile/skill/tier in `chatMetadata`;
+  they're per-user preferences, not per-chat.
+- **Profile-list probe only fires on pill-click**, not on Nova init.
+  Reason: we want the probe to reflect the CURRENT profile list at the
+  moment the user picks, not a stale snapshot. If a later agent wants
+  to badge the profile pill with "list unavailable", probe on Nova
+  view enter and cache the result — just don't hide pickProfile behind
+  it; the user might type a name manually once that UI lands.
+- **Profile-swap mutex is module-level.** A page with two Nova views
+  open (shouldn't happen, but) would still serialise profile swaps.
+  Tests prove the chain is non-poisoning, so a failed swap on one
+  caller never blocks the next.
+
+**What's still deferred (explicit, not forgotten):**
+
+- **Phase 8 `nova-agent-bridge` server plugin.** Soul/memory write
+  tools POST to `<pluginBaseUrl>/fs/write`; until the plugin lands,
+  every write resolves to `{ error: 'nova-bridge-unreachable' }`. Reads
+  still work because `loadNovaSoulMemory` hits the extension-bundled
+  path via ST's static handler.
+- **No real tool handlers for `fs_*`, `shell_*`, `st_*`, `phone_*`.**
+  The dispatcher surfaces `no-handler` for any tool name not in the
+  soul/memory set. Wire additional handler maps when their backends
+  ship.
+- **Setup card is informational** — it prompts the user to tap the
+  Profile pill but doesn't auto-open the picker. If user research
+  shows people miss it, auto-opening on Nova view enter when
+  `!profileName` is a one-liner.
+- **Preset install is manual.** The button fetches + logs the JSON +
+  shows paste instructions. A future ST release may add a
+  `/preset-save` slash; when it does, swap the alert for a direct
+  `executeSlashCommandsWithOptions('/preset-save …')` call.
+- **Tool calls have no transcript tool-card yet.** When
+  `sendNovaTurn` persists a `role: 'tool'` message, the renderer
+  shows it as a `.cx-nova-toolcard` with a compact JSON preview. Rich
+  collapsible per-call cards (plan §3c) are deferred.
+
+**Validation:** `node --check index.js` clean; `node --test test/` →
+**369/369 pass** (+48 new: 21 self-edit, 16 profile-swap, 11 wiring;
+the existing scaffolding test was updated, not deleted, so net = +48).

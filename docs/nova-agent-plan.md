@@ -4,6 +4,21 @@ Status: **Approved** — 2026-04-22. This document is the source of truth for th
 Nova Agent work. Update checkboxes as items land and append amendments at the
 bottom.
 
+> **v0.13.0 landed (2026-04-23 → 2026-04-24) — Nova is LIVE.** The
+> agent loop (Phase 3) is now wired to the view, pills are
+> interactive (with keyboard access), three picker modals work,
+> profile-list probe (§9) is live, the soul/memory self-edit tools
+> (§6b) are registered with handlers, and both settings surfaces
+> (§7) are populated. Post-merge review follow-ups aligned the
+> `turnTimeoutMs` clamp floor to 10000 across `novaHandleSend` /
+> `loadSettings` / UI `min`, added keyboard handlers to
+> `cxPickList` rows, and corrected the `no-handler` vs
+> `unknown-tool` dispatcher-surface comment. The only remaining
+> gaps for a "fully stocked" Nova are the `nova-agent-bridge`
+> server plugin (§8) and real handlers for `fs_*` / `shell_*` /
+> `st_*` / `phone_*` tools. See AGENT_MEMORY 2026-04-24 for the
+> full delta and next-PR checklist.
+
 Rewrite target: replace the `openclaw` app with **Nova**, an interactive
 tool-calling agent inside the Command-X phone. Nova has full read/write access
 to the SillyTavern install directory via a new companion server plugin, ships
@@ -120,8 +135,19 @@ Chat-style agent transcript. Layout (top → bottom):
   *(Nav footer returns to home. Transcript persistence is Phase 3.)*
 
 ### 2c. Modals / sheets
-- [ ] `cxConfirm`-based approval modal for any Write/Full tool call, with
+- [x] `cxConfirm`-based approval modal for any Write/Full tool call, with
   **diff preview** for file writes and command preview for shell.
+  - **Shipped:** `cxNovaApprovalModal({ tool, args, diffText, permission,
+    title })` DOM wrapper in `index.js` NOVA AGENT section + pure
+    `buildNovaApprovalModalBody(...)` HTML body builder. Reuses the
+    `.cx-modal-overlay` / `.cx-modal-box` shell; adds a `.cx-nova-approval`
+    modifier that widens the box to fit `<pre>` args + diff blocks. All
+    user-controlled strings (tool name, args JSON, diff body) escaped via
+    `escHtml`. Destructive perms (write/shell) get the `cx-modal-btn-danger`
+    confirm button and default focus to Cancel. Covered by
+    `test/nova-approval-modal.test.mjs` (18 assertions covering shape,
+    escape-safety for prompt-injection payloads, args serialisation edge
+    cases incl. circular refs, and source-shape ordering).
 - [ ] Connection-profile picker modal (uses `/profile-list`).
 - [ ] Skill picker modal, static list.
 
@@ -158,20 +184,38 @@ Chat-style agent transcript. Layout (top → bottom):
     `test/nova-turn-state.test.mjs` (9 assertions).
 
 ### 3b. Turn lifecycle
-- [ ] `sendNovaTurn(userText)`:
-  1. Validate profile is set and `ctx.isToolCallingSupported()` returns true.
-  2. Push user message, persist.
-  3. **Snapshot** active profile via `/profile`; swap to
-     `settings.nova.profileName` via `/profile <name>`.
-  4. Build messages: `[system: composedPrompt(), ...transcript]`.
-  5. Call `ctx.ConnectionManagerRequestService.sendRequest({ messages, tools, tool_choice: 'auto', stream: true, signal })`.
-     Fallback: `ctx.generateRaw({ ... useTools: true })` when
-     `ConnectionManagerRequestService` isn't present. Probe at init time.
-  6. Stream chunks. On `tool_calls`, dispatch (§4), append `role:'tool'` msg,
-     re-request.
-  7. Enforce caps: `maxToolCalls` (24), wall-clock (5 min), tokens.
-  8. **Finally** restore original profile (even on error/abort). Clear
-     `novaTurnInFlight`. Persist.
+- [x] `sendNovaTurn(userText)` — **full loop shipped** (`index.js` NOVA AGENT
+  section). Phase 3c wired the tool-dispatch loop behind `toolHandlers` +
+  `confirmApproval` DI; absent those the turn falls back to Phase 3b's
+  deferred-stub behaviour so prior tests stay green. Covered by
+  `test/nova-turn.test.mjs` (23 assertions, backwards-compat) +
+  `test/nova-tool-dispatch.test.mjs` (22 assertions for the new loop).
+  1. [x] Validate profile is set and (when provided) `isToolCallingSupported()`
+     returns true — enforced at function entry. `sendRequest` presence is
+     also validated so the helper never calls `undefined()`.
+  2. [x] Push user message, persist via `saveNovaState(ctx)`.
+  3. [x] **Snapshot** active profile via `/profile`; swap to target via
+     `/profile <name>`. Skip swap when already active. Swap failure returns
+     `{ ok: false, reason: 'profile-swap-failed' }` without running the LLM.
+  4. [x] Build messages: `[system: composeNovaSystemPrompt(...), ...transcript]`
+     via `buildNovaRequestMessages`.
+  5. [~] Call `sendRequest({ messages, tools, tool_choice: 'auto', signal })`.
+     **Streaming + `ConnectionManagerRequestService` vs `generateRaw` probe**
+     still live in the caller — the Phase 2c composer wires them. This slice
+     takes any Promise-returning `sendRequest` so tests can drive it.
+  6. [x] **Dispatch loop shipped (§3c).** When the LLM returns `tool_calls`
+     and the caller provided `toolHandlers`, `runNovaToolDispatch` takes
+     over: gate → approval → handler → `role:'tool'` message → re-call
+     `sendRequest` → repeat until no more tool_calls, cap hit, or abort.
+     Every decision emits one audit entry. Streaming is still deferred;
+     each round uses a single non-streaming `sendRequest`.
+  7. [x] Enforce caps: wall-clock cap via `setTimeout` →
+     `controller.abort('turn-timeout')` wired into `novaAbortController`
+     (shipped earlier). `maxToolCalls` cap is enforced inside
+     `runNovaToolDispatch` with an audit entry (`outcome: 'cap-hit'`).
+  8. [x] **Finally** restore original profile (even on error/abort). Clear
+     `novaTurnInFlight` and `novaAbortController`. Restore failures are
+     audit-logged but don't mask the primary turn result.
 
 ### 3c. Tool registration
 - [ ] **Embedded path** (default): tools passed inline on `sendRequest`.
@@ -179,10 +223,44 @@ Chat-style agent transcript. Layout (top → bottom):
   `shouldRegister: () => false` default, flipped during the turn.
 - [ ] Single `NOVA_TOOLS` array: `{ name, displayName, description,
   parameters, permission: 'read'|'write'|'shell', handler, formatApproval }`.
+- [x] **Tier + approval gate (precursor).** Pure helper
+  `novaToolGate({ permission, tier, toolName, rememberedApprovals })` in
+  `index.js` NOVA AGENT section. Returns `{ allowed, requiresApproval,
+  reason? }`. Tier `'read'` allows read-only; `'write'` allows read+write;
+  `'full'` allows read+write+shell. Reads never need approval; write/shell
+  need approval unless the tool is in `rememberedApprovals` (Set or
+  Array). Malformed `tier` defaults to the strictest (`'read'`); unknown
+  `permission` denies with reason `unknown-permission`; missing
+  `permission` denies with `missing-permission`. `NOVA_TIERS` /
+  `NOVA_PERMISSIONS` frozen enums exported for the Phase 7 settings UI.
+  Covered by `test/nova-tool-gate.test.mjs` (26 assertions including the
+  full 3×3 matrix and a NOVA_TOOLS-registry coverage check).
+- [x] **Dispatch loop.** `runNovaToolDispatch` pure async helper in
+  `index.js` NOVA AGENT section. Takes `{ initialResponse, messages,
+  toolRegistry, handlers, tier, rememberedApprovals, maxToolCalls,
+  confirmApproval, sendRequest, tools, signal, gate, nowImpl, onAudit }`
+  and mutates `messages` with every assistant + `role:'tool'` message it
+  emits. Returns `{ ok, rounds, toolsExecuted, toolsDenied, toolsFailed,
+  capHit, aborted, finalAssistant, events }`. Every failure mode
+  (unknown-tool / malformed-arguments / tier-too-low / user-rejected /
+  no-confirmer / confirmer-error / handler throw / no-handler / abort /
+  send-failed) coerces to either a `role:'tool'` error message that lets
+  the LLM recover, or an `ok:false` exit with a closed-enum `reason`.
+  Covered by `test/nova-tool-dispatch.test.mjs` (22 assertions across
+  7 suites).
 
 ### 3d. Cancellation and errors
-- [ ] `AbortController` per turn; Cancel button → `.abort()`.
-- [ ] Handler throws → tool result `{ error }` so the LLM can recover; red card.
+- [x] `AbortController` per turn; wired into `sendNovaTurn` (the module-level
+  `novaAbortController` binding holds it while the turn is in flight, and
+  a wall-clock `setTimeout` calls `.abort('turn-timeout')` at the
+  `turnTimeoutMs` cap). Dispatcher checks `signal.aborted` between every
+  tool call and between rounds; returns `{ ok: false, reason: 'aborted' }`
+  so the caller can render a "turn cancelled" pill. Cancel button →
+  `.abort()` on the live controller lands with the Phase 2c composer UI.
+- [x] Handler throws → tool result `{ error }` so the LLM can recover;
+  dispatcher pushes a `role:'tool'` message with `{ error: <message> }`
+  and emits an audit entry (`outcome: 'error:<message>'`). Red-card
+  rendering lands with the Phase 2c toolcard markup.
 
 ---
 
@@ -297,15 +375,30 @@ Skill = named system-prompt pack + default tier + default tool subset. Single
 Always concatenated into the Nova system prompt regardless of skill.
 
 ### 6a. Location
-- [ ] Default: extension folder —
+- [x] Default: extension folder —
   `SillyTavern/public/scripts/extensions/third-party/command-x/nova/soul.md`
   and `.../nova/memory.md`. Served by ST's static handler so `fetch('./nova/…')`
   works with no plugin.
-- [ ] Seed both files in the repo with starter content (see §6d).
+  - **Shipped:** `defaultNovaSoulMemoryBaseUrl()` returns
+    `/scripts/extensions/third-party/${EXT}/nova` — interpolates `EXT` so
+    a rename lives in one place.
+- [x] Seed both files in the repo with starter content (see §6d).
 
 ### 6b. Load/save
-- [ ] On Nova init, fetch both files; cache in memory. Cache-bust on explicit
+- [x] On Nova init, fetch both files; cache in memory. Cache-bust on explicit
   "Reload soul/memory" and after any self-edit.
+  - **Shipped (read path):** `loadNovaSoulMemory({ baseUrl, fetchImpl,
+    nowImpl, ttlMs, force })` pure helper in `index.js` NOVA AGENT section.
+    Never throws — 404 / network error / non-string body all become an
+    empty string for that file. Both files fetched in parallel via
+    `Promise.all`. Module-level cache with TTL = 5 min; explicit
+    `invalidateNovaSoulMemoryCache()` drops it. Failure results are
+    cached too to prevent hot-loop refetching. Covered by
+    `test/nova-soul-memory.test.mjs` (16 assertions).
+    **Not yet wired from Nova init** — `sendNovaTurn` already accepts
+    `soul` / `memory` params; the Phase 3c composer will pass the loader
+    result. Also not yet invalidated on `nova_write_soul` — Phase 6b
+    self-edit tools land with the Phase 3c handler sprint.
 - [ ] Self-edit tools:
   - `nova_read_soul`, `nova_write_soul` (Write).
   - `nova_read_memory`, `nova_append_memory({ note, tags? })`,
@@ -334,11 +427,12 @@ Always concatenated into the Nova system prompt regardless of skill.
   (6 assertions).
 
 ### 6d. Starter content
-- [ ] `soul.md`: Nova voice/persona — curious, crisp, SillyTavern-native,
+- [x] `soul.md`: Nova voice/persona — curious, crisp, SillyTavern-native,
   confirms destructive ops, explains intent before acting, references the
-  current chat by name.
-- [ ] `memory.md`: empty template with section headers
+  current chat by name. **Shipped:** `nova/soul.md`.
+- [x] `memory.md`: empty template with section headers
   ("User preferences", "Project notes", "Recent wins/failures", "Do not do").
+  **Shipped:** `nova/memory.md`.
 
 ---
 
@@ -517,6 +611,10 @@ All under `test/` using Node `--test`.
   `NOVA_TOOLS[].parameters` against sample args.
 - [ ] `nova-profile-swap.test.mjs` — mocks `executeSlashCommandsWithOptions`;
   verifies swap/restore on throw and mutex serialisation.
+  - **Partially covered by `test/nova-turn.test.mjs`** (profile snapshot +
+    swap + restore including the `sendRequest` throws case). A dedicated
+    mutex serialisation test lands with Phase 3c when the caller wires the
+    module-level controller up to the composer UI.
 - [x] `nova-prompt-compose.test.mjs` — soul+memory concatenation, truncation,
   skill ordering.
 - [ ] `nova-audit-redact.test.mjs` — audit entries never include raw content.
@@ -532,6 +630,12 @@ All under `test/` using Node `--test`.
 - [x] `nova-plugin.test.mjs` — nova-agent-bridge plugin exports + route
   wiring + /manifest shape (not in original list; shipped with Phase 8a/b
   scaffold).
+- [x] `nova-turn.test.mjs` — Phase 3b turn lifecycle: precondition
+  validation, happy path (user + assistant push, system-prompt
+  composition, signal propagation), profile snapshot/swap/restore
+  including `sendRequest`-throws and restore-failure paths,
+  re-entrancy guard, deferred-tool-calls placeholder, plus source-shape
+  assertions on `index.js` (23 assertions).
 - [x] Keep `helpers.test.mjs` green.
 
 ---

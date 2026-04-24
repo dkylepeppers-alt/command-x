@@ -40,13 +40,13 @@ test('Nova view shell exists with all scaffolding anchors', async () => {
     // View container
     assert.match(js, /<div class="cx-view" data-view="nova">/);
     // Header + three pills (profile / skill / tier) — IDs must be stable
-    // since Phase 2c will swap these for chooser modals.
+    // since Phase 2c swaps these for chooser modals.
     assert.match(js, /id="cx-nova-pill-profile"/);
     assert.match(js, /id="cx-nova-pill-skill"/);
     assert.match(js, /id="cx-nova-pill-tier"/);
     // Transcript region (live-region for a11y)
     assert.match(js, /id="cx-nova-transcript"[^>]*role="log"[^>]*aria-live="polite"/);
-    // Composer inputs — IDs Phase 3's agent loop will wire up
+    // Composer inputs — wired to sendNovaTurn as of v0.13.0
     assert.match(js, /id="cx-nova-input"/);
     assert.match(js, /id="cx-nova-send"/);
     assert.match(js, /id="cx-nova-cancel"/);
@@ -54,16 +54,21 @@ test('Nova view shell exists with all scaffolding anchors', async () => {
     assert.match(js, /<div class="cx-view" data-view="nova">[\s\S]*?data-goto="home"[\s\S]*?<\/div>\s*<\/div>/);
 });
 
-test('Nova scaffolding starts inert (disabled composer + hidden cancel)', async () => {
-    // Phase 2 ships scaffolding only. Agent loop lands in Phase 3.
-    // Composer must be disabled and Cancel hidden until the loop wires in,
-    // otherwise users can spam a no-op Send button.
+test('Nova view is live (composer NOT disabled, pills NOT disabled) as of v0.13.0', async () => {
+    // v0.13.0 wired Nova to sendNovaTurn. The composer, Send button, and
+    // all three pills must be interactive. Cancel starts hidden until a
+    // turn is in flight.
     const { js } = await loadSources();
     const novaBlock = js.match(/<!-- Nova Agent View[^]*?<!-- Settings View -->/);
     assert.ok(novaBlock, 'Nova view block not found between its sentinel comments');
     const block = novaBlock[0];
-    assert.match(block, /id="cx-nova-input"[^>]*disabled/);
-    assert.match(block, /id="cx-nova-send"[^>]*disabled/);
+    // These must NOT contain the `disabled` attribute anymore.
+    assert.doesNotMatch(block, /id="cx-nova-input"[^>]*\bdisabled\b/);
+    assert.doesNotMatch(block, /id="cx-nova-send"[^>]*\bdisabled\b/);
+    assert.doesNotMatch(block, /id="cx-nova-pill-profile"[^>]*\bdisabled\b/);
+    assert.doesNotMatch(block, /id="cx-nova-pill-skill"[^>]*\bdisabled\b/);
+    assert.doesNotMatch(block, /id="cx-nova-pill-tier"[^>]*\bdisabled\b/);
+    // Cancel still starts hidden (only revealed during an in-flight turn).
     assert.match(block, /class="[^"]*cx-hidden[^"]*"[^>]*id="cx-nova-cancel"/);
 });
 
