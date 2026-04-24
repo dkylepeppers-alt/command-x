@@ -4454,12 +4454,13 @@ async function novaHandleSend() {
     const { soul, memory } = await loadNovaSoulMemory();
 
     // Build the tool handler set. Shipped today: soul/memory self-edit
-    // (§6b) + phone-internal stores (§4e). Bridge-backed tools (fs_*,
-    // shell_*) and ST-API tools (st_*) still dispatch to `no-handler`
-    // until their factories land.
+    // (§6b) + phone-internal stores (§4e) + plugin-backed filesystem
+    // (§4a). Bridge-backed `shell_run` and ST-API tools (`st_*`) still
+    // dispatch to `no-handler` until their factories land.
     const toolHandlers = {
         ...buildNovaSoulMemoryHandlers({}),
         ...buildNovaPhoneHandlers({}),
+        ...buildNovaFsHandlers({}),
     };
 
     setNovaInFlight(true);
@@ -7454,6 +7455,185 @@ function buildNovaPhoneHandlers({
             } catch (err) {
                 return { error: String(err?.message || err) };
             }
+        },
+    };
+}
+
+/* ----------------------------------------------------------------------
+   NOVA AGENT — filesystem tool handlers (plan §4a).
+
+   `buildNovaFsHandlers` returns the 7 `fs_*` tool handlers that wrap the
+   `nova-agent-bridge` server plugin's `/fs/*` routes. All seven plugin
+   routes (`/fs/list`, `/fs/read`, `/fs/stat`, `/fs/search`, `/fs/write`,
+   `/fs/delete`, `/fs/move`) are live as of v0.13.0, so the LLM can now
+   actually use them — previously every `fs_*` tool call resolved to
+   `{ error: 'no-handler' }` in the dispatcher.
+
+   The plugin enforces all the safety constraints (path containment,
+   deny-list, .nova-trash backup-before-overwrite, root-refusal, content
+   size cap, audit log). These handlers do NOT re-implement any of that;
+   they are thin transports that map tool args to the route shape and
+   forward the response.
+
+   Contract — mirrors `buildNovaSoulMemoryHandlers` /
+   `buildNovaPhoneHandlers`:
+   - Handlers NEVER throw; errors resolve to `{ error: <kind>, ... }`.
+   - On 2xx, success forwards the route's JSON body verbatim.
+   - On non-2xx, returns `{ error: <server-error-code>, status, ... }`.
+   - On network failure, returns `{ error: 'nova-bridge-unreachable',
+     message }`. On missing `fetch`, `{ error: 'no-fetch' }`.
+
+   Injected deps (all optional; default to globals so production passes
+   `{}` and tests pass mocks):
+     - `pluginBaseUrl`  : default = `settings.nova.pluginBaseUrl` →
+                          `NOVA_DEFAULTS.pluginBaseUrl`.
+     - `fetchImpl`      : default = global `fetch`.
+   ---------------------------------------------------------------------- */
+
+/**
+ * Generic plugin HTTP helper. Used by `buildNovaFsHandlers` for all 7
+ * fs routes. Closed-enum failure surface: `no-fetch` (no global fetch
+ * and no `fetchImpl` injected), `nova-bridge-unreachable` (network /
+ * DNS / fetch threw), `nova-bridge-error` (HTTP non-2xx, with the
+ * server's error code surfaced as `error` if the body parses as JSON).
+ *
+ * Never throws. Always resolves to either a parsed-JSON success object
+ * (the route's response body, with `ok` defaulted to `true` if absent)
+ * or one of the closed-enum error shapes above.
+ */
+async function _novaBridgeRequest({ pluginBaseUrl, method, route, query, body, fetchImpl }) {
+    const doFetch = typeof fetchImpl === 'function'
+        ? fetchImpl
+        : (typeof fetch === 'function' ? fetch : null);
+    if (!doFetch) return { error: 'no-fetch' };
+    const base = String(pluginBaseUrl || NOVA_DEFAULTS.pluginBaseUrl).replace(/\/+$/, '');
+    let url = `${base}${route}`;
+    if (query && typeof query === 'object') {
+        const qs = new URLSearchParams();
+        for (const [k, v] of Object.entries(query)) {
+            if (v === undefined || v === null) continue;
+            qs.append(k, String(v));
+        }
+        const qsStr = qs.toString();
+        if (qsStr) url += `?${qsStr}`;
+    }
+    const init = { method: method || 'GET' };
+    if (body !== undefined) {
+        init.headers = { 'Content-Type': 'application/json' };
+        init.body = JSON.stringify(body);
+    }
+    let resp;
+    try {
+        resp = await doFetch(url, init);
+    } catch (err) {
+        return { error: 'nova-bridge-unreachable', message: String(err?.message || err) };
+    }
+    let parsed = null;
+    let rawText = '';
+    try { rawText = await resp.text(); } catch (_) { /* noop */ }
+    if (rawText) {
+        try { parsed = JSON.parse(rawText); } catch (_) { /* leave parsed null */ }
+    }
+    if (!resp || !resp.ok) {
+        // Server's `sendError` shape is `{ error, ...extra }`. Surface that
+        // through verbatim under our own `error` key; if parsing failed
+        // (HTML 502, etc.) fall back to the generic bridge-error code.
+        if (parsed && typeof parsed === 'object' && typeof parsed.error === 'string') {
+            return { ...parsed, status: resp.status };
+        }
+        return {
+            error: 'nova-bridge-error',
+            status: resp?.status || 0,
+            body: String(rawText).slice(0, 400),
+        };
+    }
+    if (parsed && typeof parsed === 'object') {
+        // Forward the route's JSON. Most write routes already include
+        // `ok: true`; reads don't, so leave that to the caller / LLM.
+        return parsed;
+    }
+    // 2xx with no parseable body — treat as ok with the raw text snippet.
+    return { ok: true, body: String(rawText).slice(0, 400) };
+}
+
+/**
+ * Build the 7 fs_* tool handlers. Returns `{ name: handler }` map
+ * compatible with the `toolHandlers` argument of `sendNovaTurn`.
+ */
+function buildNovaFsHandlers({ pluginBaseUrl, fetchImpl } = {}) {
+    const base = pluginBaseUrl || (typeof settings !== 'undefined' && settings?.nova?.pluginBaseUrl) || NOVA_DEFAULTS.pluginBaseUrl;
+
+    const isObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
+    const safeArgs = (v) => (isObject(v) ? v : {});
+    const safePath = (v) => (typeof v === 'string' ? v : '');
+    const req = (method, route, opts) => _novaBridgeRequest({
+        pluginBaseUrl: base, method, route, fetchImpl, ...opts,
+    });
+
+    return {
+        fs_list: async (rawArgs) => {
+            const { path, recursive, maxDepth } = safeArgs(rawArgs);
+            const p = safePath(path);
+            if (!p) return { error: 'path must be a non-empty string' };
+            const query = { path: p };
+            if (recursive !== undefined) query.recursive = Boolean(recursive);
+            if (maxDepth !== undefined) query.maxDepth = maxDepth;
+            return req('GET', '/fs/list', { query });
+        },
+        fs_read: async (rawArgs) => {
+            const { path, encoding, maxBytes } = safeArgs(rawArgs);
+            const p = safePath(path);
+            if (!p) return { error: 'path must be a non-empty string' };
+            const query = { path: p };
+            if (encoding !== undefined) query.encoding = encoding;
+            if (maxBytes !== undefined) query.maxBytes = maxBytes;
+            return req('GET', '/fs/read', { query });
+        },
+        fs_stat: async (rawArgs) => {
+            const { path } = safeArgs(rawArgs);
+            const p = safePath(path);
+            if (!p) return { error: 'path must be a non-empty string' };
+            return req('GET', '/fs/stat', { query: { path: p } });
+        },
+        fs_search: async (rawArgs) => {
+            const { query: searchQuery, glob, path, maxResults } = safeArgs(rawArgs);
+            if (typeof searchQuery !== 'string' || searchQuery.length === 0) {
+                return { error: 'query must be a non-empty string' };
+            }
+            const body = { query: searchQuery };
+            if (typeof glob === 'string') body.glob = glob;
+            if (typeof path === 'string' && path.length > 0) body.path = path;
+            if (maxResults !== undefined) body.maxResults = maxResults;
+            return req('POST', '/fs/search', { body });
+        },
+        fs_write: async (rawArgs) => {
+            const { path, content, encoding, createParents, overwrite } = safeArgs(rawArgs);
+            const p = safePath(path);
+            if (!p) return { error: 'path must be a non-empty string' };
+            if (typeof content !== 'string') return { error: 'content must be a string' };
+            const body = { path: p, content };
+            if (encoding !== undefined) body.encoding = encoding;
+            if (createParents !== undefined) body.createParents = Boolean(createParents);
+            if (overwrite !== undefined) body.overwrite = Boolean(overwrite);
+            return req('POST', '/fs/write', { body });
+        },
+        fs_delete: async (rawArgs) => {
+            const { path, recursive } = safeArgs(rawArgs);
+            const p = safePath(path);
+            if (!p) return { error: 'path must be a non-empty string' };
+            const body = { path: p };
+            if (recursive !== undefined) body.recursive = Boolean(recursive);
+            return req('POST', '/fs/delete', { body });
+        },
+        fs_move: async (rawArgs) => {
+            const { from, to, overwrite } = safeArgs(rawArgs);
+            const f = safePath(from);
+            const t = safePath(to);
+            if (!f) return { error: 'from must be a non-empty string' };
+            if (!t) return { error: 'to must be a non-empty string' };
+            const body = { from: f, to: t };
+            if (overwrite !== undefined) body.overwrite = Boolean(overwrite);
+            return req('POST', '/fs/move', { body });
         },
     };
 }

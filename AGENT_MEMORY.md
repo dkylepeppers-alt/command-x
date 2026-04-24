@@ -77,6 +77,41 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-24 (fs handlers) — Nova `fs_*` tool handlers shipped (plan §4a)
+
+**Context:** Continued the Nova plan. AGENT_MEMORY's previous handover identified four remaining tool-handler slices (`fs_*`, `shell_run`, `st_*`, `phone_*`); `phone_*` shipped in the prior PR, this one ships `fs_*`. The plugin's seven `/fs/*` routes have all been live since v0.13.0 (read in mid-April, write soon after with the .nova-trash safety story); they just had no extension-side dispatcher entry, so every `fs_*` tool call resolved to `{ error: 'no-handler' }` in `runNovaToolDispatch`. Now they actually work.
+
+**What shipped:**
+- `_novaBridgeRequest({ pluginBaseUrl, method, route, query, body, fetchImpl })` — generic, defensive HTTP transport in `index.js` immediately before `buildNovaFsHandlers`. Closed-enum failure surface: `no-fetch`, `nova-bridge-unreachable`, `nova-bridge-error`. Surfaces server `sendError({ error })` payloads verbatim with a `status` field attached. **NOTE:** This is intentionally separate from the existing `_novaBridgeWrite` (which is hard-coded to POST `/fs/write` with a fixed body shape and is still used by `buildNovaSoulMemoryHandlers`). The two helpers do not share code today; if you ever consolidate, audit the soul/memory tests to keep their mock surface stable.
+- `buildNovaFsHandlers({ pluginBaseUrl?, fetchImpl? })` factory in the NOVA AGENT section right after `buildNovaPhoneHandlers`. Returns the 7 `fs_*` handlers (`fs_list`, `fs_read`, `fs_stat`, `fs_search`, `fs_write`, `fs_delete`, `fs_move`).
+- `novaHandleSend` now composes three handler maps: `{ ...buildNovaSoulMemoryHandlers({}), ...buildNovaPhoneHandlers({}), ...buildNovaFsHandlers({}) }`.
+- `test/nova-fs-tools.test.mjs` — 43 assertions across 10 suites. Inline-copies the helper + transport per the AGENT_MEMORY convention.
+- `test/nova-ui-wiring.test.mjs` gained a source-contract assertion that `novaHandleSend` calls `buildNovaFsHandlers(`, `_novaBridgeRequest` is defined, and all 7 fs tool names appear in the source.
+
+**Contract locked by tests:**
+- **GET vs POST routing:** `fs_list`, `fs_read`, `fs_stat` are GET with query-string params; `fs_search`, `fs_write`, `fs_delete`, `fs_move` are POST with JSON bodies. **This mirrors the plugin's actual route shapes — do not change one without changing the other.** Tests assert both the method and the URL form per handler.
+- **Local validation is minimal but explicit.** `path` must be a non-empty string; `content` (for `fs_write`) must be a string (empty string IS allowed — that's a legitimate empty file); `query` (for `fs_search`) must be a non-empty string; `from`/`to` (for `fs_move`) must both be non-empty strings. Anything beyond that is delegated to the plugin so the LLM gets the canonical server error code.
+- **Optional args are forwarded only when explicitly provided.** `fs_list({ path: 'src' })` produces `?path=src` with no `recursive=` or `maxDepth=`. This is load-bearing for `fs_search`: if you forward `path: ''` to the server it overrides the server's default `'.'`. Tests cover this drop-empty-path branch.
+- **Bool coercion is `Boolean(...)`.** `recursive: 1` becomes `true`, `overwrite: 0` becomes `false`. The plugin's `toBool` does its own coercion but client-side normalisation keeps URL params predictable for `URLSearchParams`.
+- **Server error JSON is forwarded verbatim.** A 404 from `/fs/read` returns `{ error: 'not-found', status: 404 }`. A 413 from `/fs/write` returns `{ error: 'content-too-large', cap: 20971520, status: 413 }`. The LLM sees the canonical server error code and any extra metadata. **`status` is always added by the transport**, even when the server response already includes one — they should match in practice but if they ever diverge, our `status` wins.
+- **2xx with non-JSON body returns `{ ok: true, body: <truncated> }`.** Covers a 204 No Content or a server bug. Body is truncated to 400 chars to keep the audit log + transcript tidy.
+- **2xx with parseable JSON forwards verbatim.** No `ok: true` injection; the read routes don't include it and that's fine — the LLM can inspect the shape directly.
+- **Error bodies (non-2xx with non-JSON or JSON-without-`error`) are truncated to 400 chars.** A 500 returning a 2KB HTML stack trace doesn't blow up the transcript.
+
+**Inline-copy convention follow-through:**
+- When you edit `_novaBridgeRequest` or `buildNovaFsHandlers` in `index.js`, mirror the edit into `test/nova-fs-tools.test.mjs`. The inline copy is the Node-testable twin; there's still no JSDOM/ST harness.
+- The fuzz suite at the bottom of the test file walks every handler against `[undefined, null, 0, 1, '', 'a', true, false, NaN, [], ['a','b'], {}, { path: null }, { path: 0 }]` and asserts no throws + a known result shape (`error` string OR one of `ok | entries | content | results | type | path | from`). When you add a new handler, either match one of these shapes or extend the assertion list.
+
+**What's still outstanding on the plan (copy-forward):**
+1. **`buildNovaStTools` factory** for the 10 ST-API tools (`st_list_characters`, `st_read_character`, `st_write_character`, `st_list_worldbooks`, `st_read_worldbook`, `st_write_worldbook`, `st_run_slash`, `st_get_context`, `st_list_profiles`, `st_get_profile`). ST-API only, no plugin dependency. Currently every `st_*` call returns `{ error: 'no-handler' }`. The natural next slice. The dispatch path through `getContext()` lives entirely in `index.js`; would inline-copy a tiny `getContext` mock for tests.
+2. **`/shell/run` plugin route** (still 501 stub). Once the plugin route lands, an `buildNovaShellHandler` factory (single tool) would slot in next to `buildNovaFsHandlers`. Plan text: `spawn(cmd, args, { shell: false })` + allow-list resolution + stdin disabled + per-request timeout (default 60 s, hard cap 5 min) + stdout/stderr size caps + audit entry.
+3. Rich per-turn tool-card transcript rendering (plan §2b/§3c).
+4. Diff preview in approval path: composer-side `fs_read` → `buildNovaUnifiedDiff` → `cxNovaApprovalModal`. **All three pieces now exist** — `fs_read` has a real handler this PR, `buildNovaUnifiedDiff` was shipped earlier, `cxNovaApprovalModal` already accepts a `diffText` arg. Wiring is just a `if (tool === 'fs_write') { ... }` branch in the composer before calling `confirmApproval`. Don't teach the dispatcher to read the filesystem itself.
+5. Plugin CSRF + session-cookie check on every route (plan §8c).
+6. Plan checkbox refresh pass (cosmetic).
+
+**Validation:** `node --check index.js` clean; `node --test test/*.mjs` → **530/530 pass** (+45 net since prior baseline at 485: 43 new fs-tools tests + 1 new ui-wiring source-contract assertion + 1 reused assertion that grew its handler list). CodeQL + Code Review pending.
+
 ### 2026-04-24 — Docs housekeeping pass (v0.13.0 alignment)
 
 **Context:** Top-level contributor docs had drifted from the v0.13.0 codebase. `CLAUDE.md` was still on v0.10.0 and described OpenClaw as a current app (it was retired and migrated to `.legacy_openclaw` in v0.13.0). `.github/copilot-instructions.md` was on v0.12.0, under-counted file sizes (said ~5200 JS lines vs. actual ~7900), and also listed OpenClaw. Neither file mentioned the Map or Nova apps. README's "bridge-console is being replaced by Nova" note predated Nova actually shipping.

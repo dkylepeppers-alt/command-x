@@ -101,6 +101,29 @@ test('Nova phone-internal tool handlers factory is exported and wired', async ()
         'novaHandleSend must compose buildNovaPhoneHandlers into the toolHandlers map');
 });
 
+test('Nova filesystem tool handlers factory is exported and wired', async () => {
+    const { js } = await loadSources();
+    assert.match(js, /function buildNovaFsHandlers\(/);
+    assert.match(js, /async function _novaBridgeRequest\(/,
+        'buildNovaFsHandlers depends on the _novaBridgeRequest helper');
+    for (const name of [
+        'fs_list',
+        'fs_read',
+        'fs_stat',
+        'fs_search',
+        'fs_write',
+        'fs_delete',
+        'fs_move',
+    ]) {
+        assert.match(js, new RegExp(`\\b${name}\\b`), `Missing fs handler key ${name}`);
+    }
+    // novaHandleSend must merge the fs handlers into the tool handler set.
+    const novaHandleSend = js.match(/async function novaHandleSend\([\s\S]*?\n\}/);
+    assert.ok(novaHandleSend, 'novaHandleSend body not found');
+    assert.match(novaHandleSend[0], /buildNovaFsHandlers\(/,
+        'novaHandleSend must compose buildNovaFsHandlers into the toolHandlers map');
+});
+
 test('Profile-swap helpers are wired to the slash executor', async () => {
     const { js } = await loadSources();
     assert.match(js, /function listNovaProfiles\(/);
