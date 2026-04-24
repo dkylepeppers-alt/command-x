@@ -490,6 +490,10 @@ module.exports = {
     createFsReadHandler,
     createFsStatHandler,
     createFsSearchHandler,
+    // Exported for reuse by the write-side routes (`routes-fs-write.js`)
+    // which share the same path-safety + realpath-reverify pipeline.
+    resolveRequestPath,
+    sendError,
     // Exported for unit tests.
     _internal: {
         resolveRequestPath,

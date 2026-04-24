@@ -498,23 +498,30 @@ Always concatenated into the Nova system prompt regardless of skill.
   (not in original plan; extracted from §8c for unit testability).
 
 ### 8b. Routes (`/api/plugins/nova-agent-bridge/*`)
-- [x] `GET /manifest` → `{ id, version, root, shellAllowList, capabilities }`.
+- [x] `GET /manifest` → `{ id, version, root, shellAllowList, capabilities, auditLogPath }`.
   `capabilities` is `{ fs_list, fs_read, fs_write, fs_delete, fs_move,
-  fs_stat, fs_search, shell_run }`, each `true|false`. Scaffold ships all
-  `false` — extension Phase 4f reads this to decide which tools to
-  register.
+  fs_stat, fs_search, shell_run }`, each `true|false`. Post-write-sprint
+  every `fs_*` flag is `true`; only `shell_run` remains `false`.
 - [x] `GET /health` → `{ ok: true, id, version }`.
-- [~] `GET /fs/list`, `GET /fs/read`, `GET /fs/stat`, `POST /fs/search` —
+- [x] `GET /fs/list`, `GET /fs/read`, `GET /fs/stat`, `POST /fs/search` —
   **shipped** in `server-plugin/nova-agent-bridge/routes-fs-read.js` as
   pure handler factories, wired in `index.js`. Each runs `normalizeNovaPath`
   + `fs.realpath` symlink re-check, enforces per-route caps (list: 5000
   entries, depth 10; read: 10 MB; search: 500 results, 1 MB/file, binary
   skip). Capabilities flipped to `true` in the manifest. Covered by
-  `test/nova-fs-read.test.mjs` (31 new assertions) + tightened
+  `test/nova-fs-read.test.mjs` (31 assertions) + tightened
   `test/nova-plugin.test.mjs` expectations.
-  `POST /fs/write`, `POST /fs/delete`, `POST /fs/move`, `POST /shell/run` —
-  still `501 not-implemented`; writes need audit-log + `.nova-trash` logic
-  from §8c/§8d and land in the next sprint.
+- [x] `POST /fs/write`, `POST /fs/delete`, `POST /fs/move` — **shipped**
+  in `server-plugin/nova-agent-bridge/routes-fs-write.js`. Overwrites +
+  deletes route through `.nova-trash/<ts>/<relPath>` first; deletes
+  NEVER hard-unlink. 20 MB hard cap on `fs_write` content via
+  `FS_WRITE_HARD_CAP_BYTES`. Moves refuse to clobber by default; when
+  `overwrite: true` the destination is backed up to trash before the
+  rename. All three reuse `resolveRequestPath` from the read module for
+  path safety. All three append to the audit log. Covered by
+  `test/nova-fs-write.test.mjs` (23 assertions). `POST /shell/run` —
+  still `501 not-implemented`; shell needs allow-list + spawn-without-shell
+  + hard-timeout and lands in the next sprint.
 - [ ] `POST /shell/run` (NDJSON streaming `stdout`/`stderr`/`exit`).
   **Route wired as `501 not-implemented` stub**; real handler blocked on
   same.
@@ -535,16 +542,30 @@ Always concatenated into the Nova system prompt regardless of skill.
   named `plugins`.
 - [x] Max file size read: 10 MB hard cap on `/fs/read` via
   `FS_READ_HARD_CAP_BYTES`; `/fs/search` additionally caps per-file read
-  at 1 MB. Write caps land with the write sprint.
+  at 1 MB. `/fs/write` content capped at 20 MB via
+  `FS_WRITE_HARD_CAP_BYTES` (decoded buffer length, so base64 inputs
+  are clamped to the same on-disk size).
 - [ ] Shell: no `shell: true`; binaries resolved via allow-list at startup.
 - [ ] CSRF protection mirroring ST's header check.
 - [ ] Require ST session cookie on every route.
-- [ ] Audit log: append to `SillyTavern/data/_nova-audit.jsonl` with
-  `{ ts, user, route, argsSummary, outcome, bytes }`. Never log `content`.
+- [x] Audit log: append to `SillyTavern/data/_nova-audit.jsonl` with
+  `{ ts, user?, route, argsSummary, outcome, bytes?, backup?, error? }`.
+  **Shipped** as `server-plugin/nova-agent-bridge/audit.js` —
+  `buildAuditLogger({ logPath, fsImpl?, nowImpl? })` returns an
+  `append(entry)` API that shallow-strips top-level `content/data/
+  payload/body/raw` keys and elides nested ones via a JSON replacer.
+  Never logs raw content. Path resolved at init to `<root>/data/
+  _nova-audit.jsonl` if the ST-style `data/` dir exists, else
+  `<root>/_nova-audit.jsonl`, and surfaced via `/manifest.auditLogPath`.
+  Failures are swallowed and returned as `{ ok:false, error }` so a
+  broken audit log never blocks a user request. Covered by
+  `test/nova-audit.test.mjs` (13 assertions incl. explicit leak-check
+  asserting raw-content substrings never reach the log bytes).
 
 ### 8d. Lifecycle
-- [x] `exit()` flushes audit log and releases file handles. (Stub today —
-  scaffold has nothing to flush. Shape ready for the audit-log sprint.)
+- [x] `exit()` flushes audit log and releases file handles. Today `close()`
+  is a no-op; the contract is in place so the rotation sprint (which may
+  hold a persistent write stream) can drop in without a caller change.
 
 ---
 
@@ -726,3 +747,17 @@ All under `test/` using Node `--test`.
   they need audit-log + `.nova-trash` + allow-list checks from §8c/§8d
   and will ship in the next sprint. Node plugin package has no
   runtime dependencies (Node built-ins only), so nothing to audit.
+- **2026-04-24 (latest)** — Phase 8b write routes shipped
+  (`/fs/write`, `/fs/delete`, `/fs/move`) + append-only JSONL audit log.
+  Overwrites + deletes always route through `.nova-trash/<ts>/<relPath>`
+  first — **deletes never hard-unlink**, so an agent mistake is always
+  recoverable. `fs_write` enforces a 20 MB hard cap on decoded content.
+  `moveToTrash` handles cross-device EXDEV by falling back to cp+rm, and
+  disambiguates bucket collisions with `.N` suffixes. Audit log factored
+  as a DI-friendly module (`audit.js`) with a strict anti-leak contract:
+  shallow-strips `content/data/payload/body/raw` keys at the top level
+  and elides nested occurrences via a JSON replacer. Cyclic references
+  in audit entries fall through to a stub error line rather than throwing.
+  `/manifest` now reports the resolved `auditLogPath`. `exit()` now calls
+  `auditLogger.close()` (no-op today; reserved for the rotation sprint).
+  Shell (`/shell/run`) is the only remaining 501 stub.

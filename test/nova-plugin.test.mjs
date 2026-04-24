@@ -123,20 +123,17 @@ describe('nova-agent-bridge init()', () => {
         assert.equal(res._state.body.id, 'nova-agent-bridge');
     });
 
-    it('fs/shell write + shell stubs still return 501 not-implemented', async () => {
+    it('shell_run stub still returns 501 not-implemented', async () => {
         const r = mockRouter();
         await plugin.init(r);
-        // After the read-only fs routes landed, only writes + shell remain stubs.
-        const stubPaths = ['/fs/write', '/fs/delete', '/fs/move', '/shell/run'];
-        for (const p of stubPaths) {
-            const route = r.routes.find(x => x.path === p);
-            const res = mockRes();
-            route.handler({}, res);
-            assert.equal(res._state.statusCode, 501, `${p} should return 501`);
-            assert.equal(res._state.body.error, 'not-implemented');
-            assert.equal(res._state.body.plugin, 'nova-agent-bridge');
-            assert.equal(res._state.body.route, p);
-        }
+        // After the write sprint landed, shell_run is the only 501 left.
+        const route = r.routes.find(x => x.path === '/shell/run');
+        const res = mockRes();
+        route.handler({}, res);
+        assert.equal(res._state.statusCode, 501);
+        assert.equal(res._state.body.error, 'not-implemented');
+        assert.equal(res._state.body.plugin, 'nova-agent-bridge');
+        assert.equal(res._state.body.route, '/shell/run');
     });
 
     it('read-only fs routes are wired (non-501; 400 on missing path)', async () => {
@@ -166,21 +163,55 @@ describe('nova-agent-bridge init()', () => {
         assert.equal(res._state.body.error, 'query-required');
     });
 
-    it('/manifest capabilities report fs_list, fs_read, fs_stat, fs_search = true', async () => {
+    it('write fs routes are wired (non-501; reject empty inputs with a 400)', async () => {
+        const r = mockRouter();
+        await plugin.init(r);
+        // /fs/write requires a `content` string → 400 content-required.
+        const writeRoute = r.routes.find(x => x.method === 'POST' && x.path === '/fs/write');
+        assert.ok(writeRoute);
+        const r1 = mockRes();
+        await writeRoute.handler({ body: {} }, r1);
+        assert.notEqual(r1._state.statusCode, 501);
+        assert.equal(r1._state.statusCode, 400);
+        assert.equal(r1._state.body.error, 'content-required');
+
+        // /fs/delete on empty path → 400 invalid-path.
+        const deleteRoute = r.routes.find(x => x.method === 'POST' && x.path === '/fs/delete');
+        assert.ok(deleteRoute);
+        const r2 = mockRes();
+        await deleteRoute.handler({ body: {} }, r2);
+        assert.notEqual(r2._state.statusCode, 501);
+        assert.equal(r2._state.statusCode, 400);
+        assert.equal(r2._state.body.error, 'invalid-path');
+
+        // /fs/move on empty from → 400 invalid-path.
+        const moveRoute = r.routes.find(x => x.method === 'POST' && x.path === '/fs/move');
+        assert.ok(moveRoute);
+        const r3 = mockRes();
+        await moveRoute.handler({ body: {} }, r3);
+        assert.notEqual(r3._state.statusCode, 501);
+        assert.equal(r3._state.statusCode, 400);
+        assert.equal(r3._state.body.error, 'invalid-path');
+    });
+
+    it('/manifest capabilities report all fs routes true; shell_run false', async () => {
         const r = mockRouter();
         await plugin.init(r);
         const manifestRoute = r.routes.find(x => x.method === 'GET' && x.path === '/manifest');
         const res = mockRes();
         manifestRoute.handler({}, res);
         const caps = res._state.body.capabilities;
-        assert.equal(caps.fs_list, true, 'fs_list capability should be true');
-        assert.equal(caps.fs_read, true, 'fs_read capability should be true');
-        assert.equal(caps.fs_stat, true, 'fs_stat capability should be true');
-        assert.equal(caps.fs_search, true, 'fs_search capability should be true');
-        assert.equal(caps.fs_write, false, 'fs_write still pending');
-        assert.equal(caps.fs_delete, false, 'fs_delete still pending');
-        assert.equal(caps.fs_move, false, 'fs_move still pending');
+        assert.equal(caps.fs_list, true);
+        assert.equal(caps.fs_read, true);
+        assert.equal(caps.fs_stat, true);
+        assert.equal(caps.fs_search, true);
+        assert.equal(caps.fs_write, true, 'fs_write capability should be true');
+        assert.equal(caps.fs_delete, true, 'fs_delete capability should be true');
+        assert.equal(caps.fs_move, true, 'fs_move capability should be true');
         assert.equal(caps.shell_run, false, 'shell_run still pending');
+        // /manifest now surfaces the resolved audit log path.
+        assert.equal(typeof res._state.body.auditLogPath, 'string');
+        assert.ok(path.isAbsolute(res._state.body.auditLogPath));
     });
 });
 
