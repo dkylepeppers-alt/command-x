@@ -14,6 +14,19 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { normalizeNovaPath } = require('./paths.js');
+const {
+    createFsListHandler,
+    createFsReadHandler,
+    createFsStatHandler,
+    createFsSearchHandler,
+} = require('./routes-fs-read.js');
+const {
+    createFsWriteHandler,
+    createFsDeleteHandler,
+    createFsMoveHandler,
+} = require('./routes-fs-write.js');
+const { buildAuditLogger } = require('./audit.js');
 
 const PLUGIN_ID = 'nova-agent-bridge';
 
@@ -52,13 +65,13 @@ const DEFAULT_SHELL_ALLOW = Object.freeze([
 // the UI can render a yellow "partial support" banner instead of silently
 // degrading.
 const CAPABILITIES = Object.freeze({
-    fs_list: false,
-    fs_read: false,
-    fs_write: false,
-    fs_delete: false,
-    fs_move: false,
-    fs_stat: false,
-    fs_search: false,
+    fs_list: true,
+    fs_read: true,
+    fs_write: true,
+    fs_delete: true,
+    fs_move: true,
+    fs_stat: true,
+    fs_search: true,
     shell_run: false,
 });
 
@@ -91,6 +104,25 @@ function resolveRoot(configPath) {
     return path.resolve(process.cwd());
 }
 
+// Module-scoped so exit() can close the audit logger on teardown. Kept at
+// module level rather than a closure because init() returns before the
+// logger is retained anywhere else.
+let activeAuditLogger = null;
+
+/**
+ * Choose the audit log path (plan §8c). Prefers `<root>/data/_nova-audit.jsonl`
+ * when the ST-style `data/` directory exists under the root. Falls back to
+ * `<root>/_nova-audit.jsonl` otherwise. Resolved once at init time.
+ */
+function resolveAuditLogPath(root) {
+    try {
+        const dataDir = path.join(root, 'data');
+        const st = fs.statSync(dataDir);
+        if (st && st.isDirectory()) return path.join(dataDir, '_nova-audit.jsonl');
+    } catch { /* falls through to root */ }
+    return path.join(root, '_nova-audit.jsonl');
+}
+
 /**
  * Express plugin init. Kept synchronous aside from the returned Promise so
  * any thrown error during router wiring propagates up to ST's plugin
@@ -99,6 +131,8 @@ function resolveRoot(configPath) {
 async function init(router) {
     const configPath = path.resolve(__dirname, 'config.yaml');
     const root = resolveRoot(configPath);
+    const auditLogPath = resolveAuditLogPath(root);
+    activeAuditLogger = buildAuditLogger({ logPath: auditLogPath });
 
     router.get('/manifest', (_req, res) => {
         res.json({
@@ -107,6 +141,7 @@ async function init(router) {
             root,
             shellAllowList: DEFAULT_SHELL_ALLOW.slice(),
             capabilities: CAPABILITIES,
+            auditLogPath,
         });
     });
 
@@ -114,35 +149,42 @@ async function init(router) {
         res.json({ ok: true, id: PLUGIN_ID, version: PLUGIN_VERSION });
     });
 
-    // Placeholder fs/* and shell/* routes — explicit 501 so the extension
-    // can distinguish "plugin present but tool not implemented" from
-    // "plugin missing entirely" (404 from ST's router).
-    const notImplemented = (route) => (_req, res) => {
+    // Shared handler dependencies. The write-side factories additionally
+    // receive the audit logger so every write/delete/move appends an entry.
+    const fsReadDeps = { root, normalizePath: normalizeNovaPath };
+    const fsWriteDeps = { ...fsReadDeps, auditLogger: activeAuditLogger };
+
+    router.get('/fs/list', createFsListHandler(fsReadDeps));
+    router.get('/fs/read', createFsReadHandler(fsReadDeps));
+    router.get('/fs/stat', createFsStatHandler(fsReadDeps));
+    router.post('/fs/search', createFsSearchHandler(fsReadDeps));
+
+    router.post('/fs/write', createFsWriteHandler(fsWriteDeps));
+    router.post('/fs/delete', createFsDeleteHandler(fsWriteDeps));
+    router.post('/fs/move', createFsMoveHandler(fsWriteDeps));
+
+    // Shell remains 501 — lands with the allow-list + timeout sprint.
+    router.post('/shell/run', (_req, res) => {
         res.status(501).json({
             error: 'not-implemented',
             plugin: PLUGIN_ID,
             version: PLUGIN_VERSION,
-            route,
+            route: '/shell/run',
         });
-    };
+    });
 
-    router.get('/fs/list', notImplemented('/fs/list'));
-    router.get('/fs/read', notImplemented('/fs/read'));
-    router.post('/fs/write', notImplemented('/fs/write'));
-    router.post('/fs/delete', notImplemented('/fs/delete'));
-    router.post('/fs/move', notImplemented('/fs/move'));
-    router.get('/fs/stat', notImplemented('/fs/stat'));
-    router.post('/fs/search', notImplemented('/fs/search'));
-    router.post('/shell/run', notImplemented('/shell/run'));
-
-    console.log(`[${PLUGIN_ID}] loaded — root=${root}`);
+    console.log(`[${PLUGIN_ID}] loaded — root=${root} audit=${auditLogPath}`);
     return Promise.resolve();
 }
 
 async function exit() {
-    // Plan §8d — flush audit log, release handles. Nothing to flush yet;
-    // stays a Promise so future async teardown slots in without changing
-    // the export shape.
+    // Plan §8d — close the audit logger. Today `close()` is a no-op but
+    // calling it keeps the lifecycle contract clean for the rotation
+    // sprint that may hold a write stream.
+    if (activeAuditLogger && typeof activeAuditLogger.close === 'function') {
+        try { await activeAuditLogger.close(); } catch { /* best-effort */ }
+    }
+    activeAuditLogger = null;
     return Promise.resolve();
 }
 
@@ -152,8 +194,8 @@ module.exports = {
     info: {
         id: PLUGIN_ID,
         name: 'Nova Agent Bridge',
-        description: 'Filesystem and shell bridge for the Command-X Nova agent. Scaffold — routes wired, fs/shell handlers pending.',
+        description: 'Filesystem and shell bridge for the Command-X Nova agent. Filesystem routes live; shell route pending.',
     },
     // Exposed for unit tests / other modules. Not part of the plugin contract.
-    _internal: { resolveRoot, resolvePluginVersion, PLUGIN_VERSION, DEFAULT_SHELL_ALLOW, CAPABILITIES },
+    _internal: { resolveRoot, resolvePluginVersion, resolveAuditLogPath, PLUGIN_VERSION, DEFAULT_SHELL_ALLOW, CAPABILITIES },
 };

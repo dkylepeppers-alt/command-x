@@ -361,12 +361,37 @@ Skill = named system-prompt pack + default tier + default tool subset. Single
 - [x] Minimal system prompt. Default tier: Read-only. All tools available
   when elevated (`defaultTools: 'all'`).
 
-### 5e. Skill structure
+### 5e. STscript & Regex *(added per amendment 2026-04-24)*
+- [x] System prompt: expert on three related ST automation surfaces —
+  STscript (slash-command pipelines, `{: closures :}`, `{{pipe}}`, control
+  flow, variables, arrays/objects), the Regex extension (global in
+  `settings.json.extensions.regex`, scoped in
+  `data.extensions.regex_scripts[]` on character cards, `placement`
+  bitmask, depth clamps, `{{match}}` + capture groups, `trimStrings`,
+  `substituteRegex`, ephemerality), and Macros 2.0 (Experimental Macro
+  Engine, nested macros, scoped syntax `{{foo}}...{{/foo}}`,
+  conditionals, variable shorthands `.local` / `$global`, operators
+  `= ++ -- += -= || ?? ||= ??= == != > >= < <=`, preserve-whitespace
+  flag `#`, comments `{{//}}`, escape rules).
+- [x] Default tools: `st_run_slash`, `st_get_context`,
+  `st_list_characters` / `st_read_character` / `st_write_character`,
+  `st_list_worldbooks` / `st_read_worldbook` / `st_write_worldbook`,
+  `fs_list` / `fs_read` / `fs_stat` / `fs_search` / `fs_write`.
+  Rationale: `st_run_slash` lets Nova test a generated script or regex
+  trigger end-to-end without leaving the chat; `fs_*` covers
+  `settings.json` edits that the ST API doesn't expose.
+- [x] Default tier: Write (allow escalation).
+- [x] Working rules baked into the prompt: dry-run with `/echo` before
+  destructive commands; prefer `st_write_character` over `fs_write` for
+  scoped regex; never emit patterns that can catastrophically backtrack;
+  output regex scripts in the ST Import dialog's JSON shape.
+
+### 5f. Skill structure
 ```
 { id, label, icon, systemPrompt, defaultTier, defaultTools: [names] | 'all',
   allowTierEscalation: true }
 ```
-- [x] `SKILLS_VERSION` constant (currently `1`) — bump when prompts change.
+- [x] `SKILLS_VERSION` constant (currently `2`) — bump when prompts change.
 
 ---
 
@@ -473,16 +498,30 @@ Always concatenated into the Nova system prompt regardless of skill.
   (not in original plan; extracted from §8c for unit testability).
 
 ### 8b. Routes (`/api/plugins/nova-agent-bridge/*`)
-- [x] `GET /manifest` → `{ id, version, root, shellAllowList, capabilities }`.
+- [x] `GET /manifest` → `{ id, version, root, shellAllowList, capabilities, auditLogPath }`.
   `capabilities` is `{ fs_list, fs_read, fs_write, fs_delete, fs_move,
-  fs_stat, fs_search, shell_run }`, each `true|false`. Scaffold ships all
-  `false` — extension Phase 4f reads this to decide which tools to
-  register.
+  fs_stat, fs_search, shell_run }`, each `true|false`. Post-write-sprint
+  every `fs_*` flag is `true`; only `shell_run` remains `false`.
 - [x] `GET /health` → `{ ok: true, id, version }`.
-- [ ] `GET /fs/list`, `GET /fs/read`, `POST /fs/write`, `POST /fs/delete`,
-  `POST /fs/move`, `GET /fs/stat`, `POST /fs/search` (NDJSON).
-  **Routes wired as `501 not-implemented` stubs**; real handlers land in the
-  Phase 8b handler sprint (blocked on audit-log infra + CSRF wiring).
+- [x] `GET /fs/list`, `GET /fs/read`, `GET /fs/stat`, `POST /fs/search` —
+  **shipped** in `server-plugin/nova-agent-bridge/routes-fs-read.js` as
+  pure handler factories, wired in `index.js`. Each runs `normalizeNovaPath`
+  + `fs.realpath` symlink re-check, enforces per-route caps (list: 5000
+  entries, depth 10; read: 10 MB; search: 500 results, 1 MB/file, binary
+  skip). Capabilities flipped to `true` in the manifest. Covered by
+  `test/nova-fs-read.test.mjs` (31 assertions) + tightened
+  `test/nova-plugin.test.mjs` expectations.
+- [x] `POST /fs/write`, `POST /fs/delete`, `POST /fs/move` — **shipped**
+  in `server-plugin/nova-agent-bridge/routes-fs-write.js`. Overwrites +
+  deletes route through `.nova-trash/<ts>/<relPath>` first; deletes
+  NEVER hard-unlink. 20 MB hard cap on `fs_write` content via
+  `FS_WRITE_HARD_CAP_BYTES`. Moves refuse to clobber by default; when
+  `overwrite: true` the destination is backed up to trash before the
+  rename. All three reuse `resolveRequestPath` from the read module for
+  path safety. All three append to the audit log. Covered by
+  `test/nova-fs-write.test.mjs` (23 assertions). `POST /shell/run` —
+  still `501 not-implemented`; shell needs allow-list + spawn-without-shell
+  + hard-timeout and lands in the next sprint.
 - [ ] `POST /shell/run` (NDJSON streaming `stdout`/`stderr`/`exit`).
   **Route wired as `501 not-implemented` stub**; real handler blocked on
   same.
@@ -492,22 +531,41 @@ Always concatenated into the Nova system prompt regardless of skill.
   (Simple `key: value` parse for now; no YAML dep.)
 - [x] Normalise every request path; reject escapes (pure helper in
   `paths.js`; covered by `test/nova-paths.test.mjs`, 19 assertions).
-  Reject symlink escapes (`fs.realpath` check) — **pending**, lands with
-  the fs handler sprint.
+  Reject symlink escapes (`fs.realpath` check) — **shipped** for the
+  read-only routes in `routes-fs-read.js::resolveRequestPath`; the
+  resolved realpath is re-normalised against the root and re-checked
+  against the deny-list so a symlink into `.git/` or outside root is
+  refused. Write routes will reuse the same helper when they land.
 - [x] Deny-list: `.git/**`, `node_modules/**`, `plugins/nova-agent-bridge/**`
   — enforced by `normalizeNovaPath`. Single-segment vs two-segment pair
   distinction avoids locking out unrelated directories that happen to be
   named `plugins`.
-- [ ] Max file size read/write: 20 MB.
+- [x] Max file size read: 10 MB hard cap on `/fs/read` via
+  `FS_READ_HARD_CAP_BYTES`; `/fs/search` additionally caps per-file read
+  at 1 MB. `/fs/write` content capped at 20 MB via
+  `FS_WRITE_HARD_CAP_BYTES` (decoded buffer length, so base64 inputs
+  are clamped to the same on-disk size).
 - [ ] Shell: no `shell: true`; binaries resolved via allow-list at startup.
 - [ ] CSRF protection mirroring ST's header check.
 - [ ] Require ST session cookie on every route.
-- [ ] Audit log: append to `SillyTavern/data/_nova-audit.jsonl` with
-  `{ ts, user, route, argsSummary, outcome, bytes }`. Never log `content`.
+- [x] Audit log: append to `SillyTavern/data/_nova-audit.jsonl` with
+  `{ ts, user?, route, argsSummary, outcome, bytes?, backup?, error? }`.
+  **Shipped** as `server-plugin/nova-agent-bridge/audit.js` —
+  `buildAuditLogger({ logPath, fsImpl?, nowImpl? })` returns an
+  `append(entry)` API that shallow-strips top-level `content/data/
+  payload/body/raw` keys and elides nested ones via a JSON replacer.
+  Never logs raw content. Path resolved at init to `<root>/data/
+  _nova-audit.jsonl` if the ST-style `data/` dir exists, else
+  `<root>/_nova-audit.jsonl`, and surfaced via `/manifest.auditLogPath`.
+  Failures are swallowed and returned as `{ ok:false, error }` so a
+  broken audit log never blocks a user request. Covered by
+  `test/nova-audit.test.mjs` (13 assertions incl. explicit leak-check
+  asserting raw-content substrings never reach the log bytes).
 
 ### 8d. Lifecycle
-- [x] `exit()` flushes audit log and releases file handles. (Stub today —
-  scaffold has nothing to flush. Shape ready for the audit-log sprint.)
+- [x] `exit()` flushes audit log and releases file handles. Today `close()`
+  is a no-op; the contract is in place so the rotation sprint (which may
+  hold a persistent write stream) can drop in without a caller change.
 
 ---
 
@@ -668,3 +726,38 @@ All under `test/` using Node `--test`.
 - **2026-04-22** — User approved plan and added §11: ship a Chat Completion
   preset usable by Nova and other Command-X utilities. Schema modeled on
   upstream ST `Default.json`. Plan saved to this file prior to starting work.
+- **2026-04-24** — User requested an additional skill: a **regex / STscript /
+  Macros 2.0 expert**. Shipped as a single combined skill (§5e,
+  id `stscript-regex`, label "STscript & Regex"). Rationale for bundling:
+  the three surfaces share identifiers, share the same `settings.json`
+  storage, and are almost always used together (a Regex script triggered by
+  a slash command inside a Quick Reply rendered through a macro). Splitting
+  into three separate skills would force the user to pick a tab per
+  question, and force Nova to context-switch mid-conversation. Bumped
+  `SKILLS_VERSION` → `2`. No manifest/VERSION bump (still `0.13.0`) because
+  Phase 8 (server plugin) and real tool handlers are still the gating work
+  for the next release; this amendment is purely additive to the prompt
+  catalogue and passes all existing structural tests unchanged.
+- **2026-04-24 (later)** — Phase 8b read-only fs routes shipped
+  (`/fs/list`, `/fs/read`, `/fs/stat`, `/fs/search`). Factored out
+  `server-plugin/nova-agent-bridge/routes-fs-read.js` as a pure
+  handler-factory module so unit tests can drive handlers end-to-end
+  against real tempdirs without Express. Capability flags in `/manifest`
+  flipped for the four implemented routes. Writes + shell still 501;
+  they need audit-log + `.nova-trash` + allow-list checks from §8c/§8d
+  and will ship in the next sprint. Node plugin package has no
+  runtime dependencies (Node built-ins only), so nothing to audit.
+- **2026-04-24 (latest)** — Phase 8b write routes shipped
+  (`/fs/write`, `/fs/delete`, `/fs/move`) + append-only JSONL audit log.
+  Overwrites + deletes always route through `.nova-trash/<ts>/<relPath>`
+  first — **deletes never hard-unlink**, so an agent mistake is always
+  recoverable. `fs_write` enforces a 20 MB hard cap on decoded content.
+  `moveToTrash` handles cross-device EXDEV by falling back to cp+rm, and
+  disambiguates bucket collisions with `.N` suffixes. Audit log factored
+  as a DI-friendly module (`audit.js`) with a strict anti-leak contract:
+  shallow-strips `content/data/payload/body/raw` keys at the top level
+  and elides nested occurrences via a JSON replacer. Cyclic references
+  in audit entries fall through to a stub error line rather than throwing.
+  `/manifest` now reports the resolved `auditLogPath`. `exit()` now calls
+  `auditLogger.close()` (no-op today; reserved for the rotation sprint).
+  Shell (`/shell/run`) is the only remaining 501 stub.

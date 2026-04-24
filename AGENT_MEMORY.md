@@ -77,6 +77,155 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-24 (latest) — Phase 8b write routes + audit log shipped (review pass 2)
+
+**Context:** Initial write-routes PR landed with 9 review comments. This update addresses all of them.
+
+**Fixes applied:**
+- **`paths.js`** — added `.nova-trash` to `DEFAULT_DENY_SEGMENTS`. The agent can no longer read/list/write inside the trash directory, so trashed backups are human-only. `moveToTrash` itself uses direct `fs` calls bypassing the deny-list and so can still write here.
+- **`routes-fs-write.js`** — strict base64 validation via `isStrictBase64()` (length-mod-4 + alphabet check, whitespace-tolerant). Replaces a dead `try/catch` around `Buffer.from(..., 'base64')` which never threw on bad base64 — it would have silently corrupted the file. Comment on `TRASH_DIR_NAME` rewritten to match reality (deny-list entry exists in `paths.js`).
+- **`routes-fs-write.js`** — `moveToTrash` EXDEV branch now mirrors the EEXIST disambiguation loop. Both physical mechanisms (rename + cp/rm) handle collisions identically. `trashRel` is computed once per attempt at the top of the loop so both branches return the same suffix-tagged path.
+- **`routes-fs-write.js`** — `/fs/move` now refuses `to: '.'` via a second `refuseRoot` call. Previously only `from: '.'` was refused; a `to: '.'` would have fallen through to a confusing 409/500 with empty `relPath`.
+- **`routes-fs-read.js::resolveRequestPath`** — when target ENOENT, walks parents upward via new `checkParentRealpath()` to find the nearest existing ancestor and realpath-verify it. Re-anchors the missing tail beneath the realpath'd parent. This closes a write-side symlink-escape: previously `linkOut/new.txt` (where `linkOut` symlinks outside root) would have created a file outside root because the ENOENT fallback used the unverified `norm.absolute`.
+- **`audit.js::ensureDir`** — only sets `dirEnsured = true` on actual mkdir success. Previously transient EACCES would memoise the failure and prevent self-healing on a later append.
+- **Test comments** — `nova-fs-write.test.mjs` header rewritten to match actual setup (single ROOT + `beforeEach` wipe of children); `nova-fs-read.test.mjs` `.git` filter comment unconfused.
+- **New tests:**
+  - `nova-paths.test.mjs` — `.nova-trash` deny-list locked in (3 cases).
+  - `nova-fs-write.test.mjs` — symlink-escape on non-existent write target; symlink-escape on non-existent move destination; strict base64 rejection (invalid char + bad length); whitespace-in-base64 acceptance; refused `to: '.'`. (+6 tests)
+  - `nova-audit.test.mjs` — mkdir retry after transient failure (3 assertions including a no-redundant-retry guard once dir exists).
+
+**446/446 tests pass** (+8 net since prior commit at 438; +46 since baseline at 400).
+
+**Notes for future agents:**
+- **The parent-realpath walk in `checkParentRealpath` pushes basenames at the TOP of each iteration, before realpathing the parent.** I had to fix this once already — if you push only in the ENOENT-catch branch, the leaf basename never makes it into `missingSegments` and `relative` comes back as the empty string. Test `"creates a new file and audits outcome=created"` is the canary.
+- **The walk caps at 256 iterations.** A pathological adversarial path (e.g. `a/a/a/...`) cannot pin a CPU. Real filesystems don't go this deep.
+- **`isStrictBase64('')` returns `true`** — empty content is a valid empty file. Test `"base64 content round-trips to the right bytes"` covers the non-empty path; an explicit empty case isn't tested but it's a one-line fall-through.
+- **`.nova-trash` deny-list lives in TWO places.** `paths.js::DEFAULT_DENY_SEGMENTS` is canonical; `test/nova-paths.test.mjs` keeps an inline copy per the file's own header convention. If you change one, mirror to the other or the test goes stale-silently.
+- **`moveToTrash` EXDEV retry catches both `EEXIST` and `ERR_FS_CP_EEXIST`.** `fs.cp` with `errorOnExist: true` throws the latter; native rename throws the former.
+- **The new symlink-escape tests require write permission to create symlinks.** On Windows, `fs.symlink` may need elevated privileges and these tests would skip/fail. CI runs Linux so no special handling today.
+
+### 2026-04-24 (later) — Phase 8b write routes + audit log shipped (initial)
+
+**Context:** Prior PR landed the four read-only fs routes. This PR completes the filesystem surface with writes + audit logging, leaving only `/shell/run` as 501.
+
+**What shipped:**
+- **`server-plugin/nova-agent-bridge/audit.js`** — pure CJS factory `buildAuditLogger({ logPath, fsImpl?, nowImpl? })` → `{ append(entry), close(), rotate }`. Writes newline-terminated JSONL to a configured log path. Ensures parent dir on first append. NEVER logs raw content — top-level `content/data/payload/body/raw` keys are shallow-stripped, nested occurrences are elided by a `JSON.stringify` replacer. Cyclic entries fall through to a stub error line rather than throwing. Failures are swallowed and returned as `{ ok: false, error }` so a broken audit log never cascades into a failed user request.
+- **`server-plugin/nova-agent-bridge/routes-fs-write.js`** — three write handler factories (`createFsWriteHandler`, `createFsDeleteHandler`, `createFsMoveHandler`) sharing a `moveToTrash({ root, absPath, relPath, bucket, fsImpl })` helper. All three reuse `resolveRequestPath` (now re-exported from `routes-fs-read.js`) for path safety.
+- **`index.js` wiring** — reads `<root>/data/_nova-audit.jsonl` (or `<root>/_nova-audit.jsonl` fallback), builds one module-level `activeAuditLogger`, passes it to every write handler. `/shell/run` is now the only `notImplemented` stub. `/manifest` surfaces the resolved `auditLogPath`. `exit()` calls `auditLogger.close()`.
+- **Capabilities manifest** — `fs_write`, `fs_delete`, `fs_move` flipped to `true`.
+
+**Safety contract (the whole point of this PR):**
+- **Deletes never hard-unlink.** `/fs/delete` always moves to `.nova-trash/<ts>/<relPath>`. An agent mistake is always recoverable until the user manually empties `.nova-trash/`.
+- **Overwrites always back up first.** `/fs/write` with an existing target + `overwrite:true` moves the existing file to trash BEFORE writing. If the backup fails (EACCES, disk full, etc.), the write is refused with 500 `backup-failed` — we never leave the caller in a state where v1 is gone and v2 didn't land.
+- **Move refuses to clobber by default.** `/fs/move` with an existing `to` + `overwrite:false` returns 409 `destination-exists`. With `overwrite:true` it backs up `to` to trash first.
+- **20 MB hard cap on write content.** `body.content` is decoded to a Buffer first (so a base64 input is clamped on decoded size), then length-checked. 413 `content-too-large` on overflow.
+- **Cross-device support.** `moveToTrash` catches EXDEV and falls back to `cp -r` + `rm -rf`.
+- **Trash collision disambiguation.** If two moves in the same bucket hit the same path (tests use DI clocks with collisions), subsequent entries get `.1` / `.2` suffixes. Hard capped at 100 attempts.
+- **Root protection.** `/fs/delete` and `/fs/move` both refuse to operate on `.` (the root itself) with 400 `refused-root`.
+- **Deny-list is still enforced.** Any write into `.git/`, `node_modules/`, or `plugins/nova-agent-bridge/` is refused at `resolveRequestPath`.
+
+**438/438 tests pass** (+38 new across `nova-audit.test.mjs` [13] + `nova-fs-write.test.mjs` [23] + `nova-plugin.test.mjs` [2]). Prior baseline was 400.
+
+**Notes for future agents:**
+- **`routes-fs-read.js` now re-exports `resolveRequestPath` + `sendError`.** The write module reuses them directly. Don't fork a second path-safety implementation — if you touch one contract, touch both.
+- **`activeAuditLogger` is module-scoped in `index.js` intentionally.** ST calls `init()` once and `exit()` once; the audit logger outlives both calls. If you ever add hot-reload or multiple `init` calls, you'll need to close the previous logger first.
+- **The audit log path is resolved ONCE at init.** If the user creates `<root>/data/` after the plugin starts, the log stays at `<root>/_nova-audit.jsonl` until the server restarts. Not worth re-resolving on every write.
+- **Audit redaction has two layers.** Top-level key strip (`sanitizeEntry`) + nested JSON replacer. The strip is the primary guard; the replacer catches nested `{ content: '...' }` a caller forgot to flatten. Test `nova-audit.test.mjs::"redacts nested content / data under any key"` asserts the literal content substring never lands in the written bytes — do not loosen this check.
+- **`moveToTrash` uses `path.posix.join` for the `trashRel` return value so the response is always POSIX-style, even on Windows.** Don't change this — the extension-side UI assumes `/`-separators.
+- **Cyclic audit entries fall through to a stub line.** The try/catch in `formatEntry` is load-bearing — a caller passing `{ ...entry, self: entry }` must not crash the audit subsystem. `nova-audit.test.mjs::"never throws on a cyclic entry"` enforces this.
+- **The 20 MB cap is on the decoded buffer, NOT the raw request body.** A 20 MB base64 string represents ~15 MB of bytes — we check after `Buffer.from(..., encoding)`. Extension-side, the `fs_write` tool schema doesn't cap size either; the plugin is the canonical enforcement point.
+- **`mkdtemp` + `rm -rf` lifecycle in both test files.** `nova-fs-write.test.mjs` uses `beforeEach` to wipe children of ROOT (but keeps ROOT itself) so each test starts clean. Don't switch it to `before`/`after` without reconciling the tests that assume no leftover state.
+
+**Follow-ups still outstanding on the Nova plan (copy-forward):**
+1. `/shell/run` handler: `spawn(cmd, args, { shell: false })` with an allow-list resolved against `DEFAULT_SHELL_ALLOW`, stdin disabled, per-request timeout (default 60 s, hard cap 5 min), stdout/stderr capture with size caps, audit log entry.
+2. Real handlers for `fs_*` / `st_*` / `phone_*` tool registry entries in `index.js`. The extension-side tool-handler factories wrap these HTTP routes — only the 5 `nova_*` self-edit tools have handlers today.
+3. Rich per-turn tool-call cards in the transcript (collapsible args/result + audit link).
+4. Diff previews in the approval modal (composer-side `fs_read` → `buildNovaUnifiedDiff` → `cxNovaApprovalModal`).
+
+**Hard constraints still active (copy-forward):**
+- `EXT === "command-x"` with a hyphen.
+- `VERSION` in `index.js` must equal `manifest.json#version`. Wiring test enforces this.
+- `turnTimeoutMs` clamp floor = 10000 everywhere.
+- `normalizeNovaPath` containment predicate: `relNative === '..' || startsWith('..' + path.sep)`.
+- `routes-fs-read.js::resolveRequestPath` adds the realpath-re-normalise layer; the write module reuses it unchanged. Both layers MUST remain in lockstep.
+- `escAttr` for HTML attribute interpolations; `escHtml` for text content.
+- **Deletes NEVER hard-unlink; overwrites ALWAYS back up first.** If you change this, you've changed the recovery story the whole Nova UI is built on.
+- **Audit log NEVER contains raw content.** Top-level + nested redaction is load-bearing.
+- Run tests via `node --test test/helpers.test.mjs test/nova-*.test.mjs`. **438/438** is the new baseline.
+
+### 2026-04-24 (mid) — Phase 8b read-only fs routes shipped
+
+**Context:** Handover priority #1 was "Phase 8 — `nova-agent-bridge` server plugin". All eight fs + shell routes were 501-stubs. This PR implements the four read-only routes end-to-end; writes + shell deliberately left as 501-stubs for a dedicated follow-up sprint.
+
+**What shipped:**
+- New file `server-plugin/nova-agent-bridge/routes-fs-read.js` (~390 LOC). Pure CommonJS factory module: exports `createFs{List,Read,Stat,Search}Handler({ root, normalizePath, fsImpl?, realpathImpl? })`. Each returns an Express-shaped `(req, res) => Promise<void>`. Factored this way so unit tests can drive handlers end-to-end against real tempdirs without spinning up Express.
+- `index.js` wires the four live routes + kept four `notImplemented` stubs (`/fs/write`, `/fs/delete`, `/fs/move`, `/shell/run`).
+- `CAPABILITIES` manifest flipped: `fs_list`, `fs_read`, `fs_stat`, `fs_search` → `true`.
+- `routes-fs-read.js::resolveRequestPath` does `normalizeNovaPath` → `fs.realpath` → re-normalise against root's realpath → re-run deny-list on the resolved relative path. ENOENT is not an error — it flows through as `{ exists: false }` so handlers can 404 cleanly.
+- Per-route safety caps: list = 5000 entries + maxDepth ≤ 10; read = 10 MB hard cap (`FS_READ_HARD_CAP_BYTES`); search = 500 results cap, 1 MB per-file read cap, null-byte heuristic (>4 nulls in first 8 KB → skip) so binary files don't poison text output.
+- New `test/nova-fs-read.test.mjs` — 31 assertions across 5 suites (fs_list, fs_read, fs_stat, fs_search, internals). Every test creates its own tempdir under `os.tmpdir()` via `before`/`after` hooks so runs are isolated. Symlink-escape test gracefully skips if the CI container refuses `fs.symlink` with EPERM/EACCES.
+- `test/nova-plugin.test.mjs` — "all 8 routes 501" split into "4 writes + shell still 501" + "4 read routes respond non-501 with proper 400/query-required" + "/manifest capabilities truthy for fs_list/fs_read/fs_stat/fs_search".
+- Plugin README `## Status` rewritten (Scaffold → Partial).
+- `docs/nova-agent-plan.md` §8b + §8c checkboxes flipped from `[ ]` to `[~]`/`[x]` with the partial-completion caveats; amendments log entry added.
+
+**400/400 tests pass** (+31 new). `node --check` clean on both plugin files. Code Review + CodeQL to be run via parallel_validation.
+
+**Notes for future agents:**
+- **`routes-fs-read.js` is pure CJS and has zero npm dependencies.** It imports only `node:path`, `node:fs`, `node:fs/promises`. Don't add anything else without a really good reason — the plugin's `package.json` promises "zero runtime deps".
+- **`resolveRequestPath` re-runs the deny-list on the realpath's relative form.** This is the guard against a symlink `nope` → `.git/HEAD` style escape. When you ship `/fs/write`, reuse this helper unchanged; don't reimplement the containment check.
+- **The `fsImpl` / `realpathImpl` DI hooks exist but aren't used in tests yet.** Tests run against real tempdirs because it's fast and actually exercises the realpath path. The DI exists for the *write* sprint where mocking fs mutations is cheaper than cleaning up tempdirs.
+- **Glob semantics on `/fs/search`**: `*` does NOT cross `/`, `**` DOES. `**/*.txt` requires a leading directory segment (mirrors bash globstar + ripgrep `--glob`). To match "any .txt at any depth including root", use the bare `**.txt` form. The relevant test (`globToRegExp: * does not cross slashes; ** does`) documents this explicitly. Initial test expectation got this wrong; was corrected during dev.
+- **Search is a plain substring match, NOT a regex search.** Plan §4a calls it "full-text search". If someone requests regex support, they must open a new tool (`fs_regex_search`) rather than overloading `fs_search` — changing the query semantics retroactively would silently break the LLM-facing tool schema.
+- **Binary-file heuristic: >4 null bytes in the first 8 KB → skip.** Mirrors ripgrep defaults. A cleaner UTF-8 validity check was considered but would skip valid UTF-16 BOM files; the null-byte counter is more conservative and deliberately matches user expectations from `rg`.
+- **No audit logging yet.** Read routes are NOT required to audit per plan §8c — only writes and shell. When the write sprint lands, add an `onAudit` hook to the handler factories (don't hardcode an `appendFile` call).
+- **`fs.read` uses explicit `fh.open` + partial read, not `fs.readFile(..., { maxBytes })`.** This matters for the 10 MB cap: `fs.readFile` would slurp the whole file first, THEN throw away the tail. The `fh.read` form never allocates more than `toRead` bytes. Don't "simplify" this back to `readFile`.
+- **`CAPABILITIES` in the plugin manifest is the extension's capability probe target (plan §4f).** The extension will read this to decide which tools to register per session. Keep the object shape stable — a key going from `false` → `true` is additive; flipping a key away from `true` is a breaking change.
+
+**Follow-ups still outstanding on the Nova plan (copy-forward):**
+1. Phase 8 writes + shell: `/fs/write`, `/fs/delete` (move to `.nova-trash/<ts>/`), `/fs/move`, `/shell/run` (spawn without `shell: true`, allow-list + timeout), plus `SillyTavern/data/_nova-audit.jsonl` append-only audit log.
+2. Real handlers for `fs_*` / `st_*` / `phone_*` tool registry entries in `index.js` (only the 5 `nova_*` self-edit tools have handlers today).
+3. Rich per-turn tool-call cards in the transcript (collapsible args/result + audit link).
+4. Diff previews in the approval modal (composer-side `fs_read` → `buildNovaUnifiedDiff` → `cxNovaApprovalModal`).
+
+**Hard constraints still active (copy-forward from prior entry):**
+- `EXT === "command-x"` with a hyphen.
+- `VERSION` in `index.js` must equal `manifest.json#version`. Wiring test enforces this.
+- `turnTimeoutMs` clamp floor = 10000 everywhere.
+- `normalizeNovaPath` containment predicate: `relNative === '..' || startsWith('..' + path.sep)`.
+- `routes-fs-read.js::resolveRequestPath` adds the realpath-re-normalise layer on top — both helpers MUST remain in lockstep.
+- `escAttr` for HTML attribute interpolations; `escHtml` for text content.
+- Run tests via `node --test test/helpers.test.mjs test/nova-*.test.mjs`. **400/400** is the new baseline.
+
+### 2026-04-24 — Nova skill: STscript & Regex (Macros 2.0 expert)
+
+**Context:** User asked to continue the Nova plan with "an additional skill — a regex / stscript / macros 2.0 expert (plus similar if you decide)". Shipped as a single combined skill rather than three separate ones.
+
+**What shipped:**
+- New `NOVA_SKILLS` entry `{ id: 'stscript-regex', label: 'STscript & Regex', icon: '⚙️', defaultTier: 'write' }` added to `index.js` between `worldbook-creator` and `image-prompter` (authoring-skill grouping).
+- `SKILLS_VERSION` bumped `1` → `2` (prompt-catalogue change).
+- Manifest / `VERSION` intentionally left at `0.13.0`. The parity test in `nova-ui-wiring.test.mjs` hardcodes `'0.13.0'`; bumping for a prompt-catalogue addition would thrash that test without benefit, and the real next release is gated on Phase 8 (server plugin) + tool handlers.
+- `docs/nova-agent-plan.md` updated: new §5e describing the skill, renumbered `Skill structure` → §5f, `SKILLS_VERSION` reference bumped, amendments log entry added.
+
+**Why one skill instead of three:** STscript, the Regex extension, and Macros 2.0 share identifiers (`{{getvar::x}}` resolves inside regex find patterns when `substituteRegex` is on; `/regex name="..."` calls from STscript trigger Regex scripts; Quick Replies are STscript scripts rendered through the same macro engine). The three surfaces are almost always used together in practice, so splitting would force the user to context-switch per question. The system prompt explicitly names all three domains in its `##` headings so the LLM routes correctly.
+
+**Notes for future agents:**
+- **Don't split `stscript-regex` into three skills casually.** The combined prompt is ~3 KB. If a user asks for deeper specialisation on only one surface, prefer editing the existing prompt with an opinionated section per surface (the three `##` headings) rather than fragmenting. Test coverage (structural `every skill has the required shape` + `every plan-specified skill id is present`) doesn't enforce the split.
+- **`defaultTools` for this skill is deliberately broader than Character Creator.** It includes `st_run_slash` (so Nova can dry-run scripts and regex triggers end-to-end) **and** both the character-card and worldbook tool sets (because STscript scripts / regex patterns commonly read or write either surface). `shell_run` and `fs_delete` / `fs_move` are intentionally NOT defaults — user can escalate tier and add them manually if building a build pipeline.
+- **`st_run_slash` is approval-gated (`permission: 'write'`).** The system prompt explicitly tells Nova to dry-run with `/echo` first. Do not attempt to switch `st_run_slash` to `'read'` without a very hard look — a slash command can do anything in ST, including `/persona`, `/delchat`, `/api`.
+- **Regex scope contract**: the prompt says "prefer `st_write_character` over `fs_write` for scoped regex (character-card `data.extensions.regex_scripts[]`); global regex lives in `settings.json.extensions.regex` and needs `fs_write`". If a future PR adds a dedicated `st_write_settings` tool, remove the `fs_write`-on-settings.json guidance from this skill's prompt.
+- **Prompt was authored from `st-docs/extensions/Regex.md` + `st-docs/Usage/macros.md` + `st-docs/For_Contributors/st-script.md`.** Those three files are the canonical reference for this skill. If they change upstream, update the skill prompt and bump `SKILLS_VERSION` again.
+- **The existing structural test (`nova-tool-args.test.mjs`) covers the new skill automatically** — every tool name in `defaultTools` is validated against `NOVA_TOOLS`, `defaultTier` against `VALID_TIERS`, and shape/id uniqueness. 369/369 still green; no new test file needed for a pure prompt addition.
+
+**Validation:**
+- `node --check index.js` clean.
+- `node --test test/helpers.test.mjs test/nova-*.test.mjs` → **369/369 pass** (unchanged from baseline).
+
+**Follow-ups / still outstanding on the Nova plan (copy-forward):**
+1. Phase 8 — `nova-agent-bridge` server plugin route handlers (`/fs/*`, `/shell/run`) are still `501 not-implemented` stubs.
+2. Real handlers for `fs_*`, `shell_*`, `st_*`, `phone_*` tools — only the five `nova_*` self-edit tools have handlers today.
+3. Rich per-turn tool-call cards in the transcript (collapsible args/result).
+4. Diff previews in the approval modal (composer-side pre-fetch via `fs_read` → `buildNovaUnifiedDiff` → pass into `cxNovaApprovalModal`).
+
 ### 2026-04-24 — Next-session hand-off: v0.13.0 "Nova goes live" (UI wiring + Phase 2c/6b/7/9/10)
 
 **Scope of this PR:** Nova's engine was already built and tested, but its UI was inert (controls `disabled`, no pill wiring, no composer handlers). This PR wires the engine to the view end-to-end and adds the remaining missing glue. Version bumped `0.12.0` → `0.13.0` in both `manifest.json` and `index.js` (the `VERSION` constant + the wiring test that enforces their agreement).

@@ -6,15 +6,20 @@ SillyTavern **server plugin** companion for the Command-X Nova agent. Provides t
 
 ## Status
 
-**Scaffold.** This sprint ships:
+**Filesystem-complete.** This sprint ships the write routes + audit log. Shell is still pending.
 
 - `init` / `exit` / `info` exports matching the ST plugin contract.
-- `GET /api/plugins/nova-agent-bridge/manifest` — reports version, configured root, shell allow-list, and per-capability implementation status.
+- `GET /api/plugins/nova-agent-bridge/manifest` — reports version, configured root, shell allow-list, audit log path, and per-capability implementation status.
 - `GET /api/plugins/nova-agent-bridge/health` — liveness probe.
-- Placeholder `GET /fs/list`, `GET /fs/read`, `POST /fs/write`, `POST /fs/delete`, `POST /fs/move`, `GET /fs/stat`, `POST /fs/search`, `POST /shell/run` — all return `501 Not Implemented` so the extension's capability probe (plan §4f) can distinguish "plugin present, handler pending" from "plugin missing".
-- `paths.js` — pure path-safety helper (normalise + containment check + deny-list) used by every future route.
-
-The `fs_*` and `shell_run` **handlers** land in follow-up sprints. The [`docs/nova-agent-plan.md`](../../docs/nova-agent-plan.md) §8 is the source of truth for the route contract and security model.
+- **Implemented filesystem:**
+  - `GET /fs/list`, `GET /fs/read`, `GET /fs/stat`, `POST /fs/search` (read-only, shipped in the previous sprint).
+  - `POST /fs/write`, `POST /fs/delete`, `POST /fs/move` (new). Writes back existing files up to `.nova-trash/<ts>/<path>` before overwrite. Deletes never hard-unlink — they move to trash so an agent mistake is always recoverable. Moves refuse to clobber by default.
+- **Audit log:** every write / delete / move appends a newline-terminated JSON line to `SillyTavern/data/_nova-audit.jsonl` (or `<root>/_nova-audit.jsonl` if no `data/` dir). Schema: `{ ts, route, outcome, argsSummary, bytes?, backup?, error? }`. Raw content is NEVER logged — top-level and nested `content` / `data` / `payload` / `body` / `raw` keys are always stripped.
+- **Still pending (501 Not Implemented):** `POST /shell/run`. Needs spawn-without-shell + allow-list + hard-timeout; lands next sprint.
+- `paths.js` — pure path-safety helper (normalise + containment check + deny-list).
+- `routes-fs-read.js` — read-only handlers + shared `resolveRequestPath` (realpath-reverify).
+- `routes-fs-write.js` — write/delete/move handlers + `moveToTrash` helper.
+- `audit.js` — append-only JSONL audit logger factory.
 
 ## Install
 
