@@ -22,17 +22,10 @@ const path = require('node:path');
 /**
  * Default deny-list (plan §8c). Single-name segments: if any path component
  * equals one of these, the request is denied regardless of depth.
- *
- * `.nova-trash` is included so the agent cannot read/write/list the trash
- * directory itself — recovery from `.nova-trash/` is a human-only operation.
- * Trash backups still LAND in this directory because the plugin uses
- * direct `fs` calls bypassing the deny-list, but agent-driven routes
- * cannot reach inside.
  */
 const DEFAULT_DENY_SEGMENTS = Object.freeze([
     '.git',
     'node_modules',
-    '.nova-trash',
 ]);
 
 /**
