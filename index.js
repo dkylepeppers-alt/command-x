@@ -4251,11 +4251,18 @@ function cxPickList(title, options, { initial = null, confirmLabel = 'Choose' } 
             </div>`;
         const close = (result) => { overlay.remove(); document.removeEventListener('keydown', onKey); resolve(result); };
         const onKey = (e) => { if (e.key === 'Escape') close(null); };
+        const selectRow = (row) => {
+            selected = row.dataset.pickValue;
+            overlay.querySelectorAll('.cx-pick-row').forEach(r => r.classList.remove('cx-pick-active'));
+            row.classList.add('cx-pick-active');
+        };
         overlay.querySelectorAll('.cx-pick-row').forEach(row => {
-            row.addEventListener('click', () => {
-                selected = row.dataset.pickValue;
-                overlay.querySelectorAll('.cx-pick-row').forEach(r => r.classList.remove('cx-pick-active'));
-                row.classList.add('cx-pick-active');
+            row.addEventListener('click', () => selectRow(row));
+            row.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+                    e.preventDefault();
+                    selectRow(row);
+                }
             });
         });
         overlay.querySelector('#cx-pick-cancel').addEventListener('click', () => close(null));
@@ -4447,9 +4454,10 @@ async function novaHandleSend() {
     const { soul, memory } = await loadNovaSoulMemory();
 
     // Build the tool handler set. Soul/memory self-edit tools are the
-    // only ones we ship handlers for today — other tools (fs_*, shell_*,
-    // st_*, phone_*) return { error: 'no-handler' } via the dispatcher's
-    // unknown-tool failure surface.
+    // only ones we ship handlers for today — other registered tools
+    // (fs_*, shell_*, st_*, phone_*) return { error: 'no-handler' } when
+    // dispatched without a handler, while missing tools use the
+    // dispatcher's unknown-tool failure surface.
     const toolHandlers = buildNovaSoulMemoryHandlers({});
 
     setNovaInFlight(true);
@@ -4465,7 +4473,7 @@ async function novaHandleSend() {
         soul,
         memory,
         maxToolCalls: Math.max(1, Number(nova.maxToolCalls) || NOVA_DEFAULTS.maxToolCalls),
-        turnTimeoutMs: Math.max(1000, Number(nova.turnTimeoutMs) || NOVA_DEFAULTS.turnTimeoutMs),
+        turnTimeoutMs: Math.max(10000, Number(nova.turnTimeoutMs) || NOVA_DEFAULTS.turnTimeoutMs),
         tools: textOnlyFallback ? [] : NOVA_TOOLS,
         sendRequest,
         executeSlash: exec,
@@ -7226,7 +7234,7 @@ function loadSettings() {
     const novaMax = document.getElementById('cx_nova_max_tool_calls');
     if (novaMax) novaMax.value = Math.max(1, Number(nova.maxToolCalls) || NOVA_DEFAULTS.maxToolCalls);
     const novaTimeout = document.getElementById('cx_nova_turn_timeout_ms');
-    if (novaTimeout) novaTimeout.value = Math.max(1000, Number(nova.turnTimeoutMs) || NOVA_DEFAULTS.turnTimeoutMs);
+    if (novaTimeout) novaTimeout.value = Math.max(10000, Number(nova.turnTimeoutMs) || NOVA_DEFAULTS.turnTimeoutMs);
     const novaBase = document.getElementById('cx_nova_plugin_base_url');
     if (novaBase) novaBase.value = String(nova.pluginBaseUrl || NOVA_DEFAULTS.pluginBaseUrl);
 }
