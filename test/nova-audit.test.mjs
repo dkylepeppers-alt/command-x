@@ -169,6 +169,50 @@ describe('audit failure handling', () => {
         assert.equal(lines[0].outcome, 'error');
         assert.equal(lines[0].error, 'json-serialise-failed');
     });
+
+    it('retries mkdir on subsequent appends after a transient failure', async () => {
+        // Simulate a transient EACCES on mkdir (e.g. a permissions race
+        // that resolves itself). The first append should report the
+        // failure; the second — once the underlying condition clears —
+        // should succeed. Without the fix this would stay broken because
+        // `dirEnsured` was being set even on the failure path.
+        let mkdirCalls = 0;
+        let mkdirShouldFail = true;
+        const fakeFs = {
+            mkdir: async (dir, opts) => {
+                mkdirCalls += 1;
+                if (mkdirShouldFail) {
+                    throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+                }
+                // Delegate to real fs once we're "fixed".
+                return fsPromises.mkdir(dir, opts);
+            },
+            appendFile: async (p, data, enc) => {
+                if (mkdirShouldFail) {
+                    // Mirror what would happen for real if the dir is
+                    // missing — appendFile would ENOENT.
+                    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+                }
+                return fsPromises.appendFile(p, data, enc);
+            },
+        };
+        const logPath = path.join(DIR, 'retry-subdir', 'retry.jsonl');
+        const logger = buildAuditLogger({ logPath, fsImpl: fakeFs });
+
+        const r1 = await logger.append({ route: '/fs/write', outcome: 'created' });
+        assert.equal(r1.ok, false, 'first append should report failure');
+        assert.equal(mkdirCalls, 1);
+
+        // "Fix" the underlying condition and retry.
+        mkdirShouldFail = false;
+        const r2 = await logger.append({ route: '/fs/write', outcome: 'created' });
+        assert.equal(r2.ok, true, 'second append should succeed once mkdir is fixed');
+        assert.equal(mkdirCalls, 2, 'mkdir must be retried, not memoised on failure');
+
+        // Subsequent successful appends should not retry mkdir again.
+        await logger.append({ route: '/fs/write', outcome: 'created' });
+        assert.equal(mkdirCalls, 2, 'mkdir must NOT re-run after a successful ensure');
+    });
 });
 
 describe('audit internals', () => {

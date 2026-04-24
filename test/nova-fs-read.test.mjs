@@ -84,10 +84,10 @@ describe('/fs/list', () => {
         await handler({ query: { path: '.' } }, res);
         assert.equal(res._state.statusCode, 200);
         const names = res._state.body.entries.map(e => e.name).sort();
-        // `.git` + `node_modules` are deny-listed segments — the listing
-        // includes .git here because the deny-list is checked on the
-        // *child path* and `.git` is exactly one of the denied segments,
-        // so it is filtered. Explicitly assert it's NOT present.
+        // `.git` is a deny-listed segment. The deny-list is checked
+        // against each child path, so a child literally named `.git`
+        // matches a denied segment and is filtered out of the listing.
+        // Explicitly assert that `.git` is not present.
         assert.ok(!names.includes('.git'), 'deny-listed .git should not appear');
         assert.ok(names.includes('a.txt'));
         assert.ok(names.includes('sub'));

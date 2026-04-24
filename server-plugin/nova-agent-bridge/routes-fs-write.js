@@ -45,11 +45,28 @@ const { resolveRequestPath, sendError } = require('./routes-fs-read.js');
 // so this ceiling applies to the on-disk size.
 const FS_WRITE_HARD_CAP_BYTES = 20 * 1024 * 1024;
 
-// Name of the trash directory under the root. Must match what the
-// read-side deny-list recognises so the agent cannot accidentally
-// read/write inside the trash (it is not on the deny-list today, but
-// landing in a predictable dir makes backup/cleanup trivial).
+// Name of the trash directory under the root. Deny-listed in
+// `paths.js::DEFAULT_DENY_SEGMENTS` so the agent cannot read/write/list
+// inside it — recovery from `.nova-trash/` is a human-only operation.
+// `moveToTrash` itself uses direct `fs` calls (no `normalizePath`) and so
+// can still write here.
 const TRASH_DIR_NAME = '.nova-trash';
+
+// Strict base64 validator (used by /fs/write when encoding=base64). Node's
+// `Buffer.from(s, 'base64')` silently strips invalid characters, which
+// means a typo would corrupt the file on disk. Validate before decoding.
+// Accepts the standard alphabet (A-Z a-z 0-9 + /) plus optional `=` padding,
+// and tolerates inline whitespace (newlines etc.) the way most base64
+// emitters produce. Empty strings are valid (empty file content).
+function isStrictBase64(s) {
+    if (typeof s !== 'string') return false;
+    if (s.length === 0) return true;
+    // Strip whitespace before length / charset checks.
+    const stripped = s.replace(/\s+/g, '');
+    if (stripped.length === 0) return true;
+    if (stripped.length % 4 !== 0) return false;
+    return /^[A-Za-z0-9+/]+={0,2}$/.test(stripped);
+}
 
 /**
  * Generate a trash bucket identifier for this request. Uses ISO-ish
@@ -88,32 +105,37 @@ async function moveToTrash({ root, absPath, relPath, bucket, fsImpl }) {
         return { ok: false, error: e?.message || String(e) };
     }
     // Collision-avoidance loop. Stop at 100 attempts so a pathological
-    // case can't spin forever.
+    // case can't spin forever. Both the rename branch AND the EXDEV
+    // copy+rm fallback share this loop so the disambiguation rules are
+    // identical regardless of which physical mechanism was used.
     for (let attempt = 0; attempt < 100; attempt++) {
+        const suffix = attempt > 0 ? `.${attempt}` : '';
+        const trashRel = path.posix.join(
+            TRASH_DIR_NAME,
+            bucket,
+            relPath.split(path.sep).join('/'),
+        ) + suffix;
         try {
             await fsp.rename(absPath, candidate);
-            return {
-                ok: true,
-                trashAbs: candidate,
-                trashRel: path.posix.join(TRASH_DIR_NAME, bucket, relPath.split(path.sep).join('/'))
-                    + (attempt > 0 ? `.${attempt}` : ''),
-            };
+            return { ok: true, trashAbs: candidate, trashRel };
         } catch (e) {
             if (e?.code === 'EEXIST') {
                 candidate = path.join(trashRoot, `${relPath}.${attempt + 1}`);
                 continue;
             }
-            // rename across devices falls back to copy+unlink
+            // rename across devices falls back to copy+unlink. Re-runs
+            // through the same disambiguation loop so an EEXIST during
+            // copy is retried with a fresh suffix.
             if (e?.code === 'EXDEV') {
                 try {
                     await fsp.cp(absPath, candidate, { recursive: true, errorOnExist: true });
                     await fsp.rm(absPath, { recursive: true, force: true });
-                    return {
-                        ok: true,
-                        trashAbs: candidate,
-                        trashRel: path.posix.join(TRASH_DIR_NAME, bucket, relPath.split(path.sep).join('/')),
-                    };
+                    return { ok: true, trashAbs: candidate, trashRel };
                 } catch (e2) {
+                    if (e2?.code === 'EEXIST' || e2?.code === 'ERR_FS_CP_EEXIST') {
+                        candidate = path.join(trashRoot, `${relPath}.${attempt + 1}`);
+                        continue;
+                    }
                     return { ok: false, error: e2?.message || String(e2) };
                 }
             }
@@ -162,12 +184,14 @@ function createFsWriteHandler({ root, normalizePath, fsImpl, realpathImpl, audit
             return sendError(res, 400, 'content-required');
         }
 
-        let buffer;
-        try {
-            buffer = Buffer.from(body.content, encoding);
-        } catch (e) {
-            return sendError(res, 400, 'invalid-content', { detail: e?.message || String(e) });
+        // Base64 decoding silently drops invalid characters in Node, which
+        // means a typo'd payload would write a corrupt file rather than
+        // surface a 400. Validate strictly when encoding=base64 so the
+        // contract matches what the schema implies.
+        if (encoding === 'base64' && !isStrictBase64(body.content)) {
+            return sendError(res, 400, 'invalid-content', { detail: 'malformed base64' });
         }
+        const buffer = Buffer.from(body.content, encoding);
         if (buffer.length > FS_WRITE_HARD_CAP_BYTES) {
             return sendError(res, 413, 'content-too-large', { cap: FS_WRITE_HARD_CAP_BYTES, bytes: buffer.length });
         }
@@ -351,6 +375,9 @@ function createFsMoveHandler({ root, normalizePath, fsImpl, realpathImpl, auditL
 
         if (refuseRoot(fromRel, res, auditLogger, {
             route: '/fs/move', outcome: 'refused-root', argsSummary: { from: '.' },
+        })) return;
+        if (refuseRoot(toRel, res, auditLogger, {
+            route: '/fs/move', outcome: 'refused-root', argsSummary: { to: '.' },
         })) return;
 
         if (resolvedTo.exists) {

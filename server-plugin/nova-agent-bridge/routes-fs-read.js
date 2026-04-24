@@ -63,9 +63,19 @@ function sendError(res, status, error, extra = {}) {
  * discriminated union the handlers branch on.
  *
  * `realpathImpl` is injected for testability. Defaults to the real
- * `fs.promises.realpath`. On ENOENT we fall back to the non-realpath'd
- * absolute path and return `{ ok: true, exists: false, absolute, relative }`
- * so handlers like `/fs/stat` can return 404 instead of re-normalising.
+ * `fs.promises.realpath`. On ENOENT we fall back to walking up the path
+ * to find the nearest existing parent, realpath-verify *that*, and
+ * re-anchor the missing tail under it. This means a request like
+ * `linkOut/new.txt` — where `linkOut` is a symlink pointing outside
+ * root — is rejected even when `new.txt` doesn't exist yet. Without this
+ * step, write routes that reuse `resolveRequestPath` could create files
+ * outside the configured root.
+ *
+ * Returns:
+ *   { ok: true, exists: true,  absolute, relative }      — target exists
+ *   { ok: true, exists: false, absolute, relative }      — target missing,
+ *       but every existing parent passes realpath/deny-list checks
+ *   { ok: false, status, error, ... }                    — any failure
  */
 async function resolveRequestPath({ root, normalizePath, requestPath, realpathImpl }) {
     const norm = normalizePath({ root, requestPath });
@@ -78,10 +88,20 @@ async function resolveRequestPath({ root, normalizePath, requestPath, realpathIm
         realAbs = await realpath(norm.absolute);
     } catch (e) {
         if (e && e.code === 'ENOENT') {
-            // The path is syntactically valid + contained but doesn't
-            // exist yet. For read handlers this is a 404; the caller
-            // decides the status from `exists: false`.
-            return { ok: true, exists: false, absolute: norm.absolute, relative: norm.relative };
+            // Target doesn't exist yet. Walk up until we find a parent
+            // that DOES exist, realpath-verify it, and re-anchor the
+            // missing tail. This protects write routes from symlink-escape
+            // through a parent directory.
+            const parentCheck = await checkParentRealpath({
+                root, norm, realpath, normalizePath,
+            });
+            if (!parentCheck.ok) return parentCheck;
+            return {
+                ok: true,
+                exists: false,
+                absolute: parentCheck.absolute,
+                relative: parentCheck.relative,
+            };
         }
         return { ok: false, status: 500, error: 'fs-error', detail: e?.message || String(e) };
     }
@@ -103,6 +123,88 @@ async function resolveRequestPath({ root, normalizePath, requestPath, realpathIm
         return { ok: false, status: 400, error: 'invalid-path', reason: reNorm.reason, detail: reNorm.detail };
     }
     return { ok: true, exists: true, absolute: realAbs, relative: reNorm.relative };
+}
+
+/**
+ * For a non-existent target, find the nearest existing ancestor and
+ * realpath-verify it. Re-anchors the missing tail beneath that parent so
+ * the write target lives under an actually-contained-and-allowed path.
+ *
+ * Returns either a `resolveRequestPath`-shaped error, or
+ *   { ok: true, absolute, relative }
+ * where `absolute` is the rebuilt target path (`<realParent>/<missing-tail>`)
+ * and `relative` is the POSIX-style relative path under the realpath'd root.
+ */
+async function checkParentRealpath({ root, norm, realpath, normalizePath }) {
+    const rootAbs = path.resolve(root);
+    const rootReal = await (async () => {
+        try { return await realpath(rootAbs); }
+        catch { return rootAbs; }
+    })();
+
+    // Walk parents of `norm.absolute` upward until one resolves. At the
+    // top of each iteration we record the basename of `current` (the
+    // not-yet-existing leaf) and step to its parent — so when we find
+    // an existing ancestor, `missingSegments` holds the chain of
+    // not-yet-existing names beneath it (in walk order, i.e. closest to
+    // root first). We reverse it before re-anchoring.
+    let current = norm.absolute;
+    const missingSegments = [];
+    // Cap the walk so a malicious path with thousands of segments can't
+    // pin a CPU. Real filesystems don't go this deep anyway.
+    for (let i = 0; i < 256; i++) {
+        const parent = path.dirname(current);
+        if (parent === current) {
+            // Reached filesystem root without finding an existing ancestor.
+            // Treat as escape — no contained parent means we cannot vouch
+            // for the path.
+            return { ok: false, status: 400, error: 'symlink-escape' };
+        }
+        // Record `current`'s basename as a missing tail segment; we are
+        // about to test whether `parent` exists.
+        missingSegments.push(path.basename(current));
+        try {
+            const realParent = await realpath(parent);
+            // Verify the realpath of the existing parent is still inside
+            // the realpath'd root.
+            const relToRoot = path.relative(rootReal, realParent);
+            if (relToRoot === '..'
+                || relToRoot.startsWith('..' + path.sep)
+                || path.isAbsolute(relToRoot)) {
+                return { ok: false, status: 400, error: 'symlink-escape' };
+            }
+            // Re-run the deny-list on the realpath'd parent so a symlink
+            // into `.git` / `node_modules` / the plugin folder is refused.
+            const reNorm = normalizePath({ root: rootReal, requestPath: relToRoot || '.' });
+            if (!reNorm.ok) {
+                return { ok: false, status: 400, error: 'invalid-path', reason: reNorm.reason, detail: reNorm.detail };
+            }
+            // Re-anchor the missing tail beneath the realpath'd parent.
+            // `missingSegments` is in walk order (leaf first); reverse so
+            // the rebuilt path reads parent → leaf.
+            const tail = missingSegments.slice().reverse();
+            const absolute = path.join(realParent, ...tail);
+            const tailPosix = tail.join('/');
+            const baseRel = reNorm.relative || '';
+            const relative = baseRel
+                ? (tailPosix ? `${baseRel}/${tailPosix}` : baseRel)
+                : tailPosix;
+            // Belt-and-braces: re-run the deny-list on the FULL relative
+            // path so a missing tail segment named `.git` is also refused.
+            const finalNorm = normalizePath({ root: rootReal, requestPath: relative || '.' });
+            if (!finalNorm.ok) {
+                return { ok: false, status: 400, error: 'invalid-path', reason: finalNorm.reason, detail: finalNorm.detail };
+            }
+            return { ok: true, absolute, relative: finalNorm.relative };
+        } catch (e) {
+            if (e && e.code === 'ENOENT') {
+                current = parent;
+                continue;
+            }
+            return { ok: false, status: 500, error: 'fs-error', detail: e?.message || String(e) };
+        }
+    }
+    return { ok: false, status: 400, error: 'invalid-path', reason: 'too-deep' };
 }
 
 /**

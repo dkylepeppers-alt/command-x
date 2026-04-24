@@ -96,9 +96,16 @@ function buildAuditLogger({ logPath, fsImpl, nowImpl } = {}) {
     async function ensureDir() {
         if (dirEnsured) return;
         const dir = path.dirname(logPath);
-        try { await fsp.mkdir(dir, { recursive: true }); }
-        catch { /* best-effort; the appendFile below will surface the real error */ }
-        dirEnsured = true;
+        try {
+            await fsp.mkdir(dir, { recursive: true });
+            // Only mark ensured on actual success so a transient EACCES /
+            // EROFS can be retried by the next append once the underlying
+            // condition clears.
+            dirEnsured = true;
+        } catch {
+            // Best-effort: leave `dirEnsured` false so we'll retry next
+            // call. The appendFile below will surface the real error.
+        }
     }
 
     async function append(entry) {

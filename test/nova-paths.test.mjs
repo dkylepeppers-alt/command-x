@@ -16,7 +16,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 
-const DEFAULT_DENY_SEGMENTS = Object.freeze(['.git', 'node_modules']);
+const DEFAULT_DENY_SEGMENTS = Object.freeze(['.git', 'node_modules', '.nova-trash']);
 const DEFAULT_DENY_PAIRS = Object.freeze([['plugins', 'nova-agent-bridge']]);
 
 function normalizeNovaPath({ root, requestPath, denyList } = {}) {
@@ -188,6 +188,20 @@ describe('normalizeNovaPath — deny-list', () => {
         const r = normalizeNovaPath({ root: ROOT, requestPath: 'node_modules/express/index.js' });
         assert.equal(r.ok, false);
         assert.equal(r.detail, 'node_modules');
+    });
+
+    it('denies .nova-trash so the agent cannot read/write/list trashed backups', () => {
+        const cases = [
+            '.nova-trash',
+            '.nova-trash/2026-04-24/foo.txt',
+            'sub/.nova-trash/leak',
+        ];
+        for (const p of cases) {
+            const r = normalizeNovaPath({ root: ROOT, requestPath: p });
+            assert.equal(r.ok, false, `${p} must be denied`);
+            assert.equal(r.reason, 'denied');
+            assert.equal(r.detail, '.nova-trash');
+        }
     });
 
     it('denies plugins/nova-agent-bridge/** (two-segment pair)', () => {

@@ -77,7 +77,34 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
-### 2026-04-24 (latest) — Phase 8b write routes + audit log shipped
+### 2026-04-24 (latest) — Phase 8b write routes + audit log shipped (review pass 2)
+
+**Context:** Initial write-routes PR landed with 9 review comments. This update addresses all of them.
+
+**Fixes applied:**
+- **`paths.js`** — added `.nova-trash` to `DEFAULT_DENY_SEGMENTS`. The agent can no longer read/list/write inside the trash directory, so trashed backups are human-only. `moveToTrash` itself uses direct `fs` calls bypassing the deny-list and so can still write here.
+- **`routes-fs-write.js`** — strict base64 validation via `isStrictBase64()` (length-mod-4 + alphabet check, whitespace-tolerant). Replaces a dead `try/catch` around `Buffer.from(..., 'base64')` which never threw on bad base64 — it would have silently corrupted the file. Comment on `TRASH_DIR_NAME` rewritten to match reality (deny-list entry exists in `paths.js`).
+- **`routes-fs-write.js`** — `moveToTrash` EXDEV branch now mirrors the EEXIST disambiguation loop. Both physical mechanisms (rename + cp/rm) handle collisions identically. `trashRel` is computed once per attempt at the top of the loop so both branches return the same suffix-tagged path.
+- **`routes-fs-write.js`** — `/fs/move` now refuses `to: '.'` via a second `refuseRoot` call. Previously only `from: '.'` was refused; a `to: '.'` would have fallen through to a confusing 409/500 with empty `relPath`.
+- **`routes-fs-read.js::resolveRequestPath`** — when target ENOENT, walks parents upward via new `checkParentRealpath()` to find the nearest existing ancestor and realpath-verify it. Re-anchors the missing tail beneath the realpath'd parent. This closes a write-side symlink-escape: previously `linkOut/new.txt` (where `linkOut` symlinks outside root) would have created a file outside root because the ENOENT fallback used the unverified `norm.absolute`.
+- **`audit.js::ensureDir`** — only sets `dirEnsured = true` on actual mkdir success. Previously transient EACCES would memoise the failure and prevent self-healing on a later append.
+- **Test comments** — `nova-fs-write.test.mjs` header rewritten to match actual setup (single ROOT + `beforeEach` wipe of children); `nova-fs-read.test.mjs` `.git` filter comment unconfused.
+- **New tests:**
+  - `nova-paths.test.mjs` — `.nova-trash` deny-list locked in (3 cases).
+  - `nova-fs-write.test.mjs` — symlink-escape on non-existent write target; symlink-escape on non-existent move destination; strict base64 rejection (invalid char + bad length); whitespace-in-base64 acceptance; refused `to: '.'`. (+6 tests)
+  - `nova-audit.test.mjs` — mkdir retry after transient failure (3 assertions including a no-redundant-retry guard once dir exists).
+
+**446/446 tests pass** (+8 net since prior commit at 438; +46 since baseline at 400).
+
+**Notes for future agents:**
+- **The parent-realpath walk in `checkParentRealpath` pushes basenames at the TOP of each iteration, before realpathing the parent.** I had to fix this once already — if you push only in the ENOENT-catch branch, the leaf basename never makes it into `missingSegments` and `relative` comes back as the empty string. Test `"creates a new file and audits outcome=created"` is the canary.
+- **The walk caps at 256 iterations.** A pathological adversarial path (e.g. `a/a/a/...`) cannot pin a CPU. Real filesystems don't go this deep.
+- **`isStrictBase64('')` returns `true`** — empty content is a valid empty file. Test `"base64 content round-trips to the right bytes"` covers the non-empty path; an explicit empty case isn't tested but it's a one-line fall-through.
+- **`.nova-trash` deny-list lives in TWO places.** `paths.js::DEFAULT_DENY_SEGMENTS` is canonical; `test/nova-paths.test.mjs` keeps an inline copy per the file's own header convention. If you change one, mirror to the other or the test goes stale-silently.
+- **`moveToTrash` EXDEV retry catches both `EEXIST` and `ERR_FS_CP_EEXIST`.** `fs.cp` with `errorOnExist: true` throws the latter; native rename throws the former.
+- **The new symlink-escape tests require write permission to create symlinks.** On Windows, `fs.symlink` may need elevated privileges and these tests would skip/fail. CI runs Linux so no special handling today.
+
+### 2026-04-24 (later) — Phase 8b write routes + audit log shipped (initial)
 
 **Context:** Prior PR landed the four read-only fs routes. This PR completes the filesystem surface with writes + audit logging, leaving only `/shell/run` as 501.
 
@@ -126,7 +153,7 @@ _Newest entries first. Append a new entry here at the end of every PR._
 - **Audit log NEVER contains raw content.** Top-level + nested redaction is load-bearing.
 - Run tests via `node --test test/helpers.test.mjs test/nova-*.test.mjs`. **438/438** is the new baseline.
 
-### 2026-04-24 (later) — Phase 8b read-only fs routes shipped
+### 2026-04-24 (mid) — Phase 8b read-only fs routes shipped
 
 **Context:** Handover priority #1 was "Phase 8 — `nova-agent-bridge` server plugin". All eight fs + shell routes were 501-stubs. This PR implements the four read-only routes end-to-end; writes + shell deliberately left as 501-stubs for a dedicated follow-up sprint.
 

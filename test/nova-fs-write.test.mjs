@@ -2,10 +2,11 @@
  * Tests for nova-agent-bridge write routes (plan §8b).
  * Run with: node --test test/nova-fs-write.test.mjs
  *
- * Drives the write handler factories against real tempdirs. Each test
- * seeds a fresh subdir under ROOT so concurrent runs don't clobber each
- * other. The audit logger is wired through a noop capture so we can also
- * assert on what gets logged.
+ * Drives the write handler factories against real tempdirs. A single
+ * `ROOT` tempdir is created in `before()` and its children are wiped in
+ * `beforeEach()` so each test starts from an empty tree without paying
+ * the cost of a fresh `mkdtemp` per test. Tests run sequentially under
+ * `node --test`, so the shared ROOT is safe.
  */
 
 import { describe, it, before, after, beforeEach } from 'node:test';
@@ -172,6 +173,57 @@ describe('/fs/write', () => {
         assert.equal(res._state.body.error, 'invalid-path');
         assert.equal(res._state.body.reason, 'escape');
     });
+
+    it('rejects writes through a symlink parent that escapes root (non-existent target)', async () => {
+        // Create an external dir outside ROOT and symlink it into ROOT.
+        // Then try to /fs/write into a NEW file beneath that symlink.
+        // Without the parent-realpath guard, this would create a file
+        // outside ROOT.
+        const outside = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'nova-outside-'));
+        try {
+            await fsPromises.symlink(outside, path.join(ROOT, 'linkOut'));
+            const h = createFsWriteHandler(deps());
+            const res = mockRes();
+            await h({ body: { path: 'linkOut/sneaky.txt', content: 'x' } }, res);
+            assert.equal(res._state.statusCode, 400);
+            assert.equal(res._state.body.error, 'symlink-escape');
+            // Confirm nothing landed at the outside target.
+            const outsideEntries = await fsPromises.readdir(outside);
+            assert.deepEqual(outsideEntries, []);
+        } finally {
+            await fsPromises.rm(outside, { recursive: true, force: true });
+        }
+    });
+
+    it('rejects malformed base64 with a 400 invalid-content', async () => {
+        const h = createFsWriteHandler(deps());
+        const res = mockRes();
+        // `*` is not in the base64 alphabet — Node's Buffer.from would
+        // silently strip it, but the strict validator must refuse.
+        await h({ body: { path: 'b.bin', content: 'AAA*BBBB', encoding: 'base64' } }, res);
+        assert.equal(res._state.statusCode, 400);
+        assert.equal(res._state.body.error, 'invalid-content');
+        await assert.rejects(() => fsPromises.stat(path.join(ROOT, 'b.bin')));
+    });
+
+    it('rejects base64 with bad padding length (400 invalid-content)', async () => {
+        const h = createFsWriteHandler(deps());
+        const res = mockRes();
+        // length-mod-4 != 0 → invalid base64.
+        await h({ body: { path: 'b2.bin', content: 'AAA', encoding: 'base64' } }, res);
+        assert.equal(res._state.statusCode, 400);
+        assert.equal(res._state.body.error, 'invalid-content');
+    });
+
+    it('accepts well-formed base64 with embedded whitespace', async () => {
+        const h = createFsWriteHandler(deps());
+        const res = mockRes();
+        // "hi" base64 = "aGk=" — split with a newline, still valid.
+        await h({ body: { path: 'ws.bin', content: 'aG\nk=', encoding: 'base64' } }, res);
+        assert.equal(res._state.statusCode, 200);
+        const written = await fsPromises.readFile(path.join(ROOT, 'ws.bin'), 'utf8');
+        assert.equal(written, 'hi');
+    });
 });
 
 /* ====================================================================== */
@@ -307,12 +359,23 @@ describe('/fs/move', () => {
         assert.equal(res._state.statusCode, 404);
     });
 
-    it('refuses to move the root itself', async () => {
+    it('refuses to move the root itself (from=.)', async () => {
         const h = createFsMoveHandler(deps());
         const res = mockRes();
         await h({ body: { from: '.', to: 'anywhere' } }, res);
         assert.equal(res._state.statusCode, 400);
         assert.equal(res._state.body.error, 'refused-root');
+    });
+
+    it('refuses the root as a move destination (to=.)', async () => {
+        await fsPromises.writeFile(path.join(ROOT, 'src.txt'), 's');
+        const h = createFsMoveHandler(deps());
+        const res = mockRes();
+        await h({ body: { from: 'src.txt', to: '.' } }, res);
+        assert.equal(res._state.statusCode, 400);
+        assert.equal(res._state.body.error, 'refused-root');
+        // src untouched.
+        assert.equal(await fsPromises.readFile(path.join(ROOT, 'src.txt'), 'utf8'), 's');
     });
 
     it('rejects deny-listed paths (.git)', async () => {
@@ -321,6 +384,25 @@ describe('/fs/move', () => {
         await h({ body: { from: '.git/HEAD', to: 'stolen' } }, res);
         assert.equal(res._state.statusCode, 400);
         assert.equal(res._state.body.error, 'invalid-path');
+    });
+
+    it('rejects move into a symlinked subtree that escapes root (non-existent dest)', async () => {
+        await fsPromises.writeFile(path.join(ROOT, 'src.txt'), 'mv');
+        const outside = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'nova-mv-outside-'));
+        try {
+            await fsPromises.symlink(outside, path.join(ROOT, 'linkOut'));
+            const h = createFsMoveHandler(deps());
+            const res = mockRes();
+            await h({ body: { from: 'src.txt', to: 'linkOut/sneaky.txt' } }, res);
+            assert.equal(res._state.statusCode, 400);
+            assert.equal(res._state.body.error, 'symlink-escape');
+            // src.txt must still be in place.
+            assert.equal(await fsPromises.readFile(path.join(ROOT, 'src.txt'), 'utf8'), 'mv');
+            const outsideEntries = await fsPromises.readdir(outside);
+            assert.deepEqual(outsideEntries, []);
+        } finally {
+            await fsPromises.rm(outside, { recursive: true, force: true });
+        }
     });
 });
 
