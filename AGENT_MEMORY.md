@@ -77,6 +77,24 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-24 — Docs housekeeping pass (v0.13.0 alignment)
+
+**Context:** Top-level contributor docs had drifted from the v0.13.0 codebase. `CLAUDE.md` was still on v0.10.0 and described OpenClaw as a current app (it was retired and migrated to `.legacy_openclaw` in v0.13.0). `.github/copilot-instructions.md` was on v0.12.0, under-counted file sizes (said ~5200 JS lines vs. actual ~7900), and also listed OpenClaw. Neither file mentioned the Map or Nova apps. README's "bridge-console is being replaced by Nova" note predated Nova actually shipping.
+
+**What changed:**
+- `CLAUDE.md` refreshed end-to-end: v0.13.0, six apps (Command-X / Profiles / Quests / Map / Nova / Settings), file layout now shows `nova/`, `presets/`, `server-plugin/` and the broader `nova-*.test.mjs` suite, state/settings shape updated (drops `openclawMode`, adds map flags + `nova: {...}`), `currentApp` enum updated, `[place]` tag documented, VERSION constant line bumped, OpenClaw operate-mode section replaced with a Nova architecture section + short "legacy note" pointing at the migration helper, version history extended with v0.11–v0.13.
+- `.github/copilot-instructions.md`: v0.12.0 → v0.13.0, line counts refreshed, app list swapped OpenClaw → Nova, file layout expanded, test guidance updated to `node --test test/*.mjs`.
+- `README.md`: Six apps instead of five, Nova added to the Usage numbered list, retirement note rewritten to reflect that Nova shipped (not "is being replaced").
+
+**Not touched (intentional):**
+- `docs/code-review-plan.md`, `docs/private-phone-hybrid-plan.md`, `docs/quest-tracker*.md` — explicit historical snapshots of already-shipped work.
+- `docs/nova-agent-plan.md` checkbox staleness — that's Nova's live bookkeeping, out of scope for a docs-housekeeping pass. The audit finding still stands from the prior PR: §0–§11 are substantially landed, unchecked boxes lag reality.
+
+**Notes for future agents:**
+- When bumping `VERSION` in `index.js` or `manifest.json`, also update: CLAUDE.md (§Named Constants line + §Version History + §File Layout), `.github/copilot-instructions.md` (Summary + Project Layout), and README.md if the app list or retirement notes change. There is no automation linking these.
+- `docs/*` files that are stamped "implementation complete" / "historical snapshot" are deliberately frozen — don't "update" them in docs passes. They're citation targets, not living docs.
+- OpenClaw references are NOT entirely purged — the migration helper (`migrateLegacyOpenClawMetadata`) and `LEGACY_KEYS` in `loadSettings` keep it in the codebase. CLAUDE.md has a short "legacy note" preserving this context. Do not remove those code paths or the note without a proper deprecation cycle; users with old chat metadata still rely on the migration.
+
 ### 2026-04-24 (phone handlers) — Plan audit + Nova `phone_*` tool handlers shipped
 
 **Context:** Conducted a full audit of `docs/nova-agent-plan.md` against the actual shipped state (v0.13.0 live, 446 tests green before this PR). Plan checkboxes are significantly stale vs. reality — §0–§11 are largely landed; the real remaining work is: (1) `fs_*` / `st_*` / `phone_*` tool-handler factories in `index.js`; (2) `/shell/run` plugin route; (3) rich per-turn tool-card rendering; (4) diff preview wiring in approval modal; (5) plugin-side CSRF + session-cookie checks. This PR takes the smallest self-contained slice: phone-internal tool handlers.

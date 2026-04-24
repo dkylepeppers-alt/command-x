@@ -4,27 +4,30 @@
 
 ## Summary
 
-SillyTavern third-party extension (v0.12.0, ~240KB / ~5200 lines of JS) that adds a floating smartphone UI overlay with multiple apps: **Command-X** (neural command messaging + unified iMessage-style texting), **Profiles** (NPC intel cards), **Quests** (persistent story tracker), **OpenClaw** (bridge console), **Map** (contact locations), and **Settings**. Pure browser JavaScript + CSS — no build system, no bundler, no runtime dependencies beyond SillyTavern's frontend.
+SillyTavern third-party extension (v0.13.0, ~7900 lines of JS) that adds a floating smartphone UI overlay with multiple apps: **Command-X** (neural command messaging + unified iMessage-style texting), **Profiles** (NPC intel cards), **Quests** (persistent story tracker), **Map** (contact locations), **Nova** (agentic assistant, in development — approval-gated tool calls with a companion server plugin), and **Settings**. Pure browser JavaScript + CSS — no build system, no bundler, no runtime dependencies beyond SillyTavern's frontend.
 
 **Languages/Runtime:** Vanilla ES module JavaScript, CSS3, HTML. Runs inside SillyTavern's browser frontend (Chromium-based). jQuery is available globally via ST.
 
 ## Project Layout
 
 ```
-index.js          — All extension logic (~5200 lines). Entry point loaded by ST.
-style.css         — All styles (~1380 lines). Phone shell, iMessage bubbles, command drawer, app chrome.
-manifest.json     — ST extension manifest (v0.12.0). Declares js, css, loading_order.
-settings.html     — ST settings panel fragment (~90 lines). Toggles + number inputs.
+index.js          — All extension logic (~7900 lines). Entry point loaded by ST.
+style.css         — All styles (~1460 lines). Phone shell, iMessage bubbles, command drawer, app chrome.
+manifest.json     — ST extension manifest (v0.13.0). Declares js, css, loading_order.
+settings.html     — ST settings panel fragment. Toggles + number inputs (including Nova config).
 README.md         — User-facing docs.
 AGENT_MEMORY.md   — Append-only shared memory across agent sessions. Read first, update on each PR.
 CLAUDE.md         — Deeper architecture / conventions reference (read alongside this file).
-docs/             — In-repo design / review notes.
-test/             — Node `--test` unit tests (`helpers.test.mjs`) for pure helpers.
+docs/             — In-repo design / review notes (including `nova-agent-plan.md`).
+nova/             — Starter soul/memory markdown loaded by the Nova app on fresh chats.
+presets/          — OpenAI-shaped connection presets shipped for Nova.
+server-plugin/    — Companion SillyTavern server plugin (`nova-agent-bridge/`) exposing fs/shell routes that Nova dispatches to via approval-gated tool calls.
+test/             — Node `--test` suites. `helpers.test.mjs` covers pure phone helpers; the `nova-*.test.mjs` files cover the Nova agent (state, tools, dispatch, approval modal, plugin, diff, etc.).
 st-docs/          — Reference copy of SillyTavern documentation (read-only reference, do not modify).
 .github/          — This file.
 ```
 
-There is no `package.json`, no linting config, and no CI/CD pipeline. **This is intentional** — ST third-party extensions are raw browser modules loaded directly. There is no build step; the only automated validation is the Node `--test` suite under `test/`.
+There is no `package.json`, no linting config, and no CI/CD pipeline. **This is intentional** — ST third-party extensions are raw browser modules loaded directly. There is no build step; the only automated validation is the Node `--test` suites under `test/`.
 
 ## Architecture
 
@@ -55,7 +58,7 @@ The core loop: user types in phone UI → extension injects system prompt via `s
 1. Edit files directly in `SillyTavern/public/scripts/extensions/third-party/command-x/`.
 2. Hard-refresh the SillyTavern page (Ctrl+Shift+R). Changes load immediately.
 3. Open browser DevTools console — the extension logs `[command-x] v<VERSION> Loaded OK` on success, or errors on failure.
-4. Run the unit tests for pure helpers: `node --test test/helpers.test.mjs`.
+4. Run the unit tests for pure helpers and Nova: `node --test test/*.mjs` (or target a single file, e.g. `node --test test/helpers.test.mjs`).
 5. Syntax-check JS without ST runtime: `node -e "import('./index.js').catch(e => { if (e instanceof SyntaxError) { console.error(e); process.exit(1); } })"` — the import will fail (no ST context) but syntax errors are caught.
 
 **There is no linter and no CI pipeline.** Beyond the Node `--test` suite, validation is manual: open ST, open the phone panel, send a message, confirm bubbles render and tags are hidden in the chat DOM.

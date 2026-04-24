@@ -9,7 +9,7 @@ Messages flow through the RP naturally. The extension uses prompt injection so t
 ### 📱 Phone UI
 - **Realistic phone shell** — Notch, bezel, status bar, home indicator
 - **Lock screen → Home screen → Apps** — Navigate like a real phone
-- **Five apps:** Command-X (neural messaging), Profiles (contact intel), Quests (persistent story goals), Map (contact location tracking), Settings
+- **Six apps:** Command-X (neural messaging), Profiles (contact intel), Quests (persistent story goals), Map (contact location tracking), Nova (agentic assistant, in development), Settings
 
 ### 💬 Messaging
 - **iMessage-style chat bubbles** — Sent (blue), received (dark gray), neural commands (pink/purple glow)
@@ -106,9 +106,10 @@ Refresh SillyTavern.
 6. **Profiles app** — View NPC intel cards
 7. **Quests app** — Track persistent story goals
 8. **Map app** — Track contact locations
-9. **Settings app** — Configure everything in-phone
+9. **Nova app** — Agentic assistant (preview; approval-gated tool calls, see `docs/nova-agent-plan.md`)
+10. **Settings app** — Configure everything in-phone
 
-> **Note:** A previous bridge-console app has been retired and is being replaced by **Nova** — a tool-calling agent with a companion server plugin that can read and write the SillyTavern install directory. See `docs/nova-agent-plan.md` for status.
+> **Note:** A previous bridge-console app (OpenClaw) was retired in favor of **Nova** — a tool-calling agent with a companion server plugin (`server-plugin/nova-agent-bridge/`) that can read and write the SillyTavern install directory under approval-gated tool calls. Nova ships with the extension as a preview app; see `docs/nova-agent-plan.md` for status and remaining work.
 
 ### How It Works
 
