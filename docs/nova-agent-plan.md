@@ -361,12 +361,37 @@ Skill = named system-prompt pack + default tier + default tool subset. Single
 - [x] Minimal system prompt. Default tier: Read-only. All tools available
   when elevated (`defaultTools: 'all'`).
 
-### 5e. Skill structure
+### 5e. STscript & Regex *(added per amendment 2026-04-24)*
+- [x] System prompt: expert on three related ST automation surfaces —
+  STscript (slash-command pipelines, `{: closures :}`, `{{pipe}}`, control
+  flow, variables, arrays/objects), the Regex extension (global in
+  `settings.json.extensions.regex`, scoped in
+  `data.extensions.regex_scripts[]` on character cards, `placement`
+  bitmask, depth clamps, `{{match}}` + capture groups, `trimStrings`,
+  `substituteRegex`, ephemerality), and Macros 2.0 (Experimental Macro
+  Engine, nested macros, scoped syntax `{{foo}}...{{/foo}}`,
+  conditionals, variable shorthands `.local` / `$global`, operators
+  `= ++ -- += -= || ?? ||= ??= == != > >= < <=`, preserve-whitespace
+  flag `#`, comments `{{//}}`, escape rules).
+- [x] Default tools: `st_run_slash`, `st_get_context`,
+  `st_list_characters` / `st_read_character` / `st_write_character`,
+  `st_list_worldbooks` / `st_read_worldbook` / `st_write_worldbook`,
+  `fs_list` / `fs_read` / `fs_stat` / `fs_search` / `fs_write`.
+  Rationale: `st_run_slash` lets Nova test a generated script or regex
+  trigger end-to-end without leaving the chat; `fs_*` covers
+  `settings.json` edits that the ST API doesn't expose.
+- [x] Default tier: Write (allow escalation).
+- [x] Working rules baked into the prompt: dry-run with `/echo` before
+  destructive commands; prefer `st_write_character` over `fs_write` for
+  scoped regex; never emit patterns that can catastrophically backtrack;
+  output regex scripts in the ST Import dialog's JSON shape.
+
+### 5f. Skill structure
 ```
 { id, label, icon, systemPrompt, defaultTier, defaultTools: [names] | 'all',
   allowTierEscalation: true }
 ```
-- [x] `SKILLS_VERSION` constant (currently `1`) — bump when prompts change.
+- [x] `SKILLS_VERSION` constant (currently `2`) — bump when prompts change.
 
 ---
 
@@ -668,3 +693,15 @@ All under `test/` using Node `--test`.
 - **2026-04-22** — User approved plan and added §11: ship a Chat Completion
   preset usable by Nova and other Command-X utilities. Schema modeled on
   upstream ST `Default.json`. Plan saved to this file prior to starting work.
+- **2026-04-24** — User requested an additional skill: a **regex / STscript /
+  Macros 2.0 expert**. Shipped as a single combined skill (§5e,
+  id `stscript-regex`, label "STscript & Regex"). Rationale for bundling:
+  the three surfaces share identifiers, share the same `settings.json`
+  storage, and are almost always used together (a Regex script triggered by
+  a slash command inside a Quick Reply rendered through a macro). Splitting
+  into three separate skills would force the user to pick a tab per
+  question, and force Nova to context-switch mid-conversation. Bumped
+  `SKILLS_VERSION` → `2`. No manifest/VERSION bump (still `0.13.0`) because
+  Phase 8 (server plugin) and real tool handlers are still the gating work
+  for the next release; this amendment is purely additive to the prompt
+  catalogue and passes all existing structural tests unchanged.

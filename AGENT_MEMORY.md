@@ -77,6 +77,36 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-24 — Nova skill: STscript & Regex (Macros 2.0 expert)
+
+**Context:** User asked to continue the Nova plan with "an additional skill — a regex / stscript / macros 2.0 expert (plus similar if you decide)". Shipped as a single combined skill rather than three separate ones.
+
+**What shipped:**
+- New `NOVA_SKILLS` entry `{ id: 'stscript-regex', label: 'STscript & Regex', icon: '⚙️', defaultTier: 'write' }` added to `index.js` between `worldbook-creator` and `image-prompter` (authoring-skill grouping).
+- `SKILLS_VERSION` bumped `1` → `2` (prompt-catalogue change).
+- Manifest / `VERSION` intentionally left at `0.13.0`. The parity test in `nova-ui-wiring.test.mjs` hardcodes `'0.13.0'`; bumping for a prompt-catalogue addition would thrash that test without benefit, and the real next release is gated on Phase 8 (server plugin) + tool handlers.
+- `docs/nova-agent-plan.md` updated: new §5e describing the skill, renumbered `Skill structure` → §5f, `SKILLS_VERSION` reference bumped, amendments log entry added.
+
+**Why one skill instead of three:** STscript, the Regex extension, and Macros 2.0 share identifiers (`{{getvar::x}}` resolves inside regex find patterns when `substituteRegex` is on; `/regex name="..."` calls from STscript trigger Regex scripts; Quick Replies are STscript scripts rendered through the same macro engine). The three surfaces are almost always used together in practice, so splitting would force the user to context-switch per question. The system prompt explicitly names all three domains in its `##` headings so the LLM routes correctly.
+
+**Notes for future agents:**
+- **Don't split `stscript-regex` into three skills casually.** The combined prompt is ~3 KB. If a user asks for deeper specialisation on only one surface, prefer editing the existing prompt with an opinionated section per surface (the three `##` headings) rather than fragmenting. Test coverage (structural `every skill has the required shape` + `every plan-specified skill id is present`) doesn't enforce the split.
+- **`defaultTools` for this skill is deliberately broader than Character Creator.** It includes `st_run_slash` (so Nova can dry-run scripts and regex triggers end-to-end) **and** both the character-card and worldbook tool sets (because STscript scripts / regex patterns commonly read or write either surface). `shell_run` and `fs_delete` / `fs_move` are intentionally NOT defaults — user can escalate tier and add them manually if building a build pipeline.
+- **`st_run_slash` is approval-gated (`permission: 'write'`).** The system prompt explicitly tells Nova to dry-run with `/echo` first. Do not attempt to switch `st_run_slash` to `'read'` without a very hard look — a slash command can do anything in ST, including `/persona`, `/delchat`, `/api`.
+- **Regex scope contract**: the prompt says "prefer `st_write_character` over `fs_write` for scoped regex (character-card `data.extensions.regex_scripts[]`); global regex lives in `settings.json.extensions.regex` and needs `fs_write`". If a future PR adds a dedicated `st_write_settings` tool, remove the `fs_write`-on-settings.json guidance from this skill's prompt.
+- **Prompt was authored from `st-docs/extensions/Regex.md` + `st-docs/Usage/macros.md` + `st-docs/For_Contributors/st-script.md`.** Those three files are the canonical reference for this skill. If they change upstream, update the skill prompt and bump `SKILLS_VERSION` again.
+- **The existing structural test (`nova-tool-args.test.mjs`) covers the new skill automatically** — every tool name in `defaultTools` is validated against `NOVA_TOOLS`, `defaultTier` against `VALID_TIERS`, and shape/id uniqueness. 369/369 still green; no new test file needed for a pure prompt addition.
+
+**Validation:**
+- `node --check index.js` clean.
+- `node --test test/helpers.test.mjs test/nova-*.test.mjs` → **369/369 pass** (unchanged from baseline).
+
+**Follow-ups / still outstanding on the Nova plan (copy-forward):**
+1. Phase 8 — `nova-agent-bridge` server plugin route handlers (`/fs/*`, `/shell/run`) are still `501 not-implemented` stubs.
+2. Real handlers for `fs_*`, `shell_*`, `st_*`, `phone_*` tools — only the five `nova_*` self-edit tools have handlers today.
+3. Rich per-turn tool-call cards in the transcript (collapsible args/result).
+4. Diff previews in the approval modal (composer-side pre-fetch via `fs_read` → `buildNovaUnifiedDiff` → pass into `cxNovaApprovalModal`).
+
 ### 2026-04-24 — Next-session hand-off: v0.13.0 "Nova goes live" (UI wiring + Phase 2c/6b/7/9/10)
 
 **Scope of this PR:** Nova's engine was already built and tested, but its UI was inert (controls `disabled`, no pill wiring, no composer handlers). This PR wires the engine to the view end-to-end and adds the remaining missing glue. Version bumped `0.12.0` → `0.13.0` in both `manifest.json` and `index.js` (the `VERSION` constant + the wiring test that enforces their agreement).
