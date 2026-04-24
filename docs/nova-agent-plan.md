@@ -504,10 +504,17 @@ Always concatenated into the Nova system prompt regardless of skill.
   `false` — extension Phase 4f reads this to decide which tools to
   register.
 - [x] `GET /health` → `{ ok: true, id, version }`.
-- [ ] `GET /fs/list`, `GET /fs/read`, `POST /fs/write`, `POST /fs/delete`,
-  `POST /fs/move`, `GET /fs/stat`, `POST /fs/search` (NDJSON).
-  **Routes wired as `501 not-implemented` stubs**; real handlers land in the
-  Phase 8b handler sprint (blocked on audit-log infra + CSRF wiring).
+- [~] `GET /fs/list`, `GET /fs/read`, `GET /fs/stat`, `POST /fs/search` —
+  **shipped** in `server-plugin/nova-agent-bridge/routes-fs-read.js` as
+  pure handler factories, wired in `index.js`. Each runs `normalizeNovaPath`
+  + `fs.realpath` symlink re-check, enforces per-route caps (list: 5000
+  entries, depth 10; read: 10 MB; search: 500 results, 1 MB/file, binary
+  skip). Capabilities flipped to `true` in the manifest. Covered by
+  `test/nova-fs-read.test.mjs` (31 new assertions) + tightened
+  `test/nova-plugin.test.mjs` expectations.
+  `POST /fs/write`, `POST /fs/delete`, `POST /fs/move`, `POST /shell/run` —
+  still `501 not-implemented`; writes need audit-log + `.nova-trash` logic
+  from §8c/§8d and land in the next sprint.
 - [ ] `POST /shell/run` (NDJSON streaming `stdout`/`stderr`/`exit`).
   **Route wired as `501 not-implemented` stub**; real handler blocked on
   same.
@@ -517,13 +524,18 @@ Always concatenated into the Nova system prompt regardless of skill.
   (Simple `key: value` parse for now; no YAML dep.)
 - [x] Normalise every request path; reject escapes (pure helper in
   `paths.js`; covered by `test/nova-paths.test.mjs`, 19 assertions).
-  Reject symlink escapes (`fs.realpath` check) — **pending**, lands with
-  the fs handler sprint.
+  Reject symlink escapes (`fs.realpath` check) — **shipped** for the
+  read-only routes in `routes-fs-read.js::resolveRequestPath`; the
+  resolved realpath is re-normalised against the root and re-checked
+  against the deny-list so a symlink into `.git/` or outside root is
+  refused. Write routes will reuse the same helper when they land.
 - [x] Deny-list: `.git/**`, `node_modules/**`, `plugins/nova-agent-bridge/**`
   — enforced by `normalizeNovaPath`. Single-segment vs two-segment pair
   distinction avoids locking out unrelated directories that happen to be
   named `plugins`.
-- [ ] Max file size read/write: 20 MB.
+- [x] Max file size read: 10 MB hard cap on `/fs/read` via
+  `FS_READ_HARD_CAP_BYTES`; `/fs/search` additionally caps per-file read
+  at 1 MB. Write caps land with the write sprint.
 - [ ] Shell: no `shell: true`; binaries resolved via allow-list at startup.
 - [ ] CSRF protection mirroring ST's header check.
 - [ ] Require ST session cookie on every route.
@@ -705,3 +717,12 @@ All under `test/` using Node `--test`.
   Phase 8 (server plugin) and real tool handlers are still the gating work
   for the next release; this amendment is purely additive to the prompt
   catalogue and passes all existing structural tests unchanged.
+- **2026-04-24 (later)** — Phase 8b read-only fs routes shipped
+  (`/fs/list`, `/fs/read`, `/fs/stat`, `/fs/search`). Factored out
+  `server-plugin/nova-agent-bridge/routes-fs-read.js` as a pure
+  handler-factory module so unit tests can drive handlers end-to-end
+  against real tempdirs without Express. Capability flags in `/manifest`
+  flipped for the four implemented routes. Writes + shell still 501;
+  they need audit-log + `.nova-trash` + allow-list checks from §8c/§8d
+  and will ship in the next sprint. Node plugin package has no
+  runtime dependencies (Node built-ins only), so nothing to audit.

@@ -123,11 +123,11 @@ describe('nova-agent-bridge init()', () => {
         assert.equal(res._state.body.id, 'nova-agent-bridge');
     });
 
-    it('fs/shell stubs return 501 not-implemented', async () => {
+    it('fs/shell write + shell stubs still return 501 not-implemented', async () => {
         const r = mockRouter();
         await plugin.init(r);
-        const stubPaths = ['/fs/list', '/fs/read', '/fs/write', '/fs/delete',
-            '/fs/move', '/fs/stat', '/fs/search', '/shell/run'];
+        // After the read-only fs routes landed, only writes + shell remain stubs.
+        const stubPaths = ['/fs/write', '/fs/delete', '/fs/move', '/shell/run'];
         for (const p of stubPaths) {
             const route = r.routes.find(x => x.path === p);
             const res = mockRes();
@@ -137,6 +137,50 @@ describe('nova-agent-bridge init()', () => {
             assert.equal(res._state.body.plugin, 'nova-agent-bridge');
             assert.equal(res._state.body.route, p);
         }
+    });
+
+    it('read-only fs routes are wired (non-501; 400 on missing path)', async () => {
+        const r = mockRouter();
+        await plugin.init(r);
+        // Driving with an empty query exercises the path-safety gate: the
+        // handler should respond with a 400 `invalid-path`/`empty` error,
+        // NOT the 501 not-implemented body.
+        const livePaths = ['/fs/list', '/fs/read', '/fs/stat'];
+        for (const p of livePaths) {
+            const route = r.routes.find(x => x.method === 'GET' && x.path === p);
+            assert.ok(route, `missing route: GET ${p}`);
+            const res = mockRes();
+            await route.handler({ query: {} }, res);
+            assert.notEqual(res._state.statusCode, 501, `${p} should NOT return 501 anymore`);
+            assert.equal(res._state.statusCode, 400, `${p} should 400 on missing path`);
+            assert.equal(res._state.body.error, 'invalid-path');
+            assert.equal(res._state.body.reason, 'empty');
+        }
+        // /fs/search is POST with a JSON body; missing query → 400.
+        const searchRoute = r.routes.find(x => x.method === 'POST' && x.path === '/fs/search');
+        assert.ok(searchRoute);
+        const res = mockRes();
+        await searchRoute.handler({ body: {} }, res);
+        assert.notEqual(res._state.statusCode, 501);
+        assert.equal(res._state.statusCode, 400);
+        assert.equal(res._state.body.error, 'query-required');
+    });
+
+    it('/manifest capabilities report fs_list, fs_read, fs_stat, fs_search = true', async () => {
+        const r = mockRouter();
+        await plugin.init(r);
+        const manifestRoute = r.routes.find(x => x.method === 'GET' && x.path === '/manifest');
+        const res = mockRes();
+        manifestRoute.handler({}, res);
+        const caps = res._state.body.capabilities;
+        assert.equal(caps.fs_list, true, 'fs_list capability should be true');
+        assert.equal(caps.fs_read, true, 'fs_read capability should be true');
+        assert.equal(caps.fs_stat, true, 'fs_stat capability should be true');
+        assert.equal(caps.fs_search, true, 'fs_search capability should be true');
+        assert.equal(caps.fs_write, false, 'fs_write still pending');
+        assert.equal(caps.fs_delete, false, 'fs_delete still pending');
+        assert.equal(caps.fs_move, false, 'fs_move still pending');
+        assert.equal(caps.shell_run, false, 'shell_run still pending');
     });
 });
 

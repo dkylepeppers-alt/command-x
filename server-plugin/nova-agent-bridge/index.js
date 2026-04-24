@@ -14,6 +14,13 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { normalizeNovaPath } = require('./paths.js');
+const {
+    createFsListHandler,
+    createFsReadHandler,
+    createFsStatHandler,
+    createFsSearchHandler,
+} = require('./routes-fs-read.js');
 
 const PLUGIN_ID = 'nova-agent-bridge';
 
@@ -52,13 +59,13 @@ const DEFAULT_SHELL_ALLOW = Object.freeze([
 // the UI can render a yellow "partial support" banner instead of silently
 // degrading.
 const CAPABILITIES = Object.freeze({
-    fs_list: false,
-    fs_read: false,
+    fs_list: true,
+    fs_read: true,
     fs_write: false,
     fs_delete: false,
     fs_move: false,
-    fs_stat: false,
-    fs_search: false,
+    fs_stat: true,
+    fs_search: true,
     shell_run: false,
 });
 
@@ -126,13 +133,17 @@ async function init(router) {
         });
     };
 
-    router.get('/fs/list', notImplemented('/fs/list'));
-    router.get('/fs/read', notImplemented('/fs/read'));
+    // Read-only fs routes (plan §8b). Writes and shell remain 501 stubs
+    // until the audit-log + trash-move sprint lands.
+    const fsReadDeps = { root, normalizePath: normalizeNovaPath };
+    router.get('/fs/list', createFsListHandler(fsReadDeps));
+    router.get('/fs/read', createFsReadHandler(fsReadDeps));
+    router.get('/fs/stat', createFsStatHandler(fsReadDeps));
+    router.post('/fs/search', createFsSearchHandler(fsReadDeps));
+
     router.post('/fs/write', notImplemented('/fs/write'));
     router.post('/fs/delete', notImplemented('/fs/delete'));
     router.post('/fs/move', notImplemented('/fs/move'));
-    router.get('/fs/stat', notImplemented('/fs/stat'));
-    router.post('/fs/search', notImplemented('/fs/search'));
     router.post('/shell/run', notImplemented('/shell/run'));
 
     console.log(`[${PLUGIN_ID}] loaded — root=${root}`);

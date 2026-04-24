@@ -77,6 +77,49 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-24 (late) — Phase 8b read-only fs routes shipped
+
+**Context:** Handover priority #1 was "Phase 8 — `nova-agent-bridge` server plugin". All eight fs + shell routes were 501-stubs. This PR implements the four read-only routes end-to-end; writes + shell deliberately left as 501-stubs for a dedicated follow-up sprint.
+
+**What shipped:**
+- New file `server-plugin/nova-agent-bridge/routes-fs-read.js` (~390 LOC). Pure CommonJS factory module: exports `createFs{List,Read,Stat,Search}Handler({ root, normalizePath, fsImpl?, realpathImpl? })`. Each returns an Express-shaped `(req, res) => Promise<void>`. Factored this way so unit tests can drive handlers end-to-end against real tempdirs without spinning up Express.
+- `index.js` wires the four live routes + kept four `notImplemented` stubs (`/fs/write`, `/fs/delete`, `/fs/move`, `/shell/run`).
+- `CAPABILITIES` manifest flipped: `fs_list`, `fs_read`, `fs_stat`, `fs_search` → `true`.
+- `routes-fs-read.js::resolveRequestPath` does `normalizeNovaPath` → `fs.realpath` → re-normalise against root's realpath → re-run deny-list on the resolved relative path. ENOENT is not an error — it flows through as `{ exists: false }` so handlers can 404 cleanly.
+- Per-route safety caps: list = 5000 entries + maxDepth ≤ 10; read = 10 MB hard cap (`FS_READ_HARD_CAP_BYTES`); search = 500 results cap, 1 MB per-file read cap, null-byte heuristic (>4 nulls in first 8 KB → skip) so binary files don't poison text output.
+- New `test/nova-fs-read.test.mjs` — 31 assertions across 5 suites (fs_list, fs_read, fs_stat, fs_search, internals). Every test creates its own tempdir under `os.tmpdir()` via `before`/`after` hooks so runs are isolated. Symlink-escape test gracefully skips if the CI container refuses `fs.symlink` with EPERM/EACCES.
+- `test/nova-plugin.test.mjs` — "all 8 routes 501" split into "4 writes + shell still 501" + "4 read routes respond non-501 with proper 400/query-required" + "/manifest capabilities truthy for fs_list/fs_read/fs_stat/fs_search".
+- Plugin README `## Status` rewritten (Scaffold → Partial).
+- `docs/nova-agent-plan.md` §8b + §8c checkboxes flipped from `[ ]` to `[~]`/`[x]` with the partial-completion caveats; amendments log entry added.
+
+**400/400 tests pass** (+31 new). `node --check` clean on both plugin files. Code Review + CodeQL to be run via parallel_validation.
+
+**Notes for future agents:**
+- **`routes-fs-read.js` is pure CJS and has zero npm dependencies.** It imports only `node:path`, `node:fs`, `node:fs/promises`. Don't add anything else without a really good reason — the plugin's `package.json` promises "zero runtime deps".
+- **`resolveRequestPath` re-runs the deny-list on the realpath's relative form.** This is the guard against a symlink `nope` → `.git/HEAD` style escape. When you ship `/fs/write`, reuse this helper unchanged; don't reimplement the containment check.
+- **The `fsImpl` / `realpathImpl` DI hooks exist but aren't used in tests yet.** Tests run against real tempdirs because it's fast and actually exercises the realpath path. The DI exists for the *write* sprint where mocking fs mutations is cheaper than cleaning up tempdirs.
+- **Glob semantics on `/fs/search`**: `*` does NOT cross `/`, `**` DOES. `**/*.txt` requires a leading directory segment (mirrors bash globstar + ripgrep `--glob`). To match "any .txt at any depth including root", use the bare `**.txt` form. The relevant test (`globToRegExp: * does not cross slashes; ** does`) documents this explicitly. Initial test expectation got this wrong; was corrected during dev.
+- **Search is a plain substring match, NOT a regex search.** Plan §4a calls it "full-text search". If someone requests regex support, they must open a new tool (`fs_regex_search`) rather than overloading `fs_search` — changing the query semantics retroactively would silently break the LLM-facing tool schema.
+- **Binary-file heuristic: >4 null bytes in the first 8 KB → skip.** Mirrors ripgrep defaults. A cleaner UTF-8 validity check was considered but would skip valid UTF-16 BOM files; the null-byte counter is more conservative and deliberately matches user expectations from `rg`.
+- **No audit logging yet.** Read routes are NOT required to audit per plan §8c — only writes and shell. When the write sprint lands, add an `onAudit` hook to the handler factories (don't hardcode an `appendFile` call).
+- **`fs.read` uses explicit `fh.open` + partial read, not `fs.readFile(..., { maxBytes })`.** This matters for the 10 MB cap: `fs.readFile` would slurp the whole file first, THEN throw away the tail. The `fh.read` form never allocates more than `toRead` bytes. Don't "simplify" this back to `readFile`.
+- **`CAPABILITIES` in the plugin manifest is the extension's capability probe target (plan §4f).** The extension will read this to decide which tools to register per session. Keep the object shape stable — a key going from `false` → `true` is additive; flipping a key away from `true` is a breaking change.
+
+**Follow-ups still outstanding on the Nova plan (copy-forward):**
+1. Phase 8 writes + shell: `/fs/write`, `/fs/delete` (move to `.nova-trash/<ts>/`), `/fs/move`, `/shell/run` (spawn without `shell: true`, allow-list + timeout), plus `SillyTavern/data/_nova-audit.jsonl` append-only audit log.
+2. Real handlers for `fs_*` / `st_*` / `phone_*` tool registry entries in `index.js` (only the 5 `nova_*` self-edit tools have handlers today).
+3. Rich per-turn tool-call cards in the transcript (collapsible args/result + audit link).
+4. Diff previews in the approval modal (composer-side `fs_read` → `buildNovaUnifiedDiff` → `cxNovaApprovalModal`).
+
+**Hard constraints still active (copy-forward from prior entry):**
+- `EXT === "command-x"` with a hyphen.
+- `VERSION` in `index.js` must equal `manifest.json#version`. Wiring test enforces this.
+- `turnTimeoutMs` clamp floor = 10000 everywhere.
+- `normalizeNovaPath` containment predicate: `relNative === '..' || startsWith('..' + path.sep)`.
+- `routes-fs-read.js::resolveRequestPath` adds the realpath-re-normalise layer on top — both helpers MUST remain in lockstep.
+- `escAttr` for HTML attribute interpolations; `escHtml` for text content.
+- Run tests via `node --test test/helpers.test.mjs test/nova-*.test.mjs`. **400/400** is the new baseline.
+
 ### 2026-04-24 — Nova skill: STscript & Regex (Macros 2.0 expert)
 
 **Context:** User asked to continue the Nova plan with "an additional skill — a regex / stscript / macros 2.0 expert (plus similar if you decide)". Shipped as a single combined skill rather than three separate ones.

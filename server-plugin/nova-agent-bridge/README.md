@@ -6,15 +6,15 @@ SillyTavern **server plugin** companion for the Command-X Nova agent. Provides t
 
 ## Status
 
-**Scaffold.** This sprint ships:
+**Partial.** This sprint ships the read-only filesystem routes. Writes and shell are still stubs.
 
 - `init` / `exit` / `info` exports matching the ST plugin contract.
 - `GET /api/plugins/nova-agent-bridge/manifest` — reports version, configured root, shell allow-list, and per-capability implementation status.
 - `GET /api/plugins/nova-agent-bridge/health` — liveness probe.
-- Placeholder `GET /fs/list`, `GET /fs/read`, `POST /fs/write`, `POST /fs/delete`, `POST /fs/move`, `GET /fs/stat`, `POST /fs/search`, `POST /shell/run` — all return `501 Not Implemented` so the extension's capability probe (plan §4f) can distinguish "plugin present, handler pending" from "plugin missing".
-- `paths.js` — pure path-safety helper (normalise + containment check + deny-list) used by every future route.
-
-The `fs_*` and `shell_run` **handlers** land in follow-up sprints. The [`docs/nova-agent-plan.md`](../../docs/nova-agent-plan.md) §8 is the source of truth for the route contract and security model.
+- **Implemented:** `GET /fs/list`, `GET /fs/read`, `GET /fs/stat`, `POST /fs/search`. Manifest capability flags `fs_list`, `fs_read`, `fs_stat`, `fs_search` are now `true`. Each handler runs requests through `paths.js::normalizeNovaPath` followed by a `fs.realpath` symlink-escape check, enforces per-route safety caps, and never responds with raw binary content.
+- **Still pending (501 Not Implemented):** `POST /fs/write`, `POST /fs/delete`, `POST /fs/move`, `POST /shell/run`. These need the audit-log + trash-move mechanics in plan §8c/§8d; they ship in a follow-up sprint.
+- `paths.js` — pure path-safety helper (normalise + containment check + deny-list) used by every route.
+- `routes-fs-read.js` — pure factory module exporting handler constructors (`createFs{List,Read,Stat,Search}Handler`) for testability.
 
 ## Install
 
