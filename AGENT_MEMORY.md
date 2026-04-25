@@ -77,6 +77,31 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-25 (§13) — `nova-audit-redact.test.mjs` ships
+
+**Context:** `nova-audit.test.mjs` already covered the audit logger in isolation (REDACTED_KEYS stripping at top level + nested via the JSON replacer). The plan's §13 ask for `nova-audit-redact.test.mjs` was the **other half** of the security contract: prove that the route handlers themselves never hand raw payload to the audit pipeline in the first place. If a future handler regression added `body.content` to its `argsSummary`, the logger's defensive redaction would be the only thing protecting the user — and that's not where you want a single point of failure.
+
+**What shipped:**
+- New `test/nova-audit-redact.test.mjs` — drives real `createFsWriteHandler` / `createFsDeleteHandler` / `createFsMoveHandler` factories against a tempdir + capturing audit logger.
+- Realistic payload set (`RAW_PAYLOADS`): UTF-8 prose, fake PEM private key with newlines, `password=… api_token=sk-live-…` style credentials, JSON with nested `content`/`data` keys, and a 2 KB uniform `'A'.repeat(2048)` to catch length-thresholded loggers.
+- Each captured entry is scanned **two ways**: naive `JSON.stringify` substring check **and** through the real `formatEntry` serialiser. Both must be free of the payload string.
+- Closed-enum allow-lists: `ALLOWED_ENTRY_KEYS` (top level: `route`, `outcome`, `argsSummary`, `bytes`, `backup`, `error`, `ts`) and `ALLOWED_ARGS_SUMMARY_KEYS` (`path`, `from`, `to`, `encoding`, `createParents`, `overwrite`, `overwrote`, `overwroteDest`, `recursive`, `entries`, `type`). Adding a key requires a conscious test edit — exactly the gate the plan asks for.
+- **End-to-end test through real `buildAuditLogger`** writes to a JSONL file under the tempdir, reads it back from disk, and asserts the payload byte never landed on disk. This is the integration guarantee the unit-level audit tests can't give.
+
+**Contract locked by tests:**
+- `/fs/write` — create, overwrite, refused-exists (overwrite=false on existing), base64 (both b64 string + decoded plaintext absent).
+- `/fs/delete` — trashed outcome with `argsSummary.type === 'file'`, `recursive === false`.
+- `/fs/move` — success with `from`/`to` rels.
+- Logger backstop — top-level redacted keys are stripped (not even rendered as `[redacted]`); nested ones go through the replacer and become `"[redacted]"`.
+
+**Pitfalls noted while writing this:**
+- The delete outcome is `'trashed'`, not `'moved-to-trash'`. Got bitten by it on the first run — added a grep against `outcome:` in the routes file to verify the actual literals before asserting.
+- `error` is allowed at the top level because filesystem errors (ENOENT etc.) may include path fragments, and stripping that would gut forensic value. The threat model excludes "path fragment" — the threat is "file content".
+- `backup` is also top-level (carries `.nova-trash` rel paths from the trash bucket), not under `argsSummary`. Don't move it without updating the allow-list.
+- Don't add `content`, `body`, `data`, `payload`, or `raw` to either allow-list. They're already in `REDACTED_KEYS` for a reason.
+
+**Validation:** `node --test test/*.mjs` → 727/727 (+13). Existing `nova-audit.test.mjs` still green; the new file is purely additive.
+
 ### 2026-04-25 (§4f) — Tool capability discovery ships
 
 **Context:** Follow-up to the shell-handler + CSRF work. `probeNovaBridge` + `_coerceNovaCapabilities` already existed to discover the plugin + per-tool map, but `novaHandleSend` was still passing `NOVA_TOOLS` unconditionally — when the plugin was absent, the LLM saw `fs_*` and `shell_run` in its tool list, called one, and got `{ error: 'nova-bridge-unreachable' }` back, burning a tool-call slot.

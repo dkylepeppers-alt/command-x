@@ -782,7 +782,24 @@ All under `test/` using Node `--test`.
     module-level controller up to the composer UI.
 - [x] `nova-prompt-compose.test.mjs` — soul+memory concatenation, truncation,
   skill ordering.
-- [ ] `nova-audit-redact.test.mjs` — audit entries never include raw content.
+- [x] `nova-audit-redact.test.mjs` — audit entries never include raw content.
+  **Shipped.** Drives the real `/fs/write`, `/fs/delete`, `/fs/move`
+  handler factories against a tempdir + capturing audit logger, with
+  realistic payloads (UTF-8 prose, fake PEM private key, password +
+  bearer-token strings, JSON with nested `content`/`data`/`payload`
+  keys, a 2 KB uniform string). Each captured audit entry is checked
+  two ways: (1) `JSON.stringify(entry)` substring scan; (2) the real
+  `formatEntry` (the on-disk JSONL serialiser) substring scan. Also
+  enforces a closed-enum `argsSummary` key allow-list (`path`, `from`,
+  `to`, `encoding`, `createParents`, `overwrite`, `overwrote`,
+  `overwroteDest`, `recursive`, `entries`, `type`) — adding a new key
+  requires a conscious test edit. Covers create, overwrite, refused-
+  exists, base64 (asserts both b64 and decoded plaintext absent),
+  delete (trashed), move (success), the formatEntry backstop for
+  top-level + nested redacted keys, AND an end-to-end run through
+  `buildAuditLogger` with a real on-disk JSONL log read back from
+  disk to confirm no payload byte ever lands on disk. 13 tests / 5
+  suites.
 - [x] `nova-preset.test.mjs` — validates the shipped preset JSON parses,
   contains required top-level fields, has all marker prompts present, and
   `prompt_order` references only defined identifiers.
