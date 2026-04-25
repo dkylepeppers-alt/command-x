@@ -16,6 +16,7 @@ import {
     setExtensionPrompt,
     extension_prompt_types,
     extension_prompt_roles,
+    getRequestHeaders,
 } from '../../../../script.js';
 
 const VERSION = '0.13.0';
@@ -3486,6 +3487,9 @@ function buildPhone() {
                     <span class="cx-settings-label">Bridge plugin URL</span>
                     <input type="text" id="cx-set-nova-plugin-url" class="cx-settings-text-input" value="${escAttr(settings.nova?.pluginBaseUrl || NOVA_DEFAULTS.pluginBaseUrl)}" />
                 </div>
+                <div class="cx-settings-row cx-settings-btn-row">
+                    <button class="cx-settings-btn" id="cx-set-nova-edit-sm">📝 Edit Soul &amp; Memory</button>
+                </div>
                 <div class="cx-settings-section">ABOUT</div>
                 <div class="cx-settings-row cx-settings-about">
                     <div>Command-X v${VERSION}</div>
@@ -4396,6 +4400,138 @@ async function novaGetExecuteSlash() {
     return async (cmd) => ctx.executeSlashCommandsWithOptions(cmd, { handleParserErrors: false, handleExecutionErrors: true });
 }
 
+/**
+ * Open the in-phone Soul & Memory editor (plan §6b).
+ *
+ * Renders a modal with two textareas (soul + memory), a Reload button
+ * that re-fetches the on-disk content, and per-pane Save buttons that
+ * POST through `_novaBridgeWrite` to the `nova-agent-bridge` server
+ * plugin. Falls back to a clear error message when the bridge is
+ * unreachable, since soul/memory writes are the one Nova surface that
+ * cannot work without the plugin.
+ *
+ * Reuses `cx-modal-overlay` / `cx-modal-box` for visual consistency
+ * with `cxAlert` / `cxConfirm` / `cxPickList` and the approval modal.
+ */
+async function openNovaSoulMemoryEditor() {
+    // Tear down any prior instance defensively. Multiple opens shouldn't
+    // ever happen (the trigger is in Settings, which is single-instance),
+    // but be safe.
+    document.querySelector('.cx-modal-overlay.cx-nova-sm-overlay')?.remove();
+
+    const overlay = document.createElement('div');
+    overlay.className = 'cx-modal-overlay cx-nova-sm-overlay';
+    overlay.innerHTML = `
+        <div class="cx-modal-box cx-nova-sm-box" role="dialog" aria-modal="true" aria-labelledby="cx-nova-sm-title">
+            <div class="cx-modal-title" id="cx-nova-sm-title">Nova — Soul &amp; Memory</div>
+            <div class="cx-nova-sm-status" id="cx-nova-sm-status" role="status" aria-live="polite" aria-atomic="true">Loading…</div>
+            <div class="cx-nova-sm-pane">
+                <label class="cx-nova-sm-label" for="cx-nova-sm-soul">Soul (persona, voice, do/don't)</label>
+                <textarea id="cx-nova-sm-soul" class="cx-nova-sm-textarea" spellcheck="false" placeholder="Loading soul.md…"></textarea>
+                <div class="cx-nova-sm-pane-actions">
+                    <button class="cx-modal-btn cx-modal-btn-primary" id="cx-nova-sm-save-soul" disabled>Save Soul</button>
+                </div>
+            </div>
+            <div class="cx-nova-sm-pane">
+                <label class="cx-nova-sm-label" for="cx-nova-sm-memory">Memory (chat-specific notes)</label>
+                <textarea id="cx-nova-sm-memory" class="cx-nova-sm-textarea" spellcheck="false" placeholder="Loading memory.md…"></textarea>
+                <div class="cx-nova-sm-pane-actions">
+                    <button class="cx-modal-btn cx-modal-btn-primary" id="cx-nova-sm-save-memory" disabled>Save Memory</button>
+                </div>
+            </div>
+            <div class="cx-modal-actions">
+                <button class="cx-modal-btn cx-modal-btn-secondary" id="cx-nova-sm-reload">Reload from disk</button>
+                <button class="cx-modal-btn cx-modal-btn-secondary" id="cx-nova-sm-close">Close</button>
+            </div>
+        </div>`;
+
+    const close = () => {
+        overlay.remove();
+        document.removeEventListener('keydown', onKey);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector('#cx-nova-sm-close').addEventListener('click', close);
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(overlay);
+
+    const statusEl = overlay.querySelector('#cx-nova-sm-status');
+    const soulTa = overlay.querySelector('#cx-nova-sm-soul');
+    const memoryTa = overlay.querySelector('#cx-nova-sm-memory');
+    const saveSoulBtn = overlay.querySelector('#cx-nova-sm-save-soul');
+    const saveMemoryBtn = overlay.querySelector('#cx-nova-sm-save-memory');
+    const reloadBtn = overlay.querySelector('#cx-nova-sm-reload');
+
+    const setStatus = (text, kind = 'info') => {
+        if (!statusEl) return;
+        statusEl.textContent = text;
+        statusEl.dataset.kind = kind;
+    };
+
+    const loadIntoTextareas = async () => {
+        setStatus('Loading…');
+        soulTa.disabled = true; memoryTa.disabled = true;
+        saveSoulBtn.disabled = true; saveMemoryBtn.disabled = true;
+        reloadBtn.disabled = true;
+        try {
+            const { soul, memory } = await loadNovaSoulMemory({ force: true });
+            soulTa.value = String(soul || '');
+            memoryTa.value = String(memory || '');
+            setStatus(
+                (soul || memory) ? 'Loaded.' : 'Loaded (both files were empty or unreachable).',
+                (soul || memory) ? 'ok' : 'warn',
+            );
+        } catch (err) {
+            setStatus(`Load failed: ${err?.message || err}`, 'error');
+        } finally {
+            soulTa.disabled = false; memoryTa.disabled = false;
+            saveSoulBtn.disabled = false; saveMemoryBtn.disabled = false;
+            reloadBtn.disabled = false;
+            // Focus the first editable area so keyboard users can edit immediately.
+            soulTa.focus();
+        }
+    };
+
+    const saveOne = async ({ path, content, label, button }) => {
+        button.disabled = true;
+        const originalLabel = button.textContent;
+        button.textContent = 'Saving…';
+        setStatus(`Saving ${label}…`);
+        try {
+            const base = settings?.nova?.pluginBaseUrl || NOVA_DEFAULTS.pluginBaseUrl;
+            const res = await _novaBridgeWrite({ pluginBaseUrl: base, path, content });
+            if (res && res.ok) {
+                try { invalidateNovaSoulMemoryCache(); } catch (_) { /* noop */ }
+                setStatus(`${label} saved (${content.length} bytes).`, 'ok');
+            } else {
+                const reason = res?.error || 'unknown error';
+                setStatus(`${label} save failed: ${reason}. Install/start the nova-agent-bridge plugin to enable writes.`, 'error');
+            }
+        } catch (err) {
+            setStatus(`${label} save failed: ${err?.message || err}`, 'error');
+        } finally {
+            button.disabled = false;
+            button.textContent = originalLabel;
+        }
+    };
+
+    saveSoulBtn.addEventListener('click', () => saveOne({
+        path: `nova/${NOVA_SOUL_FILENAME}`,
+        content: String(soulTa.value || ''),
+        label: 'Soul',
+        button: saveSoulBtn,
+    }));
+    saveMemoryBtn.addEventListener('click', () => saveOne({
+        path: `nova/${NOVA_MEMORY_FILENAME}`,
+        content: String(memoryTa.value || ''),
+        label: 'Memory',
+        button: saveMemoryBtn,
+    }));
+    reloadBtn.addEventListener('click', () => { loadIntoTextareas().catch(() => {}); });
+
+    await loadIntoTextareas();
+}
+
 async function novaPickProfile() {
     const exec = await novaGetExecuteSlash();
     if (!exec) { await cxAlert('This SillyTavern build does not expose executeSlashCommandsWithOptions().', 'Nova'); return; }
@@ -4570,16 +4706,50 @@ async function novaHandleSend() {
 
     const { soul, memory } = await loadNovaSoulMemory();
 
-    // Build the tool handler set. Soul/memory self-edit tools are the
-    // only ones we ship handlers for today — other registered tools
-    // (fs_*, shell_*, st_*, phone_*) return { error: 'no-handler' } when
-    // dispatched without a handler, while missing tools use the
-    // dispatcher's unknown-tool failure surface.
-    const toolHandlers = buildNovaSoulMemoryHandlers({});
+    // Build the tool handler set. Shipped today: soul/memory self-edit
+    // (§6b) + phone-internal stores (§4e) + plugin-backed filesystem
+    // (§4a) + ST-API tools (§4d, with `st_write_character` and
+    // `st_write_worldbook` deferred — see `buildNovaStTools` header) +
+    // plugin-backed shell (§4b, forwards to the plugin's `/shell/run`
+    // route — currently returns `{ error: 'not-implemented' }` until the
+    // route lands).
+    const toolHandlers = {
+        ...buildNovaSoulMemoryHandlers({}),
+        ...buildNovaPhoneHandlers({}),
+        ...buildNovaFsHandlers({}),
+        ...buildNovaStTools({}),
+        ...buildNovaShellHandler({}),
+    };
 
     setNovaInFlight(true);
     if (textOnlyFallback) {
         appendNovaTranscriptLine('⚠︎ Text-only mode — ConnectionManagerRequestService unavailable; tool calls are disabled this turn.', 'notice');
+    }
+
+    // Plan §4f — probe the `nova-agent-bridge` server plugin and filter
+    // the tool registry to match what's actually installed. If the
+    // plugin is absent, the LLM must not see `fs_*` / `shell_*`
+    // (those would round-trip as `nova-bridge-unreachable` errors and
+    // burn tool-call slots). The probe result is cached per
+    // `NOVA_PROBE_TTL_MS` so this is cheap on subsequent turns.
+    let effectiveTools = textOnlyFallback ? [] : NOVA_TOOLS;
+    if (!textOnlyFallback) {
+        let probe;
+        try {
+            probe = await probeNovaBridge({ baseUrl: nova.pluginBaseUrl });
+        } catch (_) { probe = null; }
+        effectiveTools = filterNovaToolsByCapabilities({ tools: NOVA_TOOLS, probe });
+        // Emit the plan's "yellow banner" as a single-turn transcript
+        // notice so the user can see why `fs_read`, `shell_run`, etc.
+        // aren't available. Only shown when something was actually
+        // filtered — avoids noise on healthy installs and on older
+        // plugin builds that don't advertise capabilities yet.
+        if (probe && probe.present === false && effectiveTools.length !== NOVA_TOOLS.length) {
+            appendNovaTranscriptLine(
+                '⚠︎ Nova bridge plugin not detected — filesystem and shell tools are disabled this turn. Install `nova-agent-bridge` to enable them.',
+                'notice',
+            );
+        }
     }
 
     const run = () => sendNovaTurn({
@@ -4591,14 +4761,27 @@ async function novaHandleSend() {
         memory,
         maxToolCalls: Math.max(1, Number(nova.maxToolCalls) || NOVA_DEFAULTS.maxToolCalls),
         turnTimeoutMs: Math.max(10000, Number(nova.turnTimeoutMs) || NOVA_DEFAULTS.turnTimeoutMs),
-        tools: textOnlyFallback ? [] : NOVA_TOOLS,
+        tools: effectiveTools,
         sendRequest,
         executeSlash: exec,
         isToolCallingSupported: typeof ctx?.isToolCallingSupported === 'function' ? ctx.isToolCallingSupported : undefined,
         tier: nova.defaultTier || 'read',
         toolHandlers,
         confirmApproval: async ({ tool, args }) => {
-            return cxNovaApprovalModal({ tool, args, permission: tool?.permission });
+            // Phase 4c: for fs_write, fetch the current file and compose a
+            // unified diff so the user sees exactly what will change before
+            // clicking the red button. All three helpers (`fs_read` in
+            // `toolHandlers`, `buildNovaUnifiedDiff`, `cxNovaApprovalModal`'s
+            // `diffText` arg) already exist — this is pure composition.
+            // `buildFsWriteDiffPreview` never throws and returns '' for any
+            // non-fs_write tool, bad args, or fs_read failure, so non-write
+            // approvals are unaffected.
+            const diffText = await buildFsWriteDiffPreview({
+                tool,
+                args,
+                fsRead: toolHandlers.fs_read,
+            });
+            return cxNovaApprovalModal({ tool, args, diffText, permission: tool?.permission });
         },
     });
 
@@ -4718,6 +4901,9 @@ function wirePhone() {
     phoneContainer.querySelector('#cx-set-nova-max-tools')?.addEventListener('change', novaOnChange);
     phoneContainer.querySelector('#cx-set-nova-timeout')?.addEventListener('change', novaOnChange);
     phoneContainer.querySelector('#cx-set-nova-plugin-url')?.addEventListener('change', novaOnChange);
+    phoneContainer.querySelector('#cx-set-nova-edit-sm')?.addEventListener('click', () => {
+        openNovaSoulMemoryEditor().catch(err => cxAlert(String(err?.message || err), 'Nova'));
+    });
     phoneContainer.querySelector('#cx-set-lock')?.addEventListener('change', (e) => {
         settings.showLockscreen = e.target.checked;
         saveSettings();
@@ -5573,6 +5759,79 @@ function _coerceNovaCapabilities(raw) {
     return out;
 }
 
+/**
+ * Prefixes of tool names that depend on the `nova-agent-bridge` server
+ * plugin. When the plugin is absent, every tool starting with one of
+ * these prefixes is dropped from the per-turn tool list so the LLM
+ * never advertises something that will reliably return
+ * `{ error: 'nova-bridge-unreachable' }`. Everything else (`nova_*`,
+ * `phone_*`, `st_*`) runs in-process and stays regardless.
+ */
+const NOVA_BRIDGE_TOOL_PREFIXES = Object.freeze(['fs_', 'shell_']);
+
+function _isBridgeBackedToolName(name) {
+    if (typeof name !== 'string') return false;
+    for (const p of NOVA_BRIDGE_TOOL_PREFIXES) {
+        if (name.startsWith(p)) return true;
+    }
+    return false;
+}
+
+/**
+ * Filter the Nova tool registry against a bridge-probe result so the
+ * LLM only ever sees tools that have a live handler.
+ *
+ * Contract:
+ *   - `probe.present === false` → drop every bridge-backed tool
+ *     (`fs_*`, `shell_*`). Keep the rest.
+ *   - `probe.present === true` with a `capabilities` map → drop any
+ *     tool whose capability key is **explicitly `false`**. Tools not
+ *     mentioned in the map pass through (forward-compat: a new tool
+ *     added to the extension should light up as soon as a newer
+ *     plugin advertises it, not when the extension is updated to
+ *     list it explicitly here).
+ *   - `probe` missing, malformed, or `probe.present === true` with no
+ *     `capabilities` map → return `tools` unchanged (fail open). This
+ *     matters for in-flight probe races and for older bridge versions
+ *     that pre-date the capabilities contract.
+ *   - Non-array / null / undefined `tools` → `[]` (defensive).
+ *   - Never throws. Returns a fresh array; the input is never mutated.
+ */
+function filterNovaToolsByCapabilities({ tools, probe } = {}) {
+    if (!Array.isArray(tools)) return [];
+    // Fail open when we have no usable probe. A stale "present: true"
+    // is much safer than a false "present: false" that would strip
+    // every filesystem tool mid-turn.
+    if (!probe || typeof probe !== 'object' || Array.isArray(probe)) {
+        return tools.slice();
+    }
+
+    if (probe.present === false) {
+        return tools.filter((t) => !_isBridgeBackedToolName(t && t.name));
+    }
+
+    // `present === true` (or any truthy non-false — be liberal in what
+    // we accept). If the plugin advertised a capabilities map, use it
+    // as a precise allow-list for bridge-backed tools. If not, trust
+    // everything — the plugin is there, it just didn't tell us what
+    // routes it implements.
+    const caps = (probe.capabilities && typeof probe.capabilities === 'object' && !Array.isArray(probe.capabilities))
+        ? probe.capabilities
+        : null;
+    if (!caps) return tools.slice();
+
+    return tools.filter((t) => {
+        const name = t && t.name;
+        if (typeof name !== 'string') return false;
+        // Non-bridge tools are never gated by capabilities.
+        if (!_isBridgeBackedToolName(name)) return true;
+        // Bridge-backed tool: include only if the capability key is
+        // not explicitly `false`. Missing keys pass through (forward-
+        // compat with capabilities-light plugin builds).
+        return caps[name] !== false;
+    });
+}
+
 async function probeNovaBridge({
     baseUrl,
     fetchImpl,
@@ -5978,6 +6237,92 @@ function buildNovaUnifiedDiff(oldContent, newContent, { path = '', maxLines = NO
     }
 
     return [fromHeader, toHeader, ...bodyOut].join('\n');
+}
+
+/* ----------------------------------------------------------------------
+   NOVA AGENT — fs_write approval diff preview composer (plan §4c).
+
+   Pure, testable glue between the three existing pieces:
+     1. `fs_read` handler (from `buildNovaFsHandlers`)
+     2. `buildNovaUnifiedDiff` (LCS line-diff)
+     3. `cxNovaApprovalModal({ diffText })`
+
+   Called from `novaHandleSend`'s `confirmApproval` composer *before*
+   the modal opens, so the user sees a diff preview of what the LLM is
+   about to write before clicking the red button.
+
+   Contract:
+     - Returns `Promise<string>`. Empty string means "no preview" — the
+       modal still shows tool name + args JSON, just without the diff.
+     - NEVER throws. An `fs_read` that explodes, a bogus tool name, a
+       missing arg — all short-circuit to `''`.
+     - Fires only for `fs_write`. Every other tool short-circuits with
+       an empty string.
+
+   Deliberately at composer-level (not dispatcher-level) per AGENT_MEMORY
+   policy: the dispatcher must stay a pure handler-loop and not reach
+   back into the filesystem to render UI chrome. The composer owns the
+   approval UX, so it owns this call too.
+
+   Inputs (all optional but required for a non-empty return):
+     - `tool`      : the tool-registry entry whose approval is pending.
+     - `args`      : raw args the LLM sent (`{ path, content, ... }`).
+     - `fsRead`    : the `fs_read` handler from `buildNovaFsHandlers`.
+     - `buildDiff` : defaults to `buildNovaUnifiedDiff` in production.
+   ---------------------------------------------------------------------- */
+
+async function buildFsWriteDiffPreview(opts) {
+    const { tool, args, fsRead, buildDiff } = (opts && typeof opts === 'object') ? opts : {};
+    if (!tool || tool.name !== 'fs_write') return '';
+    const a = (args && typeof args === 'object') ? args : {};
+    if (typeof a.path !== 'string' || !a.path) return '';
+    if (typeof a.content !== 'string') return '';
+    const diffFn = typeof buildDiff === 'function'
+        ? buildDiff
+        : (typeof buildNovaUnifiedDiff === 'function' ? buildNovaUnifiedDiff : null);
+    if (!diffFn) return '';
+    const readFn = typeof fsRead === 'function' ? fsRead : null;
+
+    // Fetch the current file. We ONLY request path — no encoding/maxBytes
+    // overrides — so the server gives us its default utf8 read with the
+    // standard 1 MiB cap. If the file is larger, `truncated: true` comes
+    // back and the diff will include a best-effort preview up to that cap.
+    let oldContent = null; // null → treat as new file in buildNovaUnifiedDiff
+    if (readFn) {
+        let readRes;
+        try {
+            readRes = await readFn({ path: a.path });
+        } catch (_) {
+            return ''; // fs_read threw → no diff, modal still shows args
+        }
+        if (readRes && typeof readRes === 'object') {
+            // "Not-found" is semantic: the plugin returns `error: 'not-found'`
+            // + 404 status. That's a create, not a failure — leave oldContent
+            // null so buildNovaUnifiedDiff renders the `--- /dev/null` header.
+            if (readRes.error === 'not-found') {
+                oldContent = null;
+            } else if (typeof readRes.error === 'string') {
+                // Any OTHER error (bridge-unreachable, server-error, deny-list,
+                // content-too-large, etc.) → skip the diff. Modal still opens.
+                return '';
+            } else if (typeof readRes.content === 'string') {
+                oldContent = readRes.content;
+            } else {
+                // Unexpected shape → skip diff rather than render garbage.
+                return '';
+            }
+        } else {
+            return '';
+        }
+    }
+    // Defensive: diffFn is the only thing left that could throw. The
+    // production implementation is pure, but an injected test double
+    // might not be.
+    try {
+        return String(diffFn(oldContent, a.content, { path: a.path }) || '');
+    } catch (_) {
+        return '';
+    }
 }
 
 /* ----------------------------------------------------------------------
@@ -7562,18 +7907,31 @@ const NOVA_SKILLS = [
  *
  * Returns `{ ok: true, path }` on 2xx, or `{ error: '<reason>' }` otherwise.
  */
-async function _novaBridgeWrite({ pluginBaseUrl, path, content, fetchImpl }) {
+async function _novaBridgeWrite({ pluginBaseUrl, path, content, fetchImpl, headersProvider }) {
     const doFetch = typeof fetchImpl === 'function'
         ? fetchImpl
         : (typeof fetch === 'function' ? fetch : null);
     if (!doFetch) return { error: 'no-fetch' };
     const base = String(pluginBaseUrl || NOVA_DEFAULTS.pluginBaseUrl).replace(/\/+$/, '');
     const url = `${base}/fs/write`;
+    // Plan §8c — merge ST's auth headers (X-CSRF-Token) so soul/memory
+    // writes pass ST's global csrf-sync middleware. Same pattern as
+    // `_novaBridgeRequest`.
+    const authHeaders = {};
+    const provider = (typeof headersProvider === 'function')
+        ? headersProvider
+        : (typeof getRequestHeaders === 'function' ? getRequestHeaders : null);
+    if (provider) {
+        try {
+            const h = provider({ omitContentType: true });
+            if (h && typeof h === 'object') Object.assign(authHeaders, h);
+        } catch (_) { /* noop */ }
+    }
     let resp;
     try {
         resp = await doFetch(url, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { ...authHeaders, 'Content-Type': 'application/json' },
             body: JSON.stringify({ path, content, overwrite: true, createParents: true }),
         });
     } catch (err) {
@@ -7658,6 +8016,787 @@ function buildNovaSoulMemoryHandlers({
                 return { ok: true, path: memoryPath, bytes: content.length };
             }
             return res;
+        },
+    };
+}
+
+/* ----------------------------------------------------------------------
+   NOVA AGENT — phone-internal tool handlers (plan §4e).
+
+   `buildNovaPhoneHandlers` returns the 8 `phone_*` tool handlers that
+   read/write the phone's local stores (NPCs, quests, places, messages).
+   All stores are in `localStorage` and scoped to the current chat, so no
+   network, no plugin, no approval gate beyond the dispatcher's built-in
+   tier check (write permission required for the write handlers).
+
+   Contract — mirrors `buildNovaSoulMemoryHandlers`:
+   - Handlers NEVER throw; errors resolve to `{ error: <string> }`.
+   - Reads return `{ <collection>: [...] }` so the LLM can inspect shape.
+   - Writes return `{ ok: true, ... }` on success.
+   - All store mutations go through the production helpers so any side
+     effects (caches, UI rebuild, event dispatch, focus normalisation)
+     stay in one place.
+
+   Injected deps (all optional; default to module globals so the
+   production call site just passes `{}`):
+     - `loadNpcsImpl`, `mergeNpcsImpl`
+     - `loadQuestsImpl`, `upsertQuestImpl`
+     - `loadPlacesImpl`, `upsertPlaceImpl`
+     - `loadMessagesImpl`, `pushMessageImpl`
+   ---------------------------------------------------------------------- */
+
+/**
+ * Build the 8 phone_* tool handlers. Returns `{ name: handler }` map
+ * compatible with the `toolHandlers` argument of `sendNovaTurn`.
+ */
+function buildNovaPhoneHandlers({
+    loadNpcsImpl,
+    mergeNpcsImpl,
+    loadQuestsImpl,
+    upsertQuestImpl,
+    loadPlacesImpl,
+    upsertPlaceImpl,
+    loadMessagesImpl,
+    pushMessageImpl,
+    messageHistoryLimitDefault = 50,
+    messageHistoryLimitMax = 200,
+} = {}) {
+    const _loadNpcs = typeof loadNpcsImpl === 'function' ? loadNpcsImpl : (typeof loadNpcs === 'function' ? loadNpcs : () => []);
+    const _mergeNpcs = typeof mergeNpcsImpl === 'function' ? mergeNpcsImpl : (typeof mergeNpcs === 'function' ? mergeNpcs : null);
+    const _loadQuests = typeof loadQuestsImpl === 'function' ? loadQuestsImpl : (typeof loadQuests === 'function' ? loadQuests : () => []);
+    const _upsertQuest = typeof upsertQuestImpl === 'function' ? upsertQuestImpl : (typeof upsertQuest === 'function' ? upsertQuest : null);
+    const _loadPlaces = typeof loadPlacesImpl === 'function' ? loadPlacesImpl : (typeof loadPlaces === 'function' ? loadPlaces : () => []);
+    const _upsertPlace = typeof upsertPlaceImpl === 'function' ? upsertPlaceImpl : (typeof upsertPlace === 'function' ? upsertPlace : null);
+    const _loadMessages = typeof loadMessagesImpl === 'function' ? loadMessagesImpl : (typeof loadMessages === 'function' ? loadMessages : () => []);
+    const _pushMessage = typeof pushMessageImpl === 'function' ? pushMessageImpl : (typeof pushMessage === 'function' ? pushMessage : null);
+
+    const clampLimit = (raw) => {
+        const n = Number(raw);
+        if (!Number.isFinite(n) || n <= 0) return messageHistoryLimitDefault;
+        return Math.max(1, Math.min(Math.floor(n), messageHistoryLimitMax));
+    };
+
+    const safeName = (v) => (typeof v === 'string' ? v.trim() : '');
+    const isObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
+    // Defensive arg coercion: destructuring defaults only fire for `undefined`,
+    // not `null`. The dispatch loop already validates tool args against the
+    // JSON schema, but third-party callers + fuzzing shouldn't crash us.
+    const safeArgs = (v) => (isObject(v) ? v : {});
+
+    return {
+        phone_list_npcs: async () => {
+            try {
+                const npcs = _loadNpcs() || [];
+                return { npcs: Array.isArray(npcs) ? npcs : [] };
+            } catch (err) {
+                return { error: String(err?.message || err) };
+            }
+        },
+        phone_write_npc: async (rawArgs) => {
+            const { name, fields } = safeArgs(rawArgs);
+            const cleanName = safeName(name);
+            if (!cleanName) return { error: 'name must be a non-empty string' };
+            if (!isObject(fields)) return { error: 'fields must be an object' };
+            if (!_mergeNpcs) return { error: 'mergeNpcs unavailable' };
+            try {
+                // Merge input is `{ name, ...fields }`; production `mergeNpcs`
+                // handles both new-insert and update-by-name paths.
+                _mergeNpcs([{ ...fields, name: cleanName }]);
+                return { ok: true, name: cleanName };
+            } catch (err) {
+                return { error: String(err?.message || err) };
+            }
+        },
+        phone_list_quests: async () => {
+            try {
+                const quests = _loadQuests() || [];
+                return { quests: Array.isArray(quests) ? quests : [] };
+            } catch (err) {
+                return { error: String(err?.message || err) };
+            }
+        },
+        phone_write_quest: async (rawArgs) => {
+            const { id, fields } = safeArgs(rawArgs);
+            const cleanId = safeName(id);
+            if (!cleanId) return { error: 'id must be a non-empty string' };
+            if (!isObject(fields)) return { error: 'fields must be an object' };
+            if (!_upsertQuest) return { error: 'upsertQuest unavailable' };
+            try {
+                const clean = _upsertQuest({ ...fields, id: cleanId });
+                return { ok: true, id: cleanId, quest: clean || null };
+            } catch (err) {
+                return { error: String(err?.message || err) };
+            }
+        },
+        phone_list_places: async () => {
+            try {
+                const places = _loadPlaces() || [];
+                return { places: Array.isArray(places) ? places : [] };
+            } catch (err) {
+                return { error: String(err?.message || err) };
+            }
+        },
+        phone_write_place: async (rawArgs) => {
+            const { name, fields } = safeArgs(rawArgs);
+            const cleanName = safeName(name);
+            if (!cleanName) return { error: 'name must be a non-empty string' };
+            if (!isObject(fields)) return { error: 'fields must be an object' };
+            if (!_upsertPlace) return { error: 'upsertPlace unavailable' };
+            try {
+                const clean = _upsertPlace({ ...fields, name: cleanName });
+                if (!clean) return { error: 'upsert rejected (invalid place)' };
+                return { ok: true, place: clean };
+            } catch (err) {
+                return { error: String(err?.message || err) };
+            }
+        },
+        phone_list_messages: async (rawArgs) => {
+            const { contactName, limit } = safeArgs(rawArgs);
+            const cleanName = safeName(contactName);
+            if (!cleanName) return { error: 'contactName must be a non-empty string' };
+            try {
+                const all = _loadMessages(cleanName) || [];
+                const list = Array.isArray(all) ? all : [];
+                const cap = clampLimit(limit);
+                const messages = list.length > cap ? list.slice(-cap) : list.slice();
+                return { contactName: cleanName, messages, total: list.length };
+            } catch (err) {
+                return { error: String(err?.message || err) };
+            }
+        },
+        phone_inject_message: async (rawArgs) => {
+            const { contactName, from, text } = safeArgs(rawArgs);
+            const cleanName = safeName(contactName);
+            if (!cleanName) return { error: 'contactName must be a non-empty string' };
+            if (from !== 'user' && from !== 'contact') return { error: 'from must be "user" or "contact"' };
+            if (typeof text !== 'string') return { error: 'text must be a string' };
+            if (!text.trim()) return { error: 'text must be non-empty' };
+            if (!_pushMessage) return { error: 'pushMessage unavailable' };
+            try {
+                // Production message type is 'sent' for user-origin, 'received'
+                // for contact-origin. The `from` arg in the tool schema is a
+                // stable LLM-facing name; map it to the internal type here.
+                const type = from === 'user' ? 'sent' : 'received';
+                _pushMessage(cleanName, type, text, null);
+                return { ok: true, contactName: cleanName, from };
+            } catch (err) {
+                return { error: String(err?.message || err) };
+            }
+        },
+    };
+}
+
+/* ----------------------------------------------------------------------
+   NOVA AGENT — filesystem tool handlers (plan §4a).
+
+   `buildNovaFsHandlers` returns the 7 `fs_*` tool handlers that wrap the
+   `nova-agent-bridge` server plugin's `/fs/*` routes. All seven plugin
+   routes (`/fs/list`, `/fs/read`, `/fs/stat`, `/fs/search`, `/fs/write`,
+   `/fs/delete`, `/fs/move`) are live as of v0.13.0, so the LLM can now
+   actually use them — previously every `fs_*` tool call resolved to
+   `{ error: 'no-handler' }` in the dispatcher.
+
+   The plugin enforces all the safety constraints (path containment,
+   deny-list, .nova-trash backup-before-overwrite, root-refusal, content
+   size cap, audit log). These handlers do NOT re-implement any of that;
+   they are thin transports that map tool args to the route shape and
+   forward the response.
+
+   Contract — mirrors `buildNovaSoulMemoryHandlers` /
+   `buildNovaPhoneHandlers`:
+   - Handlers NEVER throw; errors resolve to `{ error: <kind>, ... }`.
+   - On 2xx, success forwards the route's JSON body verbatim.
+   - On non-2xx, returns `{ error: <server-error-code>, status, ... }`.
+   - On network failure, returns `{ error: 'nova-bridge-unreachable',
+     message }`. On missing `fetch`, `{ error: 'no-fetch' }`.
+
+   Injected deps (all optional; default to globals so production passes
+   `{}` and tests pass mocks):
+     - `pluginBaseUrl`  : default = `settings.nova.pluginBaseUrl` →
+                          `NOVA_DEFAULTS.pluginBaseUrl`.
+     - `fetchImpl`      : default = global `fetch`.
+   ---------------------------------------------------------------------- */
+
+/**
+ * Generic plugin HTTP helper. Used by `buildNovaFsHandlers` for all 7
+ * fs routes. Closed-enum failure surface: `no-fetch` (no global fetch
+ * and no `fetchImpl` injected), `nova-bridge-unreachable` (network /
+ * DNS / fetch threw), `nova-bridge-error` (HTTP non-2xx, with the
+ * server's error code surfaced as `error` if the body parses as JSON).
+ *
+ * Never throws. Always resolves to either a parsed-JSON success object
+ * (the route's response body, with `ok` defaulted to `true` if absent)
+ * or one of the closed-enum error shapes above.
+ */
+async function _novaBridgeRequest({ pluginBaseUrl, method, route, query, body, fetchImpl, headersProvider }) {
+    const doFetch = typeof fetchImpl === 'function'
+        ? fetchImpl
+        : (typeof fetch === 'function' ? fetch : null);
+    if (!doFetch) return { error: 'no-fetch' };
+    const base = String(pluginBaseUrl || NOVA_DEFAULTS.pluginBaseUrl).replace(/\/+$/, '');
+    let url = `${base}${route}`;
+    if (query && typeof query === 'object') {
+        const qs = new URLSearchParams();
+        for (const [k, v] of Object.entries(query)) {
+            if (v === undefined || v === null) continue;
+            qs.append(k, String(v));
+        }
+        const qsStr = qs.toString();
+        if (qsStr) url += `?${qsStr}`;
+    }
+    // Plan §8c — merge ST's auth headers (specifically `X-CSRF-Token`)
+    // into every bridge call so state-changing requests pass ST's
+    // global `csrf-sync` middleware. Same-origin cookies (the session)
+    // flow automatically; no `credentials` override needed.
+    // `headersProvider` is injectable so unit tests can stub it;
+    // in production we fall back to ST's exported `getRequestHeaders`.
+    // Any failure from the provider is swallowed — we'd rather send
+    // the request without auth and let the server reject it than
+    // block a legit call because the provider threw.
+    const authHeaders = {};
+    const provider = (typeof headersProvider === 'function')
+        ? headersProvider
+        : (typeof getRequestHeaders === 'function' ? getRequestHeaders : null);
+    if (provider) {
+        try {
+            const h = provider({ omitContentType: true });
+            if (h && typeof h === 'object') Object.assign(authHeaders, h);
+        } catch (_) { /* noop — fail open, let server decide */ }
+    }
+    const init = { method: method || 'GET', headers: { ...authHeaders } };
+    if (body !== undefined) {
+        init.headers['Content-Type'] = 'application/json';
+        init.body = JSON.stringify(body);
+    }
+    let resp;
+    try {
+        resp = await doFetch(url, init);
+    } catch (err) {
+        return { error: 'nova-bridge-unreachable', message: String(err?.message || err) };
+    }
+    let parsed = null;
+    let rawText = '';
+    try { rawText = await resp.text(); } catch (_) { /* noop */ }
+    if (rawText) {
+        try { parsed = JSON.parse(rawText); } catch (_) { /* leave parsed null */ }
+    }
+    if (!resp || !resp.ok) {
+        // Server's `sendError` shape is `{ error, ...extra }`. Surface that
+        // through verbatim under our own `error` key; if parsing failed
+        // (HTML 502, etc.) fall back to the generic bridge-error code.
+        if (parsed && typeof parsed === 'object' && typeof parsed.error === 'string') {
+            return { ...parsed, status: resp.status };
+        }
+        return {
+            error: 'nova-bridge-error',
+            status: resp?.status || 0,
+            body: String(rawText).slice(0, 400),
+        };
+    }
+    if (parsed && typeof parsed === 'object') {
+        // Forward the route's JSON. Most write routes already include
+        // `ok: true`; reads don't, so leave that to the caller / LLM.
+        return parsed;
+    }
+    // 2xx with no parseable body — treat as ok with the raw text snippet.
+    return { ok: true, body: String(rawText).slice(0, 400) };
+}
+
+/**
+ * Build the 7 fs_* tool handlers. Returns `{ name: handler }` map
+ * compatible with the `toolHandlers` argument of `sendNovaTurn`.
+ */
+function buildNovaFsHandlers({ pluginBaseUrl, fetchImpl } = {}) {
+    const base = pluginBaseUrl || (typeof settings !== 'undefined' && settings?.nova?.pluginBaseUrl) || NOVA_DEFAULTS.pluginBaseUrl;
+
+    const isObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
+    const safeArgs = (v) => (isObject(v) ? v : {});
+    const safePath = (v) => (typeof v === 'string' ? v : '');
+    const req = (method, route, opts) => _novaBridgeRequest({
+        pluginBaseUrl: base, method, route, fetchImpl, ...opts,
+    });
+
+    return {
+        fs_list: async (rawArgs) => {
+            const { path, recursive, maxDepth } = safeArgs(rawArgs);
+            const p = safePath(path);
+            if (!p) return { error: 'path must be a non-empty string' };
+            const query = { path: p };
+            if (recursive !== undefined) query.recursive = Boolean(recursive);
+            if (maxDepth !== undefined) query.maxDepth = maxDepth;
+            return req('GET', '/fs/list', { query });
+        },
+        fs_read: async (rawArgs) => {
+            const { path, encoding, maxBytes } = safeArgs(rawArgs);
+            const p = safePath(path);
+            if (!p) return { error: 'path must be a non-empty string' };
+            const query = { path: p };
+            if (encoding !== undefined) query.encoding = encoding;
+            if (maxBytes !== undefined) query.maxBytes = maxBytes;
+            return req('GET', '/fs/read', { query });
+        },
+        fs_stat: async (rawArgs) => {
+            const { path } = safeArgs(rawArgs);
+            const p = safePath(path);
+            if (!p) return { error: 'path must be a non-empty string' };
+            return req('GET', '/fs/stat', { query: { path: p } });
+        },
+        fs_search: async (rawArgs) => {
+            const { query: searchQuery, glob, path, maxResults } = safeArgs(rawArgs);
+            if (typeof searchQuery !== 'string' || searchQuery.length === 0) {
+                return { error: 'query must be a non-empty string' };
+            }
+            const body = { query: searchQuery };
+            if (typeof glob === 'string') body.glob = glob;
+            if (typeof path === 'string' && path.length > 0) body.path = path;
+            if (maxResults !== undefined) body.maxResults = maxResults;
+            return req('POST', '/fs/search', { body });
+        },
+        fs_write: async (rawArgs) => {
+            const { path, content, encoding, createParents, overwrite } = safeArgs(rawArgs);
+            const p = safePath(path);
+            if (!p) return { error: 'path must be a non-empty string' };
+            if (typeof content !== 'string') return { error: 'content must be a string' };
+            const body = { path: p, content };
+            if (encoding !== undefined) body.encoding = encoding;
+            if (createParents !== undefined) body.createParents = Boolean(createParents);
+            if (overwrite !== undefined) body.overwrite = Boolean(overwrite);
+            return req('POST', '/fs/write', { body });
+        },
+        fs_delete: async (rawArgs) => {
+            const { path, recursive } = safeArgs(rawArgs);
+            const p = safePath(path);
+            if (!p) return { error: 'path must be a non-empty string' };
+            const body = { path: p };
+            if (recursive !== undefined) body.recursive = Boolean(recursive);
+            return req('POST', '/fs/delete', { body });
+        },
+        fs_move: async (rawArgs) => {
+            const { from, to, overwrite } = safeArgs(rawArgs);
+            const f = safePath(from);
+            const t = safePath(to);
+            if (!f) return { error: 'from must be a non-empty string' };
+            if (!t) return { error: 'to must be a non-empty string' };
+            const body = { from: f, to: t };
+            if (overwrite !== undefined) body.overwrite = Boolean(overwrite);
+            return req('POST', '/fs/move', { body });
+        },
+    };
+}
+
+/* ----------------------------------------------------------------------
+   NOVA AGENT — shell_run handler factory (plan §4b).
+
+   Thin wrapper over `_novaBridgeRequest` that forwards `shell_run` tool
+   calls to the plugin's `/shell/run` route. Mirrors the contract of
+   `buildNovaFsHandlers`: never throws, closed-enum errors, all deps DI'd.
+
+   Today the route returns `501 Not Implemented` — that naturally flows
+   through `_novaBridgeRequest` as `{ error: 'not-implemented', plugin,
+   version, route, status: 501 }`, which is a perfectly good LLM-readable
+   answer ("this capability isn't available right now, try something
+   else"). We deliberately do NOT special-case the 501 here: when the
+   plugin ships the real implementation the same call path works without
+   any extension change.
+
+   Client-side validation is intentionally minimal. The server owns the
+   allow-list (`DEFAULT_SHELL_ALLOW` — node / npm / git / python / grep /
+   rg / ls / cat / head / tail / wc / find), timeout enforcement, and
+   `shell: false` spawn safety. The only pre-checks here are shape
+   sanity so the LLM gets a fast readable error for malformed calls
+   instead of a 400 from the plugin:
+
+     - `cmd`       required, non-empty string
+     - `args`      optional, coerced to an array of strings (non-arrays
+                   → `[]`; non-string entries filtered out)
+     - `cwd`       optional, non-empty string (omitted otherwise)
+     - `timeoutMs` optional, finite integer clamped to
+                   [SHELL_TIMEOUT_MIN_MS .. SHELL_TIMEOUT_MAX_MS]
+                   (100 ms .. 5 min) to match the schema's bounds
+
+   Approval gating (Full tier only, per-call prompt unless
+   "Remember approvals this session" is on) is handled upstream by
+   `novaToolGate` + `runNovaToolDispatch` + `cxNovaApprovalModal`. This
+   factory just forwards the HTTP call.
+   ---------------------------------------------------------------------- */
+
+const SHELL_TIMEOUT_MIN_MS = 100;
+const SHELL_TIMEOUT_MAX_MS = 300000;
+
+function buildNovaShellHandler({ pluginBaseUrl, fetchImpl } = {}) {
+    const base = pluginBaseUrl || (typeof settings !== 'undefined' && settings?.nova?.pluginBaseUrl) || NOVA_DEFAULTS.pluginBaseUrl;
+
+    const isObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
+    const safeArgs = (v) => (isObject(v) ? v : {});
+    const req = (method, route, opts) => _novaBridgeRequest({
+        pluginBaseUrl: base, method, route, fetchImpl, ...opts,
+    });
+
+    return {
+        shell_run: async (rawArgs) => {
+            const { cmd, args, cwd, timeoutMs } = safeArgs(rawArgs);
+            if (typeof cmd !== 'string' || cmd.length === 0) {
+                return { error: 'cmd must be a non-empty string' };
+            }
+            // Normalise args → string[]. The tool schema says `array<string>`
+            // with default `[]`, so anything the LLM sends that isn't an
+            // array becomes the empty array; anything inside that isn't a
+            // string is dropped. This is permissive on purpose — the LLM
+            // sometimes emits a single string instead of an array, and we'd
+            // rather run `cmd` with no args than refuse with a confusing
+            // error.
+            const cleanArgs = Array.isArray(args)
+                ? args.filter((x) => typeof x === 'string')
+                : [];
+            const body = { cmd, args: cleanArgs };
+            if (typeof cwd === 'string' && cwd.length > 0) body.cwd = cwd;
+            if (timeoutMs !== undefined && timeoutMs !== null) {
+                // Only accept numeric primitives (or strings we can coerce).
+                // `Number([])` is 0 and `Number([42])` is 42 — those would
+                // sneak through as a finite timeout if we blind-coerced.
+                // Explicit type check keeps the "non-finite → server
+                // default" contract honest.
+                const n = (typeof timeoutMs === 'number' || typeof timeoutMs === 'string')
+                    ? Number(timeoutMs)
+                    : NaN;
+                if (Number.isFinite(n)) {
+                    // Clamp, then floor — Number.isInteger(0.5) is false
+                    // but we still want to accept it.
+                    const clamped = Math.floor(
+                        Math.min(SHELL_TIMEOUT_MAX_MS, Math.max(SHELL_TIMEOUT_MIN_MS, n)),
+                    );
+                    body.timeoutMs = clamped;
+                }
+                // Non-finite → drop the field, let the server use its default.
+            }
+            return req('POST', '/shell/run', { body });
+        },
+    };
+}
+
+/* ----------------------------------------------------------------------
+   NOVA AGENT — SillyTavern API tool handlers (plan §4d).
+
+   `buildNovaStTools` returns the `st_*` tool handlers that read/write
+   SillyTavern's own state (characters, worldbooks, chat context,
+   connection profiles, slash commands). No plugin dependency — these
+   handlers go through `getContext()` + `executeSlashCommandsWithOptions`
+   only, so they work even when `nova-agent-bridge` isn't installed.
+
+   Scope of THIS factory (8 of 10 schemas wired):
+     - `st_list_characters`, `st_read_character`     — read `ctx.characters`
+     - `st_list_worldbooks`, `st_read_worldbook`     — slash `/world` family
+     - `st_get_context`                              — synthesise from ctx
+     - `st_run_slash`                                — executeSlashCommands
+     - `st_list_profiles`, `st_get_profile`          — `/profile-list` etc.
+
+   Deferred (returns closed-enum `{ error: 'not-implemented', hint }`):
+     - `st_write_character`, `st_write_worldbook`
+
+   Why deferred: the documented public surface for editing a character
+   card or worldbook from a third-party extension is unstable. ST has
+   internal HTTP routes (and PNG metadata re-embedding for cards) that
+   are not exposed via `getContext()` and not captured in `st-docs/`. I'd
+   rather ship a closed-enum "not-implemented" surface than a fetch
+   against speculative endpoints that might silently corrupt user data.
+   The hint directs the LLM to the existing fs_write workaround at the
+   relevant JSON path; once the correct ST API surface is known, slot
+   real handlers into the same `buildNovaStTools` factory and the
+   skill-pack guidance ("Prefer st_write_character over fs_write…") will
+   start applying without any other code changes. See AGENT_MEMORY
+   2026-04-25 (st handlers) entry for the follow-up.
+
+   Contract — mirrors `buildNovaSoulMemoryHandlers` /
+   `buildNovaPhoneHandlers` / `buildNovaFsHandlers`:
+     - Handlers NEVER throw; errors resolve to `{ error: <kind>, ... }`.
+     - Reads return the relevant collection (`characters`, `worldbooks`,
+       `profiles`, `context`) so the LLM can inspect shape directly.
+     - `st_run_slash` returns `{ ok: true, pipe }` from the slash
+       executor; on failure `{ error: 'slash-failed', message }`.
+     - All deps are DI'd so tests can pass mocks; production passes `{}`.
+
+   Injected deps (all optional):
+     - `ctxImpl`           : default = `getContext()` at handler call time
+                             (lazy — picks up chat/character changes).
+     - `executeSlashImpl`  : default = the `executeSlash` returned by
+                             `novaGetExecuteSlash()` (lazy resolution so a
+                             test can pass a fake without ST loaded).
+     - `listProfilesImpl`  : default = production `listNovaProfiles`.
+   ---------------------------------------------------------------------- */
+
+function buildNovaStTools({
+    ctxImpl,
+    executeSlashImpl,
+    listProfilesImpl,
+} = {}) {
+    const isObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
+    const safeArgs = (v) => (isObject(v) ? v : {});
+    const safeName = (v) => (typeof v === 'string' ? v.trim() : '');
+
+    // Lazy resolution: each call re-fetches ctx so the handler picks up
+    // chat / character changes mid-turn. ctxImpl can also be a function
+    // (called per invocation) or a static object (used as-is).
+    const getCtx = () => {
+        if (ctxImpl !== undefined && ctxImpl !== null) {
+            return typeof ctxImpl === 'function' ? ctxImpl() : ctxImpl;
+        }
+        return typeof getContext === 'function' ? getContext() : null;
+    };
+    const getSlash = async () => {
+        if (typeof executeSlashImpl === 'function') return executeSlashImpl;
+        if (typeof novaGetExecuteSlash === 'function') return await novaGetExecuteSlash();
+        return null;
+    };
+    const getListProfiles = () => {
+        if (typeof listProfilesImpl === 'function') return listProfilesImpl;
+        if (typeof listNovaProfiles === 'function') return listNovaProfiles;
+        return null;
+    };
+
+    // Escape a string for embedding inside a `name="…"` slash-command
+    // argument. Backslashes MUST be escaped before quotes so a value
+    // ending in `\` doesn't escape the closing quote and break the
+    // parser (e.g. `foo\` becomes `foo\\` → safe to wrap in quotes).
+    const escSlashArg = (v) => String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+
+    // Slash output normaliser: ST returns either a string pipe or
+    // `{ pipe, ... }`. Always surface a string.
+    const pipeOf = (res) => {
+        if (res && typeof res === 'object' && 'pipe' in res) return String(res.pipe ?? '');
+        if (typeof res === 'string') return res;
+        return '';
+    };
+
+    // Light card sanitiser: pulls a stable shape out of `ctx.characters[i]`
+    // for `st_list_characters` so the LLM gets a small, predictable
+    // payload (full card dump goes through `st_read_character`).
+    const summarizeCharacter = (c) => {
+        if (!isObject(c)) return null;
+        return {
+            name: typeof c.name === 'string' ? c.name : '',
+            avatar: typeof c.avatar === 'string' ? c.avatar : '',
+            description: typeof c.description === 'string'
+                ? c.description.slice(0, 280) // truncate so list payload stays small
+                : '',
+            tags: Array.isArray(c.tags) ? c.tags.slice(0, 16) : [],
+            create_date: typeof c.create_date === 'string' ? c.create_date : '',
+        };
+    };
+
+    return {
+        st_list_characters: async () => {
+            const ctx = getCtx();
+            if (!ctx) return { error: 'no-context' };
+            const list = Array.isArray(ctx.characters) ? ctx.characters : [];
+            const characters = list
+                .map(summarizeCharacter)
+                .filter(c => c && c.name);
+            return { characters, count: characters.length };
+        },
+
+        st_read_character: async (rawArgs) => {
+            const { name } = safeArgs(rawArgs);
+            const cleanName = safeName(name);
+            if (!cleanName) return { error: 'name must be a non-empty string' };
+            const ctx = getCtx();
+            if (!ctx) return { error: 'no-context' };
+            const list = Array.isArray(ctx.characters) ? ctx.characters : [];
+            const card = list.find(c => isObject(c) && c.name === cleanName);
+            if (!card) return { error: 'not-found', name: cleanName };
+            // Return the card object directly. Cards are JSON-serialisable
+            // shapes per spec v2; the LLM consumes them as JSON.
+            return { name: cleanName, card };
+        },
+
+        st_write_character: async (rawArgs) => {
+            const { name } = safeArgs(rawArgs);
+            const cleanName = safeName(name);
+            // Validate args even on the not-implemented path so the LLM
+            // gets a useful error if it sent garbage. The hint always
+            // includes the canonical fs_write workaround.
+            if (!cleanName) return { error: 'name must be a non-empty string' };
+            return {
+                error: 'not-implemented',
+                tool: 'st_write_character',
+                hint: 'st_write_character is not wired in this build. As a workaround, '
+                    + `use fs_write at SillyTavern/data/<user>/characters/${cleanName}.json `
+                    + 'with the full character-card JSON. Note: this bypasses ST\'s PNG '
+                    + 'metadata re-embed and chat-index update; restart ST or use '
+                    + '/character-list to refresh the UI.',
+            };
+        },
+
+        st_list_worldbooks: async () => {
+            // Strategy: try the slash command first. ST's `/world list`
+            // (when present) returns a pipe of JSON or newline-separated
+            // names. If it's not available, fall back to a safe empty
+            // list with a hint so the LLM knows to use fs_list against
+            // the worlds directory.
+            const exec = await getSlash();
+            if (typeof exec === 'function') {
+                try {
+                    const res = await exec('/world list');
+                    const pipe = pipeOf(res);
+                    if (pipe) {
+                        // Best-effort parse: try JSON array, then
+                        // newline-separated, then comma-separated.
+                        let names = null;
+                        try {
+                            const parsed = JSON.parse(pipe);
+                            if (Array.isArray(parsed)) names = parsed.map(String);
+                        } catch (_) { /* fall through */ }
+                        if (!names) {
+                            names = pipe.split(/\r?\n|,/).map(s => s.trim()).filter(Boolean);
+                        }
+                        return { worldbooks: names, count: names.length };
+                    }
+                } catch (_) { /* fall through to hint */ }
+            }
+            return {
+                worldbooks: [],
+                count: 0,
+                hint: 'Slash command "/world list" returned no data on this ST build. '
+                    + 'Use fs_list at SillyTavern/data/<user>/worlds/ as a fallback.',
+            };
+        },
+
+        st_read_worldbook: async (rawArgs) => {
+            const { name } = safeArgs(rawArgs);
+            const cleanName = safeName(name);
+            if (!cleanName) return { error: 'name must be a non-empty string' };
+            const exec = await getSlash();
+            if (typeof exec === 'function') {
+                try {
+                    // ST exposes `/world get name=<n>` on recent builds.
+                    // Quote the name so spaces don't trip the parser.
+                    const cmd = `/world get name="${escSlashArg(cleanName)}"`;
+                    const res = await exec(cmd);
+                    const pipe = pipeOf(res);
+                    if (pipe) {
+                        try {
+                            const parsed = JSON.parse(pipe);
+                            return { name: cleanName, book: parsed };
+                        } catch (_) {
+                            return { name: cleanName, raw: pipe.slice(0, 4000) };
+                        }
+                    }
+                } catch (_) { /* fall through */ }
+            }
+            return {
+                error: 'not-found',
+                name: cleanName,
+                hint: 'Could not retrieve worldbook via "/world get". Try fs_read at '
+                    + `SillyTavern/data/<user>/worlds/${cleanName}.json`,
+            };
+        },
+
+        st_write_worldbook: async (rawArgs) => {
+            const { name } = safeArgs(rawArgs);
+            const cleanName = safeName(name);
+            if (!cleanName) return { error: 'name must be a non-empty string' };
+            return {
+                error: 'not-implemented',
+                tool: 'st_write_worldbook',
+                hint: 'st_write_worldbook is not wired in this build. As a workaround, '
+                    + `use fs_write at SillyTavern/data/<user>/worlds/${cleanName}.json `
+                    + 'with the full worldbook JSON. Note: this bypasses ST\'s uid '
+                    + 'normalisation; restart ST or run /world list to refresh the UI.',
+            };
+        },
+
+        st_run_slash: async (rawArgs) => {
+            const { command } = safeArgs(rawArgs);
+            if (typeof command !== 'string' || !command.trim()) {
+                return { error: 'command must be a non-empty string' };
+            }
+            const exec = await getSlash();
+            if (typeof exec !== 'function') {
+                return { error: 'slash-unavailable', hint: 'executeSlashCommandsWithOptions is not exposed by this ST build.' };
+            }
+            try {
+                const res = await exec(command);
+                return { ok: true, pipe: pipeOf(res) };
+            } catch (err) {
+                return { error: 'slash-failed', message: String(err?.message || err) };
+            }
+        },
+
+        st_get_context: async (rawArgs) => {
+            const { lastN } = safeArgs(rawArgs);
+            const ctx = getCtx();
+            if (!ctx) return { error: 'no-context' };
+            // Clamp lastN per the schema (1..50, default 10).
+            const n = Number.isFinite(Number(lastN))
+                ? Math.max(1, Math.min(50, Math.floor(Number(lastN))))
+                : 10;
+            const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+            const tail = chat.slice(-n).map((m) => {
+                if (!isObject(m)) return null;
+                return {
+                    name: typeof m.name === 'string' ? m.name : '',
+                    is_user: !!m.is_user,
+                    is_system: !!m.is_system,
+                    // Truncate per-message to keep payloads tractable.
+                    mes: typeof m.mes === 'string' ? m.mes.slice(0, 4000) : '',
+                    send_date: typeof m.send_date === 'string' ? m.send_date : '',
+                };
+            }).filter(Boolean);
+            const characters = Array.isArray(ctx.characters) ? ctx.characters : [];
+            const characterIdx = typeof ctx.characterId === 'number' || typeof ctx.characterId === 'string'
+                ? Number(ctx.characterId)
+                : -1;
+            const character = (Number.isFinite(characterIdx) && characterIdx >= 0 && isObject(characters[characterIdx]))
+                ? { name: characters[characterIdx].name || '', avatar: characters[characterIdx].avatar || '' }
+                : null;
+            return {
+                persona: typeof ctx.name1 === 'string' ? ctx.name1 : '',
+                character,
+                groupId: ctx.groupId || null,
+                chatId: ctx.chatId || null,
+                messages: tail,
+                count: tail.length,
+            };
+        },
+
+        st_list_profiles: async () => {
+            const exec = await getSlash();
+            const fn = getListProfiles();
+            if (!fn) return { error: 'list-profiles-unavailable' };
+            try {
+                const res = await fn({ executeSlash: exec });
+                if (res && res.ok) {
+                    return { profiles: Array.isArray(res.profiles) ? res.profiles : [] };
+                }
+                return { error: res?.reason || 'list-profiles-failed', profiles: [] };
+            } catch (err) {
+                return { error: 'list-profiles-failed', message: String(err?.message || err) };
+            }
+        },
+
+        st_get_profile: async (rawArgs) => {
+            const { name } = safeArgs(rawArgs);
+            const cleanName = safeName(name);
+            if (!cleanName) return { error: 'name must be a non-empty string' };
+            const exec = await getSlash();
+            if (typeof exec !== 'function') {
+                return { error: 'slash-unavailable' };
+            }
+            try {
+                // Quote the profile name so embedded spaces survive parsing.
+                const cmd = `/profile-get name="${escSlashArg(cleanName)}"`;
+                const res = await exec(cmd);
+                const pipe = pipeOf(res);
+                if (!pipe) return { error: 'not-found', name: cleanName };
+                // Try JSON; otherwise return the raw pipe truncated.
+                try {
+                    const parsed = JSON.parse(pipe);
+                    return { name: cleanName, profile: parsed };
+                } catch (_) {
+                    return { name: cleanName, raw: pipe.slice(0, 4000) };
+                }
+            } catch (err) {
+                return { error: 'slash-failed', message: String(err?.message || err) };
+            }
         },
     };
 }
@@ -7877,20 +9016,43 @@ jQuery(async () => {
                     return;
                 }
                 const preset = await resp.json();
-                // Best-effort install: use the documented ST slash command.
-                if (typeof ctx?.executeSlashCommandsWithOptions === 'function') {
-                    // The /preset slash only selects by name; actual preset-save
-                    // in ST is done through the UI or direct file write. We
-                    // offer the user a text prompt they can paste for now, and
-                    // log the JSON to console so a power-user can persist it.
-                    console.log(`[${EXT}] Command-X preset JSON:`, preset);
-                    await cxAlert(
-                        'Preset JSON loaded and logged to DevTools console. To install it permanently: open SillyTavern → API Connections → Preset settings → Import, and paste the JSON from the console.',
-                        'Nova preset',
-                    );
-                } else {
-                    await cxAlert('Slash executor unavailable — preset logged to console.', 'Nova');
-                }
+                // ST has no documented programmatic preset-save endpoint, so
+                // we deliver the bundled preset two ways for the user to feed
+                // into ST's standard Preset → Import button:
+                //   1. Trigger a file download of `Command-X.json`
+                //   2. Best-effort copy the JSON text to the clipboard
+                // Both are best-effort; we always log the JSON as a final
+                // fallback so power-users can grab it from DevTools.
+                const presetJson = JSON.stringify(preset, null, 2);
+                let downloaded = false;
+                try {
+                    const blob = new Blob([presetJson], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = 'Command-X.json';
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    // Revoke on next tick so the click has time to start the download.
+                    setTimeout(() => URL.revokeObjectURL(url), 1000);
+                    downloaded = true;
+                } catch (_) { /* download unsupported — fall through */ }
+                let copied = false;
+                try {
+                    if (navigator?.clipboard?.writeText) {
+                        await navigator.clipboard.writeText(presetJson);
+                        copied = true;
+                    }
+                } catch (_) { /* clipboard blocked — fall through */ }
+                console.log(`[${EXT}] Command-X preset JSON:`, preset);
+                const lines = [];
+                if (downloaded) lines.push('• Saved Command-X.json to your downloads folder.');
+                if (copied) lines.push('• Copied the preset JSON to your clipboard.');
+                if (!downloaded && !copied) lines.push('• Preset JSON logged to the DevTools console.');
+                lines.push('');
+                lines.push('To finish installing: open SillyTavern → API Connections → Chat Completion preset → click the import (📥) button next to the preset dropdown, then select Command-X.json (or paste the JSON).');
+                await cxAlert(lines.join('\n'), 'Nova preset');
             } catch (err) {
                 await cxAlert(`Preset install failed: ${err?.message || err}`, 'Nova');
             } finally {
