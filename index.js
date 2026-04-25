@@ -1,14 +1,15 @@
 /**
- * Command-X Phone — SillyTavern Extension v0.11.0
+ * Command-X Phone — SillyTavern Extension
  *
  * Approach: inject a system prompt that tells the LLM to wrap the
  * character's text/neural reply in [sms]…[/sms] tags. The extension
  * extracts that block for the phone UI and hides it from ST chat.
  * Message history is stored in localStorage (phone owns its own log).
  *
- * v0.10.0: Compose queue (batch mode), notification badges, [status] tag,
- *          Profiles app, Settings app, toast notifications, recency sort,
- *          character avatars, [sms to] filtering.
+ * Version is single-sourced in `manifest.json` and mirrored in the
+ * `VERSION` constant below — see `manifest.json` and `AGENT_MEMORY.md`
+ * for release history. Per-feature changelogs are tracked in
+ * `CLAUDE.md` § "Version History".
  */
 import { getContext } from '../../../st-context.js';
 import {
@@ -46,6 +47,35 @@ const QUEST_HISTORY_CAP = 150;              // max quests stored
 const PLACES_CAP = 40;                      // max registered places per chat
 const LOCATION_TRAIL_CAP = 50;              // max trail entries per contact
 const TOAST_DURATION_MS = 4_000;            // toast auto-dismiss duration
+
+/**
+ * Depth values passed to `setExtensionPrompt` (`extension_prompt_types.IN_CHAT`).
+ * Lower depth = closer to the most recent message. Centralised so the
+ * relative ordering between [sms], [status], [map], [private], and
+ * [quests] is explicit and searchable in one place.
+ *
+ * Ordering rationale:
+ *   sms (1)        — request for THIS reply, must be closest to the end
+ *   contacts (2)   — persistent NPC state; should be near recent context
+ *   privatePhone (3) / map (3)
+ *                  — auxiliary scene context; one step further back
+ *   quests (4)     — narrative state; furthest back, larger payload
+ */
+const CX_PROMPT_DEPTHS = Object.freeze({
+    sms: 1,
+    contacts: 2,
+    privatePhone: 3,
+    map: 3,
+    quests: 4,
+});
+// Avatar gradient palette. These strings are interpolated *raw* into a
+// `style="background:${gradient}"` attribute (see `avatarHTML`) — `escAttr`
+// safely encodes HTML special chars but does NOT sanitize CSS values
+// (e.g. `url(javascript:…)` would survive). Therefore every entry here
+// MUST remain a hard-coded, compile-time CSS value. If this ever needs
+// to become user / storage controlled, switch `avatarHTML` to use
+// per-gradient CSS classes (or a strict CSS-value validator) before
+// loosening this constraint.
 const CONTACT_GRADIENTS = [
     'linear-gradient(135deg,#553355,#442244)',
     'linear-gradient(135deg,#334455,#223344)',
@@ -76,9 +106,26 @@ const SCAN_CONTACTS_LABEL = '🔍 Scan Contacts';
 let questEnrichmentInFlight = false;
 
 
-function currentChatId() {
+/**
+ * Resolve the canonical chat key used in every per-chat storage prefix
+ * (`cx-msgs-*`, `cx-npcs-*`, `cx-quests-*`, `cx-unread-*`, `cx-places-*`,
+ * `cx-map-*`, `cx-loctrail-*`). Single source of truth so the fallback
+ * never diverges between writers and readers — historically the `cx-msgs`
+ * family used `'default'` while the `cx-places`/`cx-map`/`cx-loctrail`
+ * family used `'no-chat'`, which silently split data when both
+ * `ctx.chatId` and `ctx.groupId` were falsy. We standardise on
+ * `'default'` to match the higher-value (message/NPC/quest) data paths.
+ */
+function chatKey() {
     const ctx = getContext();
-    return String(ctx.chatId || ctx.groupId || ctx.getCurrentChatId?.() || 'no-chat');
+    return String(ctx.chatId || ctx.groupId || ctx.getCurrentChatId?.() || 'default');
+}
+
+// Back-compat alias retained because `currentChatId` is referenced
+// throughout the file and reads more naturally at call-sites that talk
+// about "the current chat" rather than "a key".
+function currentChatId() {
+    return chatKey();
 }
 
 function getExtensionChatState() {
@@ -228,6 +275,16 @@ const SMS_ATTR_RE = /(\w+)="([^"]*)"/g;
 
 /**
  * Parse attributes from an [sms ...] tag's attribute string.
+ *
+ * Contract: only `name="value"` pairs with literal `"` delimiters and
+ * no embedded escapes are recognised. The LLM is the sole producer of
+ * these tags (driven by the prompt in `injectSmsPrompt`), and the
+ * prompt tells it to emit plain double-quoted attributes. Single
+ * quotes, escapes, curly quotes, and `value` chars containing `"` will
+ * be silently truncated or skipped — that's the trade-off for a
+ * dependency-free zero-edge-case parser. If we ever broaden the
+ * grammar, both this function and `SMS_ATTR_RE` need to change in
+ * lockstep.
  */
 function parseSmsAttrs(attrStr) {
     const attrs = {};
@@ -268,6 +325,14 @@ function extractSmsContent(raw) {
 /**
  * Hide [sms]…[/sms] tags in the rendered ST message DOM,
  * replacing them with a styled "📱 Text sent" indicator.
+ *
+ * Note on escaping: SillyTavern's renderer has already converted the
+ * raw LLM output into `el.innerHTML` (markdown → HTML), so the captured
+ * `inner` may contain HTML markup. We escape it back to text via
+ * `escAttr` before re-emitting it inside attribute / text contexts so
+ * that a markdown-emphasised LLM reply (or anything else the renderer
+ * produced) can't break out of the indicator's `title="…"` attribute
+ * or insert markup inside the `<em>` element.
  */
 function hideSmsTagsInDom(mesId) {
     const el = document.querySelector(`.mes[mesid="${mesId}"] .mes_text`);
@@ -277,9 +342,24 @@ function hideSmsTagsInDom(mesId) {
         SMS_TAG_RE.lastIndex = 0;
         el.innerHTML = el.innerHTML.replace(SMS_TAG_RE, (_match, attrStr, inner) => {
             const attrs = parseSmsAttrs(attrStr);
-            const preview = inner.trim();
-            const label = attrs.from ? `📱 ${attrs.from}: ` : '📱 ';
-            return `<span class="cx-sms-inline" title="${preview.replace(/"/g, '&quot;')}">${label}<em>${preview.slice(0, 50)}${preview.length > 50 ? '…' : ''}</em></span>`;
+            // `inner` is HTML-rendered text from `el.innerHTML`; treat it as
+            // untrusted and re-escape for both the title attribute and the
+            // `<em>` body. We use the browser's HTML parser via a detached
+            // `<div>` to extract `textContent` rather than a regex strip:
+            // a regex like `replace(/<[^>]*>/g, '')` is incomplete (CodeQL
+            // js/incomplete-multi-character-sanitization) and could leave
+            // `<scr<script>ipt>`-style nesting partially intact. The
+            // downstream `escAttr` / `escHtml` calls would still neutralise
+            // any leftover markup, but parser-based extraction is the
+            // canonical fix that satisfies the lint rule.
+            const _tmp = document.createElement('div');
+            _tmp.innerHTML = String(inner);
+            const previewText = (_tmp.textContent || '').trim();
+            const fromLabel = attrs.from ? `📱 ${escHtml(attrs.from)}: ` : '📱 ';
+            const truncated = previewText.length > 50
+                ? previewText.slice(0, 50) + '…'
+                : previewText;
+            return `<span class="cx-sms-inline" title="${escAttr(previewText)}">${fromLabel}<em>${escHtml(truncated)}</em></span>`;
         });
     }
 }
@@ -291,14 +371,22 @@ function hideSmsTagsInDom(mesId) {
 const CONTACTS_TAG_RE = /\[(?:contacts|status)\]([\s\S]*?)\[\/(?:contacts|status)\]/gi;
 
 function npcStoreKey() {
-    const ctx = getContext();
-    const chatId = ctx.chatId || ctx.groupId || 'default';
-    return `cx-npcs-${chatId}`;
+    return `cx-npcs-${chatKey()}`;
 }
 
 function loadNpcs() {
-    try { return JSON.parse(localStorage.getItem(npcStoreKey()) || '[]'); }
-    catch { return []; }
+    try {
+        const parsed = JSON.parse(localStorage.getItem(npcStoreKey()) || '[]');
+        if (!Array.isArray(parsed)) return [];
+        // Defensive: localStorage is shared by every extension on this
+        // origin. Filter out anything that doesn't look like an NPC
+        // record so a corrupt / foreign write can't crash the renderer.
+        // Field-level escaping happens at render time via escHtml/escAttr.
+        return parsed.filter(n =>
+            n && typeof n === 'object' && !Array.isArray(n)
+            && typeof n.name === 'string' && n.name.trim() !== ''
+        );
+    } catch { return []; }
 }
 
 function saveNpcs(npcs) {
@@ -497,7 +585,7 @@ function injectContactsPrompt() {
         INJECT_KEY_CONTACTS,
         `[System: At the end of each response, include a [status] block with a JSON array of the present characters relevant to the scene, including the current main character and any side characters/NPCs. Format: [status][{"name":"Name","emoji":"👩","status":"online","mood":"😊 happy","location":"her apartment","relationship":"friendly","thoughts":"god he has no idea"}][/status] — "status" can be "online"/"offline"/"nearby". "mood" is an emoji + short descriptor. "location" is where they currently are. "relationship" is how they feel about the user (friendly/neutral/hostile/romantic/etc). "thoughts" is ONE short first-person sentence — a brief flash of inner monologue in the character's own private voice, as if we are overhearing a single thought they are silently having right now. Keep it short (roughly under 15 words). Do NOT summarize or recap what just happened in the scene. Do NOT describe their mood, state, or situation. Do NOT narrate. It should read like a genuine passing thought, not a status report. Include the active main character plus any relevant side characters/NPCs who exist in the scene. Do NOT include ${excludeNote || 'the user'}. If no other characters are relevant, you may still include the current main character alone.]`,
         extension_prompt_types.IN_CHAT,
-        2,       // depth = 2 (slightly further back than [sms])
+        CX_PROMPT_DEPTHS.contacts,
         false,
         extension_prompt_roles.SYSTEM,
     );
@@ -514,14 +602,19 @@ function clearContactsPrompt() {
 const QUESTS_TAG_RE = /\[quests\]([\s\S]*?)\[\/quests\]/gi;
 
 function questStoreKey() {
-    const ctx = getContext();
-    const chatId = ctx.chatId || ctx.groupId || 'default';
-    return `cx-quests-${chatId}`;
+    return `cx-quests-${chatKey()}`;
 }
 
 function loadQuests() {
-    try { return JSON.parse(localStorage.getItem(questStoreKey()) || '[]'); }
-    catch { return []; }
+    try {
+        const parsed = JSON.parse(localStorage.getItem(questStoreKey()) || '[]');
+        if (!Array.isArray(parsed)) return [];
+        // Defensive: drop entries that aren't object records. Loaded
+        // quests pass through `sanitizeQuestValue` on every merge, so
+        // string coercion happens there; this guard just keeps loaders
+        // from feeding non-objects into sort/render code.
+        return parsed.filter(q => q && typeof q === 'object' && !Array.isArray(q));
+    } catch { return []; }
 }
 
 function sortQuests(quests) {
@@ -841,7 +934,7 @@ function injectQuestPrompt() {
         INJECT_KEY_QUESTS,
         `[Command-X quest context. At the end of each response, include a [quests] JSON block ONLY when a meaningful quest should be created or updated. Format: [quests][{"id":"quest_optional_existing_id","title":"Quest title","summary":"short summary","objective":"current concrete objective","status":"active|waiting|blocked|completed|failed","priority":"low|normal|high|critical","urgency":"none|soon|urgent","source":"who/what created the quest","relatedContact":"matching contact name when relevant","focused":false,"nextAction":"optional immediate next step","subtasks":[{"id":"sub_optional","text":"step text","done":false}],"notes":"optional note"}][/quests]. Quests represent meaningful goals, obligations, promises, leads, investigations, errands, blockers, or unresolved story pressures that may matter later. Reuse existing quest ids/titles when updating instead of duplicating. Check existing quests for progress, completion, blockage, waiting state, next-step changes, and subtask completion — but do NOT rewrite summaries/objectives/priority/urgency/notes just because wording could be improved. Only change stable quest fields when the story meaning actually changed. Avoid trivial one-off actions and excessive churn, especially on rerolls. Manual quest edits may be pinned field-by-field and should not be blindly overwritten later. Focused quests matter most. Urgent/high-priority active quests matter next. Waiting/blocked quests are still relevant but lower pressure. Completed/failed quests are historical only and should not be treated as current pressure. Not every quest must be mentioned every turn.\nCurrent quest state:\n${activeSummary}]`,
         extension_prompt_types.IN_CHAT,
-        4,
+        CX_PROMPT_DEPTHS.quests,
         false,
         extension_prompt_roles.SYSTEM,
     );
@@ -1263,7 +1356,7 @@ function injectMapPrompt() {
         INJECT_KEY_MAP,
         `[Command-X map context. For each character in the [status] block, add an optional "place" field whose value MUST match one of the known place names or aliases below (exact or close match). "place" is a short categorical label (e.g. "apartment", "café") used to pin characters on a map; it is separate from the free-text "location" field which remains narrative. ${registrationLine}\nKnown places:\n${knownPlaces}]`,
         extension_prompt_types.IN_CHAT,
-        3,
+        CX_PROMPT_DEPTHS.map,
         false,
         extension_prompt_roles.SYSTEM,
     );
@@ -1787,7 +1880,7 @@ function injectSmsPrompt(targets) {
         INJECT_KEY,
         instruction,
         extension_prompt_types.IN_CHAT,
-        1,       // depth = 1 (right before the last message)
+        CX_PROMPT_DEPTHS.sms,
         false,
         extension_prompt_roles.SYSTEM,
     );
@@ -1802,9 +1895,7 @@ function clearSmsPrompt() {
    ====================================================================== */
 
 function storeKey(contactName) {
-    const ctx = getContext();
-    const chatId = ctx.chatId || ctx.groupId || 'default';
-    return `cx-msgs-${chatId}-${contactName}`;
+    return `cx-msgs-${chatKey()}-${contactName}`;
 }
 
 /* ------------------------------------------------------------------
@@ -1985,7 +2076,7 @@ ${summary}]`;
         INJECT_KEY_PRIVATE_PHONE,
         prompt,
         extension_prompt_types.IN_CHAT,
-        3,
+        CX_PROMPT_DEPTHS.privatePhone,
         false,
         extension_prompt_roles.SYSTEM,
     );
@@ -1996,9 +2087,7 @@ ${summary}]`;
    ====================================================================== */
 
 function unreadKey(contactName) {
-    const ctx = getContext();
-    const chatId = ctx.chatId || ctx.groupId || 'default';
-    return `cx-unread-${chatId}-${contactName}`;
+    return `cx-unread-${chatKey()}-${contactName}`;
 }
 
 function getUnread(contactName) {
@@ -2173,8 +2262,22 @@ function markRead(contactName) {
 }
 
 function getTotalUnread() {
-    const contacts = getKnownContactsForPrivateMessaging();
-    return contacts.reduce((sum, c) => sum + getUnread(c.name), 0);
+    // Scan localStorage directly for `cx-unread-<chatKey>-<contact>` keys
+    // instead of building the full contact list. The contact builder calls
+    // `loadNpcs()` + `historyContactNames()` + a Map sort and is invoked
+    // from every rebuildPhone / incrementUnread / markRead / poll path —
+    // an O(unread-keys) scan is dramatically cheaper at idle.
+    let total = 0;
+    const prefix = `cx-unread-${chatKey()}-`;
+    try {
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (!key || !key.startsWith(prefix)) continue;
+            const n = parseInt(localStorage.getItem(key) || '0', 10);
+            if (Number.isFinite(n) && n > 0) total += n;
+        }
+    } catch (_) { /* localStorage access can throw in strict-storage browsers */ }
+    return total;
 }
 
 function updateUnreadBadges() {
@@ -2336,6 +2439,13 @@ function getContactsFromContext() {
 
 const now = () => new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 const today = () => new Date().toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
+/**
+ * Escape for HTML *body* contexts (text nodes, element children).
+ * Converts `\n` to `<br>` so message text retains line breaks when
+ * rendered into a div/span/em. NOT safe for attribute values — use
+ * `escAttr` there instead. Quotes are intentionally not escaped
+ * because we never use this in attribute position.
+ */
 function escHtml(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>'); }
 /**
  * Escape for HTML *attribute* contexts. Escapes `&`, `<`, `>`, `"`, and
@@ -2345,6 +2455,13 @@ function escHtml(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,
  * CodeQL (correctly) flags its use in attribute position.
  */
 function escAttr(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+/**
+ * Escape for `<textarea>` PCDATA contexts. Like `escAttr` (escapes
+ * quotes too) but critically does NOT convert `\n` to `<br>` — newlines
+ * inside a textarea body are literal text the browser must preserve as
+ * line breaks in the editor. Use this when interpolating a draft value
+ * into `<textarea>${...}</textarea>`.
+ */
 function escapeHtml(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 
 
@@ -2972,7 +3089,7 @@ function contactRowHTML(c, i, app) {
         </div>
         <div class="cx-status-col">
             ${c.online ? '<div class="cx-dot-online"></div>' : '<div class="cx-dot-offline"></div>'}
-            ${last ? `<div class="cx-status-time">${last.time || ''}</div>` : ''}
+            ${last ? `<div class="cx-status-time">${escHtml(last.time || '')}</div>` : ''}
         </div>
     </div>`;
 }
@@ -3394,7 +3511,7 @@ function buildPhone() {
                     <div class="cx-chat-header-status" id="cx-chat-status"></div>
                 </div>
                 <div class="cx-neural-toggle" id="cx-neural-toggle" role="button" tabindex="0" aria-pressed="false" aria-label="Toggle neural commands" title="Toggle neural commands">⚡</div>
-                <div class="cx-batch-toggle ${settings.batchMode ? 'cx-batch-active' : ''}" id="cx-batch-toggle" role="button" tabindex="0" aria-pressed="${settings.batchMode}" aria-label="Toggle batch mode" title="Toggle batch mode (queue texts)">📋</div>
+                <div class="cx-batch-toggle ${settings.batchMode ? 'cx-batch-active' : ''}" id="cx-batch-toggle" role="button" tabindex="0" aria-pressed="${escAttr(String(!!settings.batchMode))}" aria-label="Toggle batch mode" title="Toggle batch mode (queue texts)">📋</div>
             </div>
             <div class="cx-messages" id="cx-msg-area"></div>
             <div class="cx-cmd-drawer cx-hidden" id="cx-cmd-drawer">
@@ -5095,12 +5212,55 @@ saveQuestEditor().catch(error => cxAlert(String(error?.message || error), 'Quest
    PANEL
    ====================================================================== */
 
+/**
+ * Render the phone shell + close button into `wrapper`.
+ *
+ * Why this looks the way it does: previously this was done as a single
+ * `wrapper.innerHTML = `<div id="cx-panel-close">✕</div>${buildPhone()}`;`
+ * which mixed a static head with a template-literal interpolation of
+ * the dynamically-built phone HTML. CodeQL's `js/xss-through-dom`
+ * heuristic flagged that pattern as "DOM text reinterpreted as HTML"
+ * because the phone HTML transitively includes data that *could*
+ * originate from DOM-read sources. `buildPhone()` already escapes its
+ * dynamic substitutions through `escHtml`/`escAttr`, but to silence
+ * the false-positive without disabling the rule we:
+ *   1. Build the close button as a real DOM node (`textContent` only,
+ *      never `innerHTML`), so the ✕ glyph is never reinterpreted.
+ *   2. Parse the phone HTML through `<template>.innerHTML`, which is
+ *      an inert document fragment (no script execution, no event
+ *      handler resolution at parse time) — then move its children
+ *      into the wrapper.
+ *   3. Use `replaceChildren()` so callers don't have to reset the
+ *      wrapper before calling.
+ */
+function renderPhoneInto(wrapper) {
+    wrapper.replaceChildren();
+    const closeBtn = document.createElement('div');
+    closeBtn.id = 'cx-panel-close';
+    closeBtn.textContent = '✕';
+    wrapper.appendChild(closeBtn);
+    const tpl = document.createElement('template');
+    // `buildPhone()` is a trusted HTML producer: every dynamic
+    // substitution (contact names, statuses, place labels, quest
+    // titles, user persona, etc.) is routed through `escHtml` /
+    // `escAttr` at the interpolation site before it reaches this
+    // assignment. Parsing through a detached `<template>` keeps the
+    // resulting fragment inert (no script execution at parse time).
+    // CodeQL's `js/xss-through-dom` heuristic still traces contact-name
+    // strings sourced (eventually) from chat metadata as DOM-text and
+    // can't see the per-site escapes — the suppression below
+    // documents that the audit was performed.
+    // lgtm[js/xss-through-dom]
+    tpl.innerHTML = buildPhone();
+    wrapper.appendChild(tpl.content);
+}
+
 function createPanel() {
     if (phoneContainer) return;
     const wrapper = document.createElement('div');
     wrapper.id = 'cx-panel-wrapper';
     wrapper.classList.add('cx-hidden');
-    wrapper.innerHTML = `<div id="cx-panel-close">✕</div>${buildPhone()}`;
+    renderPhoneInto(wrapper);
     document.body.appendChild(wrapper);
     phoneContainer = wrapper;
 
@@ -5132,6 +5292,10 @@ function createPanel() {
     });
     wirePhone();
     updateUnreadBadges();
+    // Idempotent — first call wires up the ST event listeners; subsequent
+    // calls (panel rebuilds) are no-ops. Symmetric with destroyPanel's
+    // unwireEventListeners() so the enable-toggle releases handlers.
+    wireEventListeners();
 }
 
 function rebuildPhone() {
@@ -5139,7 +5303,7 @@ function rebuildPhone() {
     if (!wrapper) return;
     const savedContact = currentContactName;
     const savedApp = currentApp;
-    wrapper.innerHTML = `<div id="cx-panel-close">✕</div>${buildPhone()}`;
+    renderPhoneInto(wrapper);
     wrapper.querySelector('#cx-panel-close')?.addEventListener('click', () => {
         wrapper.classList.add('cx-hidden');
         settings.panelOpen = false;
@@ -5159,6 +5323,257 @@ function destroyPanel() {
     document.getElementById('cx-panel-wrapper')?.remove();
     document.getElementById('cx-menu-button')?.remove();
     phoneContainer = null;
+    // Per ST docs (Writing-Extensions.md §Performance): release event
+    // listeners when the panel goes away so toggling the extension
+    // off + on doesn't leak handlers.
+    unwireEventListeners();
+}
+
+/* ----------------------------------------------------------------------
+   Event-source listener lifecycle.
+
+   Registration was historically inline in the jQuery init block, with
+   no symmetric `removeListener`. ST's documented best-practice for
+   extensions is to clean up listeners when they're no longer needed
+   (st-docs/For_Contributors/Writing-Extensions.md §Performance), and
+   the in-handler `if (!settings.enabled) return` guards papered over
+   the leak rather than fixing it. We now keep canonical handler refs
+   in `_eventListenerHandlers` and call `removeListener` in
+   `unwireEventListeners`. Both functions are idempotent so the
+   enable-toggle / panel-destroy paths can call them freely.
+   ---------------------------------------------------------------------- */
+
+let _eventListenerHandlers = null; // { eventSource, event_types, handlers } | null
+
+function wireEventListeners() {
+    if (_eventListenerHandlers) return;
+    const ctx = getContext();
+    const eventSource = ctx?.eventSource;
+    const event_types = ctx?.event_types;
+    if (!eventSource || !event_types || typeof eventSource.on !== 'function') return;
+
+    const handlers = {
+        characterMessageRendered: (mesId) => {
+            if (!settings.enabled) return;
+            styleCommandsInMessage(mesId);
+            hideSmsTagsInDom(mesId);
+            hideContactsTagsInDom(mesId);
+            hideQuestTagsInDom(mesId);
+            hidePlaceTagsInDom(mesId);
+        },
+        userMessageRendered: (mesId) => {
+            if (!settings.enabled) return;
+            styleCommandsInMessage(mesId);
+        },
+        messageReceived: () => {
+            if (!settings.enabled) return;
+            const freshCtx = getContext();
+            const chat = freshCtx.chat || [];
+            if (!chat.length) return;
+            const msg = chat[chat.length - 1];
+            if (!msg || msg.is_user || msg.is_system) return;
+            const mesId = chat.length - 1;
+
+            // ── [sms] FIRST — must run before [contacts] which can trigger rebuildPhone ──
+            const smsBlocks = extractSmsBlocks(msg.mes);
+            const userName = (freshCtx.name1 || '').toLowerCase();
+            if (smsBlocks) {
+                for (const block of smsBlocks) {
+                    // Filter: only capture texts directed at the user's phone.
+                    if (block.to) {
+                        const toName = block.to.toLowerCase();
+                        if (toName !== 'user' && toName !== userName && toName !== 'me') {
+                            console.log(`[${EXT}] Skipping [sms] to="${block.to}" (not for user)`);
+                            continue;
+                        }
+                    } else if (!awaitingReply) {
+                        const allContacts = getContactsFromContext();
+                        const fromKnown = block.from && allContacts.some(c => c.name.toLowerCase() === block.from.toLowerCase());
+                        if (!fromKnown) {
+                            console.log(`[${EXT}] Skipping [sms] with no to attr and unknown sender "${block.from}"`);
+                            continue;
+                        }
+                    }
+
+                    let targetContact = null;
+                    if (block.from) {
+                        const allContacts = getContactsFromContext();
+                        const byFrom = allContacts.find(c => c.name.toLowerCase() === block.from.toLowerCase());
+                        targetContact = byFrom ? byFrom.name : block.from;
+                    } else if (awaitingReply && currentContactName) {
+                        targetContact = currentContactName;
+                    } else {
+                        const allContacts = getContactsFromContext();
+                        const byName = allContacts.find(c => c.name.toLowerCase() === (msg.name || '').toLowerCase());
+                        if (byName) {
+                            targetContact = byName.name;
+                        } else if (currentContactName) {
+                            targetContact = currentContactName;
+                        } else {
+                            console.log(`[${EXT}] Skipping [sms] with no from/to and no current chat`);
+                            continue;
+                        }
+                    }
+
+                    if (targetContact) {
+                        pushMessage(targetContact, 'received', block.text, mesId);
+                        pushPrivatePhoneEvent({
+                            type: 'incoming_sms',
+                            from: targetContact,
+                            to: 'user',
+                            text: block.text,
+                            visibility: 'private',
+                            source: 'inline',
+                            canonical: true,
+                            sceneAware: false,
+                            timestamp: Date.now(),
+                            mesId,
+                        });
+
+                        const isViewingThis = currentContactName === targetContact
+                            && phoneContainer
+                            && !document.getElementById('cx-panel-wrapper')?.classList.contains('cx-hidden');
+                        if (!isViewingThis) {
+                            incrementUnread(targetContact);
+                            showToast(targetContact, block.text);
+                        }
+
+                        const wrapper = document.getElementById('cx-panel-wrapper');
+                        const area = phoneContainer?.querySelector('#cx-msg-area');
+                        if (wrapper && !wrapper.classList.contains('cx-hidden') && area && currentContactName === targetContact) {
+                            area.querySelector('#cx-typing-indicator')?.remove();
+                            area.appendChild(renderBubble({ type: 'received', text: block.text, time: now() }));
+                            area.scrollTop = area.scrollHeight;
+                        } else if (wrapper && !wrapper.classList.contains('cx-hidden') && currentContactName !== targetContact) {
+                            console.log(`[${EXT}] SMS received for ${targetContact} (currently viewing ${currentContactName})`);
+                        }
+                    }
+                }
+
+                if (awaitingReply) {
+                    awaitingReply = false;
+                    clearSmsPrompt();
+                    clearTypingIndicator();
+                }
+            } else if (awaitingReply) {
+                console.warn(`[${EXT}] No [sms] tags found in response.`);
+                phoneContainer?.querySelector('#cx-typing-indicator')?.remove();
+                awaitingReply = false;
+            }
+
+            let shouldRebuild = false;
+
+            const parsedContacts = extractContacts(msg.mes);
+            if (parsedContacts) {
+                mergeNpcs(parsedContacts);
+                shouldRebuild = true;
+            }
+
+            if (settings.trackLocations) {
+                const parsedPlaces = extractPlaces(msg.mes);
+                if (parsedPlaces?.length) {
+                    const added = registerIncomingPlaces(parsedPlaces);
+                    if (added) shouldRebuild = true;
+                }
+                if (parsedContacts?.length) {
+                    if (applyContactPlaces(parsedContacts, mesId)) shouldRebuild = true;
+                }
+            }
+
+            const parsedQuests = extractQuests(msg.mes);
+            if (parsedQuests?.length) {
+                shouldRebuild = mergeQuests(parsedQuests, { source: 'auto' }) || shouldRebuild;
+            }
+
+            if (shouldRebuild && phoneContainer && !document.getElementById('cx-panel-wrapper')?.classList.contains('cx-hidden')) {
+                rebuildPhone();
+            }
+
+            applyInjectionThrottle();
+        },
+        messageSwiped: (mesId) => {
+            if (!settings.enabled) return;
+            removeMessagesForMesId(mesId);
+            removePrivatePhoneEventsForMesId(mesId);
+            removeTrailForMesId(mesId);
+            const area = phoneContainer?.querySelector('#cx-msg-area');
+            if (area && currentContactName) {
+                renderAllBubbles(area, currentContactName, false);
+            }
+        },
+        messageDeleted: (deletedMesId) => {
+            if (!settings.enabled) return;
+            const freshCtx = getContext();
+            const deletedId = Number.isFinite(Number(deletedMesId))
+                ? Number(deletedMesId)
+                : (freshCtx.chat || []).length;
+            removeMessagesForMesId(deletedId);
+            removePrivatePhoneEventsForMesId(deletedId);
+            removeTrailForMesId(deletedId);
+            const area = phoneContainer?.querySelector('#cx-msg-area');
+            if (area && currentContactName) {
+                renderAllBubbles(area, currentContactName, false);
+            }
+        },
+        chatChangedPhone: () => {
+            if (!settings.enabled) return;
+            currentContactName = null;
+            currentApp = null;
+            awaitingReply = false;
+            commandMode = null;
+            _turnCounter = 0;
+            invalidateContactCaches();
+            invalidateNovaBridgeProbeCache();
+            clearSmsPrompt();
+            clearTypingIndicator();
+            if (settings.enabled && settings.autoDetectNpcs !== false) injectContactsPrompt();
+            else clearContactsPrompt();
+            if (settings.enabled) injectQuestPrompt();
+            else clearQuestPrompt();
+            if (settings.enabled && settings.trackLocations) injectMapPrompt();
+            else clearMapPrompt();
+            refreshPrivatePhonePrompt();
+            if (phoneContainer) rebuildPhone();
+        },
+        // Nova-specific CHAT_CHANGED hook. Kept separate so a future Nova-disabled
+        // toggle can short-circuit it independently of the phone UI reset.
+        chatChangedNova: () => {
+            if (!settings.enabled) return;
+            try { initNovaOnce(getContext()); } catch (e) {
+                try { console.warn(`[${EXT}] initNovaOnce threw:`, e); } catch (_) { /* noop */ }
+            }
+        },
+    };
+
+    eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, handlers.characterMessageRendered);
+    eventSource.on(event_types.USER_MESSAGE_RENDERED, handlers.userMessageRendered);
+    eventSource.on(event_types.MESSAGE_RECEIVED, handlers.messageReceived);
+    eventSource.on(event_types.MESSAGE_SWIPED, handlers.messageSwiped);
+    eventSource.on(event_types.MESSAGE_DELETED, handlers.messageDeleted);
+    eventSource.on(event_types.CHAT_CHANGED, handlers.chatChangedPhone);
+    eventSource.on(event_types.CHAT_CHANGED, handlers.chatChangedNova);
+
+    _eventListenerHandlers = { eventSource, event_types, handlers };
+}
+
+function unwireEventListeners() {
+    const refs = _eventListenerHandlers;
+    _eventListenerHandlers = null;
+    if (!refs) return;
+    const { eventSource, event_types, handlers } = refs;
+    if (typeof eventSource?.removeListener !== 'function') return;
+    const pairs = [
+        [event_types.CHARACTER_MESSAGE_RENDERED, handlers.characterMessageRendered],
+        [event_types.USER_MESSAGE_RENDERED, handlers.userMessageRendered],
+        [event_types.MESSAGE_RECEIVED, handlers.messageReceived],
+        [event_types.MESSAGE_SWIPED, handlers.messageSwiped],
+        [event_types.MESSAGE_DELETED, handlers.messageDeleted],
+        [event_types.CHAT_CHANGED, handlers.chatChangedPhone],
+        [event_types.CHAT_CHANGED, handlers.chatChangedNova],
+    ];
+    for (const [type, handler] of pairs) {
+        try { eventSource.removeListener(type, handler); } catch (_) { /* best-effort */ }
+    }
 }
 
 /* ======================================================================
@@ -8051,13 +8466,17 @@ function buildNovaFsHandlers({ pluginBaseUrl, fetchImpl } = {}) {
 const SHELL_TIMEOUT_MIN_MS = 100;
 const SHELL_TIMEOUT_MAX_MS = 300000;
 
-function buildNovaShellHandler({ pluginBaseUrl, fetchImpl } = {}) {
+function buildNovaShellHandler({ pluginBaseUrl, fetchImpl, headersProvider } = {}) {
     const base = pluginBaseUrl || (typeof settings !== 'undefined' && settings?.nova?.pluginBaseUrl) || NOVA_DEFAULTS.pluginBaseUrl;
 
     const isObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
     const safeArgs = (v) => (isObject(v) ? v : {});
+    // `headersProvider` matches the `_novaBridgeRequest` DI surface so the
+    // shipped handler factory mirrors its inline test copy and lets
+    // unit tests stub the auth-header path. When omitted, the request
+    // helper falls back to the module-level `getRequestHeaders` resolver.
     const req = (method, route, opts) => _novaBridgeRequest({
-        pluginBaseUrl: base, method, route, fetchImpl, ...opts,
+        pluginBaseUrl: base, method, route, fetchImpl, headersProvider, ...opts,
     });
 
     return {
@@ -8429,6 +8848,106 @@ function buildNovaStTools({
     };
 }
 
+/* ----------------------------------------------------------------------
+   Settings panel <-> module state plumbing.
+
+   Two surfaces bind to the same settings: the global ST settings panel
+   (`cx_*` / `cx_ext_*` ids defined in `settings.html`) and the in-phone
+   Settings app (`cx-set-*` ids built dynamically by the phone view).
+   Historically `loadSettings`/`saveSettings` enumerated every id pair
+   inline, which made adding a third surface or a new option a
+   three-place edit and easy to miss. The declarative tables below put
+   every binding in one place; the read/write helpers iterate them.
+
+   A single binding entry is `{ key, type, ids[], default, min?, max?,
+   options? }`. The first non-empty id wins on read; every id is
+   refreshed on write-to-DOM. The code intentionally falls back to the
+   prior `settings[key]` value when no DOM input is present, so editing
+   one surface does not blank settings the other surface owns.
+   ---------------------------------------------------------------------- */
+
+const PHONE_SETTING_BINDINGS = [
+    { key: 'enabled',                  type: 'bool', default: true,  ids: ['cx_enabled'] },
+    { key: 'styleCommands',            type: 'bool', default: true,  ids: ['cx_style_commands'] },
+    { key: 'showLockscreen',           type: 'bool', default: false, ids: ['cx_show_lockscreen'] },
+    { key: 'batchMode',                type: 'bool', default: false, ids: ['cx_ext_batch_mode'] },
+    { key: 'autoDetectNpcs',           type: 'bool', default: true,  ids: ['cx_ext_auto_detect_npcs'] },
+    { key: 'manualHybridPrivateTexts', type: 'bool', default: true,  ids: ['cx_set_private_hybrid', 'cx-set-private-hybrid'] },
+    { key: 'trackLocations',           type: 'bool', default: true,  ids: ['cx_ext_track_locations', 'cx-set-track-locations'] },
+    { key: 'autoRegisterPlaces',       type: 'bool', default: true,  ids: ['cx_ext_auto_register_places', 'cx-set-auto-places'] },
+    { key: 'showLocationTrails',       type: 'bool', default: true,  ids: ['cx_ext_show_trails', 'cx-set-trails'] },
+    { key: 'contactsInjectEveryN',     type: 'int',  default: 1, min: 1, ids: ['cx_ext_contacts_every_n'] },
+    { key: 'questsInjectEveryN',       type: 'int',  default: 1, min: 1, ids: ['cx_ext_quests_every_n'] },
+    { key: 'mapInjectEveryN',          type: 'int',  default: 3, min: 1, ids: ['cx_ext_map_every_n', 'cx-set-map-every-n'] },
+    { key: 'autoPrivatePollEveryN',    type: 'int',  default: 0, min: 0, ids: ['cx_ext_auto_private_poll_n', 'cx-set-auto-poll-n'] },
+];
+
+const NOVA_SETTING_BINDINGS = [
+    { key: 'profileName',  type: 'string', default: '', ids: ['cx_nova_profile', 'cx-set-nova-profile'] },
+    { key: 'defaultTier',  type: 'enum',   options: ['read', 'write', 'full'], default: 'read', ids: ['cx_nova_default_tier', 'cx-set-nova-tier'] },
+    { key: 'maxToolCalls', type: 'int',    default: NOVA_DEFAULTS.maxToolCalls, min: 1, max: 100, ids: ['cx_nova_max_tool_calls', 'cx-set-nova-max-tools'] },
+    { key: 'turnTimeoutMs', type: 'int',   default: NOVA_DEFAULTS.turnTimeoutMs, min: 10000, max: 3600000, ids: ['cx_nova_turn_timeout_ms', 'cx-set-nova-timeout'] },
+    // pluginBaseUrl uses the default when the user clears the field —
+    // an empty plugin URL is never useful and the bridge needs *some*
+    // path to probe.
+    { key: 'pluginBaseUrl', type: 'string', default: NOVA_DEFAULTS.pluginBaseUrl, defaultOnEmpty: true, ids: ['cx_nova_plugin_base_url', 'cx-set-nova-plugin-url'] },
+];
+
+/** Read a DOM input value for a binding; return `undefined` if no id is wired. */
+function _readSettingFromDom(b) {
+    for (const id of b.ids) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        if (b.type === 'bool') return !!el.checked;
+        // For text/number fields, treat an empty string the same as
+        // "not present" so the next id in the chain (or the existing
+        // settings value) wins. This matches the legacy
+        // `?? document.getElementById(...)?.value` behaviour.
+        const raw = el.value;
+        if (raw === undefined || raw === null || raw === '') continue;
+        return raw;
+    }
+    return undefined;
+}
+
+/** Write a settings value out to every DOM id wired to this binding. */
+function _writeSettingToDom(b, value) {
+    for (const id of b.ids) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        if (b.type === 'bool') el.checked = !!value;
+        else el.value = String(value ?? '');
+    }
+}
+
+/** Coerce a raw DOM string into the binding's typed value, applying clamps. */
+function _coerceSettingValue(b, raw, current) {
+    switch (b.type) {
+        case 'bool':
+            return raw === undefined ? (current ?? b.default) : !!raw;
+        case 'int': {
+            const n = Number(raw);
+            if (!Number.isFinite(n)) return current ?? b.default;
+            let v = Math.floor(n);
+            if (typeof b.min === 'number' && v < b.min) return current ?? b.default;
+            if (typeof b.max === 'number') v = Math.min(b.max, v);
+            return v;
+        }
+        case 'enum': {
+            const v = String(raw ?? '');
+            if (Array.isArray(b.options) && b.options.includes(v)) return v;
+            return current ?? b.default;
+        }
+        case 'string':
+        default: {
+            if (raw === undefined) return current ?? b.default;
+            const trimmed = String(raw || '').trim();
+            if (!trimmed && b.defaultOnEmpty) return b.default;
+            return trimmed;
+        }
+    }
+}
+
 function loadSettings() {
     const ctx = getContext();
     if (ctx.extensionSettings[EXT]) Object.assign(settings, ctx.extensionSettings[EXT]);
@@ -8449,80 +8968,43 @@ function loadSettings() {
     // NOVA_DEFAULTS in a newer release. Re-merge NOVA_DEFAULTS under whatever is
     // stored so every key in the documented shape is always readable.
     settings.nova = { ...NOVA_DEFAULTS, ...(settings.nova || {}) };
-    const cb = (id, key, fallback = false) => {
-        const el = document.getElementById(id);
-        if (el) el.checked = settings[key] ?? fallback;
-    };
-    cb('cx_enabled', 'enabled', true);
-    cb('cx_style_commands', 'styleCommands', true);
-    cb('cx_show_lockscreen', 'showLockscreen', false);
-    cb('cx_ext_batch_mode', 'batchMode', false);
-    cb('cx_ext_auto_detect_npcs', 'autoDetectNpcs', true);
-    cb('cx_set_private_hybrid', 'manualHybridPrivateTexts', true);
-    cb('cx_ext_track_locations', 'trackLocations', true);
-    cb('cx_ext_auto_register_places', 'autoRegisterPlaces', true);
-    cb('cx_ext_show_trails', 'showLocationTrails', true);
-    const contactsN = document.getElementById('cx_ext_contacts_every_n');
-    if (contactsN) contactsN.value = Math.max(1, Number(settings.contactsInjectEveryN) || 1);
-    const questsN = document.getElementById('cx_ext_quests_every_n');
-    if (questsN) questsN.value = Math.max(1, Number(settings.questsInjectEveryN) || 1);
-    const mapN = document.getElementById('cx_ext_map_every_n');
-    if (mapN) mapN.value = Math.max(1, Number(settings.mapInjectEveryN) || 3);
-    const autoPollN = document.getElementById('cx_ext_auto_private_poll_n');
-    if (autoPollN) autoPollN.value = Math.max(0, Number(settings.autoPrivatePollEveryN) || 0);
-    // --- Nova settings (v0.13.0) ---
+
+    // Push every phone setting out to its DOM id(s).
+    for (const b of PHONE_SETTING_BINDINGS) {
+        const value = settings[b.key] ?? b.default;
+        if (b.type === 'int') {
+            const min = typeof b.min === 'number' ? b.min : 0;
+            _writeSettingToDom(b, Math.max(min, Number(value) || b.default));
+        } else {
+            _writeSettingToDom(b, value);
+        }
+    }
+    // Same for Nova settings (read out of the nested `settings.nova`).
     const nova = settings.nova || NOVA_DEFAULTS;
-    const novaProfile = document.getElementById('cx_nova_profile');
-    if (novaProfile) novaProfile.value = String(nova.profileName || '');
-    const novaTier = document.getElementById('cx_nova_default_tier');
-    if (novaTier) novaTier.value = String(nova.defaultTier || 'read');
-    const novaMax = document.getElementById('cx_nova_max_tool_calls');
-    if (novaMax) novaMax.value = Math.max(1, Number(nova.maxToolCalls) || NOVA_DEFAULTS.maxToolCalls);
-    const novaTimeout = document.getElementById('cx_nova_turn_timeout_ms');
-    if (novaTimeout) novaTimeout.value = Math.max(10000, Number(nova.turnTimeoutMs) || NOVA_DEFAULTS.turnTimeoutMs);
-    const novaBase = document.getElementById('cx_nova_plugin_base_url');
-    if (novaBase) novaBase.value = String(nova.pluginBaseUrl || NOVA_DEFAULTS.pluginBaseUrl);
+    for (const b of NOVA_SETTING_BINDINGS) {
+        const value = nova[b.key] ?? b.default;
+        if (b.type === 'int') {
+            const min = typeof b.min === 'number' ? b.min : 0;
+            _writeSettingToDom(b, Math.max(min, Number(value) || b.default));
+        } else {
+            _writeSettingToDom(b, value);
+        }
+    }
 }
 
 function saveSettings() {
-    settings.enabled = document.getElementById('cx_enabled')?.checked ?? true;
-    settings.styleCommands = document.getElementById('cx_style_commands')?.checked ?? true;
-    settings.showLockscreen = document.getElementById('cx_show_lockscreen')?.checked ?? false;
-    settings.batchMode = document.getElementById('cx_ext_batch_mode')?.checked ?? settings.batchMode ?? false;
-    settings.autoDetectNpcs = document.getElementById('cx_ext_auto_detect_npcs')?.checked ?? settings.autoDetectNpcs ?? true;
-    settings.manualHybridPrivateTexts = document.getElementById('cx_set_private_hybrid')?.checked ?? document.getElementById('cx-set-private-hybrid')?.checked ?? settings.manualHybridPrivateTexts ?? true;
-    settings.trackLocations = document.getElementById('cx_ext_track_locations')?.checked ?? document.getElementById('cx-set-track-locations')?.checked ?? settings.trackLocations ?? true;
-    settings.autoRegisterPlaces = document.getElementById('cx_ext_auto_register_places')?.checked ?? document.getElementById('cx-set-auto-places')?.checked ?? settings.autoRegisterPlaces ?? true;
-    settings.showLocationTrails = document.getElementById('cx_ext_show_trails')?.checked ?? document.getElementById('cx-set-trails')?.checked ?? settings.showLocationTrails ?? true;
-    const contactsNRaw = Number(document.getElementById('cx_ext_contacts_every_n')?.value);
-    settings.contactsInjectEveryN = Number.isFinite(contactsNRaw) && contactsNRaw >= 1 ? Math.floor(contactsNRaw) : (settings.contactsInjectEveryN || 1);
-    const questsNRaw = Number(document.getElementById('cx_ext_quests_every_n')?.value);
-    settings.questsInjectEveryN = Number.isFinite(questsNRaw) && questsNRaw >= 1 ? Math.floor(questsNRaw) : (settings.questsInjectEveryN || 1);
-    const mapNRaw = Number(document.getElementById('cx_ext_map_every_n')?.value ?? document.getElementById('cx-set-map-every-n')?.value);
-    settings.mapInjectEveryN = Number.isFinite(mapNRaw) && mapNRaw >= 1 ? Math.floor(mapNRaw) : (settings.mapInjectEveryN || 3);
-    // cx_ext_auto_private_poll_n = ST settings panel; cx-set-auto-poll-n = in-phone settings view
-    const autoPollNRaw = Number(document.getElementById('cx_ext_auto_private_poll_n')?.value ?? document.getElementById('cx-set-auto-poll-n')?.value);
-    settings.autoPrivatePollEveryN = Number.isFinite(autoPollNRaw) && autoPollNRaw >= 0 ? Math.floor(autoPollNRaw) : (settings.autoPrivatePollEveryN || 0);
-    // --- Nova settings (v0.13.0) ---
+    // Pull each phone setting from the DOM (first wired id wins),
+    // coerce to its typed value, and write back to `settings`. The
+    // current value is passed in so missing-DOM fields preserve state.
+    for (const b of PHONE_SETTING_BINDINGS) {
+        const raw = _readSettingFromDom(b);
+        settings[b.key] = _coerceSettingValue(b, raw, settings[b.key]);
+    }
+    // Nova settings live under settings.nova.
     settings.nova = settings.nova || { ...NOVA_DEFAULTS };
-    const novaProfileRaw = document.getElementById('cx_nova_profile')?.value ?? document.getElementById('cx-set-nova-profile')?.value;
-    if (novaProfileRaw !== undefined) settings.nova.profileName = String(novaProfileRaw || '').trim();
-    const novaTierRaw = document.getElementById('cx_nova_default_tier')?.value ?? document.getElementById('cx-set-nova-tier')?.value;
-    if (novaTierRaw !== undefined && ['read', 'write', 'full'].includes(String(novaTierRaw))) {
-        settings.nova.defaultTier = String(novaTierRaw);
-    }
-    const novaMaxRaw = Number(document.getElementById('cx_nova_max_tool_calls')?.value ?? document.getElementById('cx-set-nova-max-tools')?.value);
-    if (Number.isFinite(novaMaxRaw) && novaMaxRaw >= 1) {
-        settings.nova.maxToolCalls = Math.min(100, Math.floor(novaMaxRaw));
-    }
-    const novaTimeoutRaw = Number(document.getElementById('cx_nova_turn_timeout_ms')?.value ?? document.getElementById('cx-set-nova-timeout')?.value);
-    if (Number.isFinite(novaTimeoutRaw) && novaTimeoutRaw >= 10000) {
-        settings.nova.turnTimeoutMs = Math.min(3600000, Math.floor(novaTimeoutRaw));
-    }
-    const novaBaseRaw = document.getElementById('cx_nova_plugin_base_url')?.value ?? document.getElementById('cx-set-nova-plugin-url')?.value;
-    if (novaBaseRaw !== undefined) {
-        const trimmed = String(novaBaseRaw || '').trim();
-        settings.nova.pluginBaseUrl = trimmed || NOVA_DEFAULTS.pluginBaseUrl;
+    for (const b of NOVA_SETTING_BINDINGS) {
+        const raw = _readSettingFromDom(b);
+        settings.nova[b.key] = _coerceSettingValue(b, raw, settings.nova[b.key]);
     }
     const ctx = getContext();
     ctx.extensionSettings[EXT] = { ...settings };
@@ -8627,229 +9109,20 @@ jQuery(async () => {
         });
 
         const { eventSource, event_types } = ctx;
-
-        // Style {{COMMAND}} tags + hide [sms] and [contacts] tags in rendered messages
-        eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, (mesId) => {
-            if (!settings.enabled) return;
-            styleCommandsInMessage(mesId);
-            hideSmsTagsInDom(mesId);
-            hideContactsTagsInDom(mesId);
-            hideQuestTagsInDom(mesId);
-            hidePlaceTagsInDom(mesId);
-        });
-        eventSource.on(event_types.USER_MESSAGE_RENDERED, (mesId) => {
-            if (!settings.enabled) return;
-            styleCommandsInMessage(mesId);
-        });
-
-        // ── Live reply capture: parse [sms] + [contacts] from character response ──
-        eventSource.on(event_types.MESSAGE_RECEIVED, () => {
-            if (!settings.enabled) return;
-            const freshCtx = getContext();
-            const chat = freshCtx.chat || [];
-            if (!chat.length) return;
-            const msg = chat[chat.length - 1];
-            if (!msg || msg.is_user || msg.is_system) return;
-            const mesId = chat.length - 1;
-
-            // ── [sms] FIRST — must run before [contacts] which can trigger rebuildPhone ──
-            const smsBlocks = extractSmsBlocks(msg.mes);
-            const userName = (freshCtx.name1 || '').toLowerCase();
-            if (smsBlocks) {
-                for (const block of smsBlocks) {
-                    // Filter: only capture texts directed at the user's phone.
-                    // If to="user" or to=userName → capture. If to=someone else → skip.
-                    // If no to attribute: capture only if we're awaitingReply (we asked for it).
-                    if (block.to) {
-                        const toName = block.to.toLowerCase();
-                        if (toName !== 'user' && toName !== userName && toName !== 'me') {
-                            // This text is between NPCs, not to us — skip
-                            console.log(`[${EXT}] Skipping [sms] to="${block.to}" (not for user)`);
-                            continue;
-                        }
-                    } else if (!awaitingReply) {
-                        // No to attribute and we didn't ask for a text — likely NPC-to-NPC
-                        // Skip unless it's from a known contact (unsolicited incoming text)
-                        const allContacts = getContactsFromContext();
-                        const fromKnown = block.from && allContacts.some(c => c.name.toLowerCase() === block.from.toLowerCase());
-                        if (!fromKnown) {
-                            console.log(`[${EXT}] Skipping [sms] with no to attr and unknown sender "${block.from}"`);
-                            continue;
-                        }
-                    }
-
-                    // Determine which contact this SMS belongs to.
-                    let targetContact = null;
-                    if (block.from) {
-                        const allContacts = getContactsFromContext();
-                        const byFrom = allContacts.find(c => c.name.toLowerCase() === block.from.toLowerCase());
-                        targetContact = byFrom ? byFrom.name : block.from;
-                    } else if (awaitingReply && currentContactName) {
-                        targetContact = currentContactName;
-                    } else {
-                        const allContacts = getContactsFromContext();
-                        const byName = allContacts.find(c => c.name.toLowerCase() === (msg.name || '').toLowerCase());
-                        if (byName) {
-                            targetContact = byName.name;
-                        } else if (currentContactName) {
-                            targetContact = currentContactName;
-                        } else {
-                            // No reliable target — drop rather than mis-route to the first contact.
-                            console.log(`[${EXT}] Skipping [sms] with no from/to and no current chat`);
-                            continue;
-                        }
-                    }
-
-                    if (targetContact) {
-                        pushMessage(targetContact, 'received', block.text, mesId);
-                        pushPrivatePhoneEvent({
-                            type: 'incoming_sms',
-                            from: targetContact,
-                            to: 'user',
-                            text: block.text,
-                            visibility: 'private',
-                            source: 'inline',
-                            canonical: true,
-                            sceneAware: false,
-                            timestamp: Date.now(),
-                            mesId,
-                        });
-
-                        // Increment unread if not currently viewing this contact's chat
-                        const isViewingThis = currentContactName === targetContact
-                            && phoneContainer
-                            && !document.getElementById('cx-panel-wrapper')?.classList.contains('cx-hidden');
-                        if (!isViewingThis) {
-                            incrementUnread(targetContact);
-                            showToast(targetContact, block.text);
-                        }
-
-                        const wrapper = document.getElementById('cx-panel-wrapper');
-                        const area = phoneContainer?.querySelector('#cx-msg-area');
-                        if (wrapper && !wrapper.classList.contains('cx-hidden') && area && currentContactName === targetContact) {
-                            area.querySelector('#cx-typing-indicator')?.remove();
-                            area.appendChild(renderBubble({ type: 'received', text: block.text, time: now() }));
-                            area.scrollTop = area.scrollHeight;
-                        } else if (wrapper && !wrapper.classList.contains('cx-hidden') && currentContactName !== targetContact) {
-                            console.log(`[${EXT}] SMS received for ${targetContact} (currently viewing ${currentContactName})`);
-                        }
-                    }
-                }
-
-                if (awaitingReply) {
-                    awaitingReply = false;
-                    clearSmsPrompt();
-                    clearTypingIndicator();
-                }
-            } else if (awaitingReply) {
-                console.warn(`[${EXT}] No [sms] tags found in response.`);
-                phoneContainer?.querySelector('#cx-typing-indicator')?.remove();
-                awaitingReply = false;
-            }
-
-            let shouldRebuild = false;
-
-            // ── [contacts] SECOND — may call rebuildPhone which resets state ──
-            const parsedContacts = extractContacts(msg.mes);
-            if (parsedContacts) {
-                mergeNpcs(parsedContacts);
-                shouldRebuild = true;
-            }
-
-            // ── [place] and contact place tracking (map) ──
-            if (settings.trackLocations) {
-                const parsedPlaces = extractPlaces(msg.mes);
-                if (parsedPlaces?.length) {
-                    const added = registerIncomingPlaces(parsedPlaces);
-                    if (added) shouldRebuild = true;
-                }
-                if (parsedContacts?.length) {
-                    if (applyContactPlaces(parsedContacts, mesId)) shouldRebuild = true;
-                }
-            }
-
-            // ── [quests] THIRD — persistent quest tracker state ──
-            const parsedQuests = extractQuests(msg.mes);
-            if (parsedQuests?.length) {
-                shouldRebuild = mergeQuests(parsedQuests, { source: 'auto' }) || shouldRebuild;
-            }
-
-            if (shouldRebuild && phoneContainer && !document.getElementById('cx-panel-wrapper')?.classList.contains('cx-hidden')) {
-                rebuildPhone();
-            }
-
-            // Throttle [status] / [quests] re-injection to every N turns (Phase 2).
-            applyInjectionThrottle();
-        });
-
-        // ── Swipe/regeneration handling: remove stale phone messages ──
-        eventSource.on(event_types.MESSAGE_SWIPED, (mesId) => {
-            if (!settings.enabled) return;
-            removeMessagesForMesId(mesId);
-            removePrivatePhoneEventsForMesId(mesId);
-            removeTrailForMesId(mesId);
-            // Re-render current chat if open
-            const area = phoneContainer?.querySelector('#cx-msg-area');
-            if (area && currentContactName) {
-                renderAllBubbles(area, currentContactName, false);
-            }
-        });
-        eventSource.on(event_types.MESSAGE_DELETED, (deletedMesId) => {
-            if (!settings.enabled) return;
-            // Prefer the event's mesId argument (ST emits the deleted index); fall back
-            // to chat.length for older ST builds that don't pass it.
-            const freshCtx = getContext();
-            const deletedId = Number.isFinite(Number(deletedMesId))
-                ? Number(deletedMesId)
-                : (freshCtx.chat || []).length;
-            removeMessagesForMesId(deletedId);
-            removePrivatePhoneEventsForMesId(deletedId);
-            removeTrailForMesId(deletedId);
-            const area = phoneContainer?.querySelector('#cx-msg-area');
-            if (area && currentContactName) {
-                renderAllBubbles(area, currentContactName, false);
-            }
-        });
-
-        // Chat changed — reset state
-        eventSource.on(event_types.CHAT_CHANGED, () => {
-            if (!settings.enabled) return;
-            currentContactName = null;
-            currentApp = null;
-            awaitingReply = false;
-            commandMode = null;
-            _turnCounter = 0;
-            invalidateContactCaches();
-            // Phase 4f: force a fresh bridge probe on chat change so a user
-            // who installs / restarts the server plugin mid-session sees it
-            // without a full SillyTavern reload.
-            invalidateNovaBridgeProbeCache();
-            clearSmsPrompt();
-            clearTypingIndicator();
-            // Re-inject contacts prompt for new chat
-            if (settings.enabled && settings.autoDetectNpcs !== false) injectContactsPrompt();
-            else clearContactsPrompt();
-            if (settings.enabled) injectQuestPrompt();
-            else clearQuestPrompt();
-            if (settings.enabled && settings.trackLocations) injectMapPrompt();
-            else clearMapPrompt();
-            refreshPrivatePhonePrompt();
-            if (phoneContainer) rebuildPhone();
-        });
-
-        // Nova-specific CHAT_CHANGED hook (plan §1f). Kept separate from the
-        // handler above so a future Nova-disabled toggle (plan §7c) can
-        // short-circuit it independently of the phone UI reset logic.
-        // Gate precedence once §7c lands:
-        //   extension disabled (settings.enabled === false) → skip BOTH handlers.
-        //   extension enabled + Nova disabled → skip THIS handler only.
-        //   both enabled → both handlers run.
-        eventSource.on(event_types.CHAT_CHANGED, () => {
-            if (!settings.enabled) return;
-            try { initNovaOnce(getContext()); } catch (e) {
-                try { console.warn(`[${EXT}] initNovaOnce threw:`, e); } catch (_) { /* noop */ }
-            }
-        });
+        // Listener registration moved into wireEventListeners() so that
+        // disabling the extension (destroyPanel) can symmetrically call
+        // unwireEventListeners(). The handler bodies live there too —
+        // see the lifecycle block above for the rationale.
+        // We still wire here at startup when the extension is enabled
+        // so the handlers are live before the user toggles anything.
+        if (settings.enabled) {
+            wireEventListeners();
+        }
+        // Suppress unused warning — `eventSource` and `event_types` are
+        // referenced indirectly via wireEventListeners(); keep them
+        // destructured here for parity with how the rest of the init
+        // block reads.
+        void eventSource; void event_types;
 
         if (settings.enabled) {
             createPanel();

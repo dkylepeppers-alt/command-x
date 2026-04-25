@@ -3,6 +3,13 @@
 > Durable notes Nova keeps across sessions. Nova appends to this file via the
 > `nova_append_memory` tool (with user approval). Entries should be short,
 > dated, and factual. Delete stale entries aggressively — context is scarce.
+>
+> **Lifecycle:** the version checked into the repo is the *install-time
+> default* — typically empty or example-only. At runtime Nova owns this
+> file: every approved `nova_append_memory` call writes back via the
+> bridge's `routes-soul-memory.js`. The runtime copy on a user's machine
+> diverges from the repo copy as soon as Nova learns anything; do not
+> assume the repo version reflects what any installed agent has stored.
 
 ## User preferences
 
