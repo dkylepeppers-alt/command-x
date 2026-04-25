@@ -155,6 +155,14 @@ function resolveAllowList(names) {
     const sep = process.platform === 'win32' ? ';' : ':';
     const dirs = pathEnv.split(sep).filter(Boolean);
     const exts = process.platform === 'win32'
+        // Windows: use a static common-extension order rather than reading
+        // `PATHEXT`. This is a deliberate simplification — the official
+        // resolution honours `PATHEXT` (and varies per user/session), but
+        // for the bounded set of allow-listed binaries (`node`, `npm`,
+        // `git`, `python`, `python3`, `grep`, `rg`, `ls`, `cat`, `head`,
+        // `tail`, `wc`, `find`) the extension is always one of these few.
+        // If a future allow-list adds something with an unusual extension,
+        // revisit this list.
         ? ['.exe', '.cmd', '.bat', '']
         : [''];
     for (const name of names) {

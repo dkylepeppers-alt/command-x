@@ -435,8 +435,12 @@ describe('createShellRunHandler — real spawn against node', () => {
         nodeAllowList = resolveAllowList(['node']);
     });
 
-    it('runs `node -e "console.log(2+2)"` and returns exitCode 0 + stdout "4"', async function () {
-        if (!nodeAllowList.node) return; // skip on hosts without node on PATH
+    // Tests in this suite skip themselves when `node` isn't on PATH (e.g.
+    // a minimal CI image). We use plain arrow functions and `if (...) return;`
+    // because there's nothing in `node:test`'s default `this` context that
+    // we need to reach.
+    it('runs `node -e "console.log(2+2)"` and returns exitCode 0 + stdout "4"', async () => {
+        if (!nodeAllowList.node) return;
         const h = createShellRunHandler(baseDeps({ allowList: nodeAllowList }));
         const res = mockRes();
         await h({ body: { cmd: 'node', args: ['-e', 'console.log(2+2)'] } }, res);
@@ -448,7 +452,7 @@ describe('createShellRunHandler — real spawn against node', () => {
         assert.equal(audit.entries.at(-1).outcome, 'completed');
     });
 
-    it('runs `node -e "process.exit(7)"` and returns exitCode 7', async function () {
+    it('runs `node -e "process.exit(7)"` and returns exitCode 7', async () => {
         if (!nodeAllowList.node) return;
         const h = createShellRunHandler(baseDeps({ allowList: nodeAllowList }));
         const res = mockRes();
@@ -456,7 +460,7 @@ describe('createShellRunHandler — real spawn against node', () => {
         assert.equal(res._state.body.exitCode, 7);
     });
 
-    it('runs `node` in a sub-cwd and respects it', async function () {
+    it('runs `node` in a sub-cwd and respects it', async () => {
         if (!nodeAllowList.node) return;
         const sub = path.join(ROOT, 'sub');
         await fsPromises.mkdir(sub);
