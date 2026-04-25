@@ -79,6 +79,140 @@ test('Nova self-edit tool handlers factory is exported in source', async () => {
     }
 });
 
+test('Nova phone-internal tool handlers factory is exported and wired', async () => {
+    const { js } = await loadSources();
+    assert.match(js, /function buildNovaPhoneHandlers\(/);
+    for (const name of [
+        'phone_list_npcs',
+        'phone_write_npc',
+        'phone_list_quests',
+        'phone_write_quest',
+        'phone_list_places',
+        'phone_write_place',
+        'phone_list_messages',
+        'phone_inject_message',
+    ]) {
+        assert.match(js, new RegExp(`\\b${name}\\b`), `Missing phone handler key ${name}`);
+    }
+    // novaHandleSend must merge the phone handlers into the tool handler set.
+    const novaHandleSend = js.match(/async function novaHandleSend\([\s\S]*?\n\}/);
+    assert.ok(novaHandleSend, 'novaHandleSend body not found');
+    assert.match(novaHandleSend[0], /buildNovaPhoneHandlers\(/,
+        'novaHandleSend must compose buildNovaPhoneHandlers into the toolHandlers map');
+});
+
+test('Nova filesystem tool handlers factory is exported and wired', async () => {
+    const { js } = await loadSources();
+    assert.match(js, /function buildNovaFsHandlers\(/);
+    assert.match(js, /async function _novaBridgeRequest\(/,
+        'buildNovaFsHandlers depends on the _novaBridgeRequest helper');
+    for (const name of [
+        'fs_list',
+        'fs_read',
+        'fs_stat',
+        'fs_search',
+        'fs_write',
+        'fs_delete',
+        'fs_move',
+    ]) {
+        assert.match(js, new RegExp(`\\b${name}\\b`), `Missing fs handler key ${name}`);
+    }
+    // novaHandleSend must merge the fs handlers into the tool handler set.
+    const novaHandleSend = js.match(/async function novaHandleSend\([\s\S]*?\n\}/);
+    assert.ok(novaHandleSend, 'novaHandleSend body not found');
+    assert.match(novaHandleSend[0], /buildNovaFsHandlers\(/,
+        'novaHandleSend must compose buildNovaFsHandlers into the toolHandlers map');
+});
+
+test('Nova ST-API tool handlers factory is exported and wired', async () => {
+    const { js } = await loadSources();
+    assert.match(js, /function buildNovaStTools\(/);
+    for (const name of [
+        'st_list_characters',
+        'st_read_character',
+        'st_write_character',
+        'st_list_worldbooks',
+        'st_read_worldbook',
+        'st_write_worldbook',
+        'st_run_slash',
+        'st_get_context',
+        'st_list_profiles',
+        'st_get_profile',
+    ]) {
+        assert.match(js, new RegExp(`\\b${name}\\b`), `Missing st handler key ${name}`);
+    }
+    // novaHandleSend must merge the st handlers into the tool handler set.
+    const novaHandleSend = js.match(/async function novaHandleSend\([\s\S]*?\n\}/);
+    assert.ok(novaHandleSend, 'novaHandleSend body not found');
+    assert.match(novaHandleSend[0], /buildNovaStTools\(/,
+        'novaHandleSend must compose buildNovaStTools into the toolHandlers map');
+});
+
+test('fs_write diff preview is composed into the approval modal (plan §4c)', async () => {
+    const { js } = await loadSources();
+    // The pure composer helper must exist.
+    assert.match(js, /async function buildFsWriteDiffPreview\(/,
+        'buildFsWriteDiffPreview helper not declared in index.js');
+    // Must be invoked from novaHandleSend's confirmApproval arrow.
+    const novaHandleSend = js.match(/async function novaHandleSend\([\s\S]*?\n\}/);
+    assert.ok(novaHandleSend, 'novaHandleSend body not found');
+    assert.match(novaHandleSend[0], /buildFsWriteDiffPreview\(/,
+        'novaHandleSend.confirmApproval must call buildFsWriteDiffPreview');
+    // diffText must flow into cxNovaApprovalModal.
+    assert.match(novaHandleSend[0], /cxNovaApprovalModal\([\s\S]*?diffText[\s\S]*?\)/,
+        'cxNovaApprovalModal must receive diffText from confirmApproval');
+    // The composer must get the fs_read handler from the in-scope toolHandlers.
+    assert.match(novaHandleSend[0], /fsRead:\s*toolHandlers\.fs_read/,
+        'buildFsWriteDiffPreview call must pass toolHandlers.fs_read as fsRead');
+});
+
+test('shell_run handler is declared and wired into the dispatcher (plan §4b)', async () => {
+    const { js } = await loadSources();
+    // Factory must exist under NOVA AGENT.
+    assert.match(js, /function buildNovaShellHandler\(/,
+        'buildNovaShellHandler factory not declared in index.js');
+    // Timeout bounds surfaced as named constants (matches the schema).
+    assert.match(js, /const\s+SHELL_TIMEOUT_MIN_MS\s*=\s*100\b/,
+        'SHELL_TIMEOUT_MIN_MS must be declared');
+    assert.match(js, /const\s+SHELL_TIMEOUT_MAX_MS\s*=\s*300000\b/,
+        'SHELL_TIMEOUT_MAX_MS must be declared');
+    // The factory must ship a shell_run key.
+    const factoryBody = js.match(/function buildNovaShellHandler\([\s\S]*?\n\}\s*\n/);
+    assert.ok(factoryBody, 'buildNovaShellHandler body not found');
+    assert.match(factoryBody[0], /shell_run:\s*async/,
+        'buildNovaShellHandler must export a shell_run handler');
+    assert.match(factoryBody[0], /['"]\/shell\/run['"]/,
+        'shell_run must POST to /shell/run');
+    // novaHandleSend must merge the shell handler into the dispatch map.
+    const novaHandleSend = js.match(/async function novaHandleSend\([\s\S]*?\n\}/);
+    assert.ok(novaHandleSend, 'novaHandleSend body not found');
+    assert.match(novaHandleSend[0], /buildNovaShellHandler\(/,
+        'novaHandleSend must compose buildNovaShellHandler into the toolHandlers map');
+});
+
+test('bridge requests carry ST auth headers (plan §8c)', async () => {
+    const { js } = await loadSources();
+    // getRequestHeaders must be imported from script.js so the module-level
+    // fallback in _novaBridgeRequest / _novaBridgeWrite has a live
+    // reference at runtime.
+    assert.match(js, /import\s*\{[^}]*\bgetRequestHeaders\b[^}]*\}\s*from\s*['"][^'"]*script\.js['"]/,
+        'getRequestHeaders must be imported from ST script.js');
+    // _novaBridgeRequest must accept headersProvider and merge it into init.headers.
+    const reqBody = js.match(/async function _novaBridgeRequest\([\s\S]*?\n\}/);
+    assert.ok(reqBody, '_novaBridgeRequest body not found');
+    assert.match(reqBody[0], /headersProvider/,
+        '_novaBridgeRequest must accept headersProvider');
+    assert.match(reqBody[0], /omitContentType:\s*true/,
+        '_novaBridgeRequest must call the headers provider with omitContentType: true');
+    // _novaBridgeWrite (soul/memory path) must also thread the auth header.
+    const writeBody = js.match(/async function _novaBridgeWrite\([\s\S]*?\n\}/);
+    assert.ok(writeBody, '_novaBridgeWrite body not found');
+    assert.match(writeBody[0], /headersProvider/,
+        '_novaBridgeWrite must accept headersProvider');
+    assert.match(writeBody[0], /omitContentType:\s*true/,
+        '_novaBridgeWrite must call the headers provider with omitContentType: true');
+});
+
 test('Profile-swap helpers are wired to the slash executor', async () => {
     const { js } = await loadSources();
     assert.match(js, /function listNovaProfiles\(/);
@@ -89,6 +223,31 @@ test('Profile-swap helpers are wired to the slash executor', async () => {
     assert.ok(novaHandleSend, 'novaHandleSend body not found');
     assert.match(novaHandleSend[0], /withNovaProfileMutex\(/,
         'novaHandleSend must serialise through withNovaProfileMutex');
+});
+
+test('Tool capability filter gates the NOVA_TOOLS registry per turn (plan §4f)', async () => {
+    const { js } = await loadSources();
+    // The pure helper must exist alongside the probe.
+    assert.match(js, /function filterNovaToolsByCapabilities\(/,
+        'filterNovaToolsByCapabilities helper not declared in index.js');
+    // Bridge-prefix allow list declared as a constant so the contract
+    // is visible at a glance.
+    assert.match(js, /const\s+NOVA_BRIDGE_TOOL_PREFIXES\s*=\s*Object\.freeze\(\[/,
+        'NOVA_BRIDGE_TOOL_PREFIXES must be declared as a frozen array');
+    // novaHandleSend must await the probe and feed it into the filter
+    // BEFORE calling sendNovaTurn.
+    const novaHandleSend = js.match(/async function novaHandleSend\([\s\S]*?\n\}/);
+    assert.ok(novaHandleSend, 'novaHandleSend body not found');
+    assert.match(novaHandleSend[0], /await\s+probeNovaBridge\(/,
+        'novaHandleSend must await probeNovaBridge before the turn starts');
+    assert.match(novaHandleSend[0], /filterNovaToolsByCapabilities\(\s*\{/,
+        'novaHandleSend must call filterNovaToolsByCapabilities');
+    // The filtered output must be what gets passed as `tools:`.
+    assert.match(novaHandleSend[0], /tools:\s*effectiveTools/,
+        'sendNovaTurn must receive the filtered tool list (effectiveTools)');
+    // A transcript notice must be emitted when bridge is absent.
+    assert.match(novaHandleSend[0], /Nova bridge plugin not detected/,
+        'novaHandleSend must warn the user when the bridge is missing');
 });
 
 test('Nova settings appear in settings.html', async () => {

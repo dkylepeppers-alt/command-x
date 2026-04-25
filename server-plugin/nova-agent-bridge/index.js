@@ -27,6 +27,7 @@ const {
     createFsMoveHandler,
 } = require('./routes-fs-write.js');
 const { buildAuditLogger } = require('./audit.js');
+const { buildNovaSecurityMiddleware } = require('./middleware.js');
 
 const PLUGIN_ID = 'nova-agent-bridge';
 
@@ -133,6 +134,15 @@ async function init(router) {
     const root = resolveRoot(configPath);
     const auditLogPath = resolveAuditLogPath(root);
     activeAuditLogger = buildAuditLogger({ logPath: auditLogPath });
+
+    // Plan §8c — belt-and-suspenders session + CSRF check. ST's global
+    // `csrf-sync` middleware already protects these routes when the
+    // host is configured normally; this re-check means the plugin
+    // stays safe if ST is run with `--disableCsrf` or if the mount
+    // ordering ever changes. `/health` and `/manifest` are exempt so
+    // the extension's capability probe keeps working before a user
+    // session exists.
+    router.use(buildNovaSecurityMiddleware());
 
     router.get('/manifest', (_req, res) => {
         res.json({

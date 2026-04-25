@@ -289,8 +289,28 @@ own plugin folder by default.
 - [x] `shell_run({ cmd, args, cwd?, timeoutMs? })` — schema shipped. Allow-list: `node`, `npm`,
   `git`, `python`, `python3`, `grep`, `rg`, `ls`, `cat`, `head`, `tail`, `wc`,
   `find`. User-extensible. Hard timeout default 60 s.
+- [x] **Handler factory shipped** — `buildNovaShellHandler({ pluginBaseUrl?,
+  fetchImpl?, headersProvider? })` in `index.js` NOVA AGENT section (right
+  after `buildNovaFsHandlers`). Thin wrapper over `_novaBridgeRequest`:
+  validates args shape (required `cmd`, optional `args[]` filtered to
+  strings, `cwd`, `timeoutMs` clamped to `[100 ms, 5 min]` and only
+  accepted from numeric primitives), POSTs to `/shell/run`. Never
+  throws; closed-enum errors. The plugin's current 501 naturally
+  surfaces as `{ error: 'not-implemented', plugin, version, route,
+  status: 501 }` through `_novaBridgeRequest` — no special-casing, so
+  the same code path lights up when the plugin ships a real
+  implementation. Composed into `novaHandleSend`'s `toolHandlers` map
+  alongside the other four factories. Covered by
+  `test/nova-shell-handler.test.mjs` (41 assertions across 8 suites:
+  factory shape, args validation, POST body shape, timeoutMs clamping,
+  response passthrough, base URL handling, auth-header propagation,
+  never-throws fuzz) + source-contract assertion in
+  `test/nova-ui-wiring.test.mjs`.
 - [ ] Full tier only; per-call approval unless
-  "Remember approvals this session" is on — enforced in Phase 3c.
+  "Remember approvals this session" is on — upstream gate is already
+  enforced by `novaToolGate` + `runNovaToolDispatch` +
+  `cxNovaApprovalModal`; UI toggle for "Remember approvals this session"
+  is still pending the Phase 7 settings work.
 
 ### 4c. Diff preview helper
 - [x] For every `fs_write` approval: fetch current file, render unified diff
@@ -300,24 +320,78 @@ own plugin folder by default.
     { path, maxLines })` in `index.js` NOVA AGENT section. LCS-based line
     diff, `--- /dev/null` header for new files, bounded output with
     "N more lines" truncation sentinel. Covered by `test/nova-diff.test.mjs`
-    (17 assertions). Modal wiring lands with Phase 3c.
+    (17 assertions).
+  - **Shipped (composer wiring):** `buildFsWriteDiffPreview({ tool, args,
+    fsRead, buildDiff })` in `index.js` NOVA AGENT section (right after
+    `buildNovaUnifiedDiff`). Called from `novaHandleSend`'s
+    `confirmApproval` arrow *before* the modal opens, with the in-scope
+    `toolHandlers.fs_read` as `fsRead`. Resolves to a unified diff string
+    for `fs_write` with valid args, empty string otherwise. Never throws.
+    Short-circuits on any non-`fs_write` tool, bad args, missing
+    `fs_read`, or any `fs_read` failure that isn't a semantic "not-found"
+    (which is treated as a create). Covered by
+    `test/nova-diff-preview.test.mjs` (26 assertions across 5 suites:
+    short-circuits, happy paths, fs_read failure paths, robustness
+    fuzzing, integration with a realish diff stub) plus a source-contract
+    assertion in `test/nova-ui-wiring.test.mjs`.
 
 ### 4d. SillyTavern API tools (no plugin)
-- [x] `st_list_characters`, `st_read_character`, `st_write_character` — schemas shipped.
-- [x] `st_list_worldbooks`, `st_read_worldbook`, `st_write_worldbook` — schemas shipped.
-- [x] `st_run_slash({ command })` — schema shipped; handler calls
-  `ctx.executeSlashCommandsWithOptions` in Phase 3c.
-- [x] `st_get_context()` — schema shipped (last N msgs, character, persona).
-- [x] `st_list_profiles`, `st_get_profile` — schemas shipped.
+- [x] `st_list_characters`, `st_read_character` — schemas + handlers shipped (read `ctx.characters`).
+- [x] `st_write_character` — schema shipped; handler returns closed-enum `{ error: 'not-implemented', hint }` pointing to `fs_write` at the character JSON path. **Deferred until the correct ST internal HTTP API surface is confirmed** — see AGENT_MEMORY 2026-04-25 (st handlers) for follow-up notes.
+- [x] `st_list_worldbooks`, `st_read_worldbook` — schemas + handlers shipped (slash `/world list` and `/world get name="..."`, with JSON / newline / comma-separated pipe parsing and `fs_list` / `fs_read` fallback hints).
+- [x] `st_write_worldbook` — schema shipped; handler returns closed-enum `{ error: 'not-implemented', hint }` pointing to `fs_write` at the worldbook JSON path. **Deferred for the same reason as `st_write_character`.**
+- [x] `st_run_slash({ command })` — schema + handler shipped; handler calls `ctx.executeSlashCommandsWithOptions` and forwards `{ ok: true, pipe }` on success or `{ error: 'slash-failed' | 'slash-unavailable', ... }` otherwise.
+- [x] `st_get_context()` — schema + handler shipped (last N msgs clamped to [1..50] default 10, character, persona, chatId/groupId, per-message text truncated to 4000 chars).
+- [x] `st_list_profiles`, `st_get_profile` — schemas + handlers shipped (`/profile-list` via the existing `listNovaProfiles`, `/profile-get name="..."` for individual profiles).
+- [x] **Factory shipped** — `buildNovaStTools({ ctxImpl?, executeSlashImpl?, listProfilesImpl? })` in `index.js` NOVA AGENT section (immediately after `buildNovaFsHandlers`). Mirrors the contract of the other three Nova handler factories: never throws, closed-enum errors, all deps DI'd. `novaHandleSend` composes the factory into the dispatch `toolHandlers` map alongside `buildNovaSoulMemoryHandlers` / `buildNovaPhoneHandlers` / `buildNovaFsHandlers`. Covered by `test/nova-st-tools.test.mjs` (47 assertions across 12 suites incl. fuzzing, lastN clamping, embedded-quote escaping for slash args, deferred-write closed-enum surface) and a source-contract assertion in `test/nova-ui-wiring.test.mjs`.
 
 ### 4e. Phone-internal tools
 - [x] `phone_list_npcs`, `phone_write_npc`, `phone_list_quests`,
   `phone_write_quest`, `phone_list_places`, `phone_write_place`,
   `phone_list_messages`, `phone_inject_message` — schemas shipped.
+- [x] **Handlers shipped** — `buildNovaPhoneHandlers({ ... })` factory
+  in `index.js` NOVA AGENT section (immediately after
+  `buildNovaSoulMemoryHandlers`). Thin wrappers around the production
+  `loadNpcs` / `mergeNpcs` / `loadQuests` / `upsertQuest` / `loadPlaces`
+  / `upsertPlace` / `loadMessages` / `pushMessage` helpers; never throw;
+  all eight handlers resolve to `{ ok, ... }` on success or
+  `{ error: <string> }`. All store helpers are DI'd for testability.
+  `novaHandleSend` composes the factory into the dispatch `toolHandlers`
+  map alongside `buildNovaSoulMemoryHandlers`. Covered by
+  `test/nova-phone-tools.test.mjs` (39 assertions incl. never-throws
+  fuzzing against `undefined` / `null` / primitive / array args, limit
+  clamping on `phone_list_messages`, authoritative-id/name semantics,
+  and source-shape key parity).
 
 ### 4f. Tool capability discovery
-- [ ] Probe `GET /api/plugins/nova-agent-bridge/manifest`. If present,
+- [x] Probe `GET /api/plugins/nova-agent-bridge/manifest`. If present,
   register 4a/4b. If 404, register only 4d/4e and show a yellow banner.
+  **Shipped.** Pure helper `filterNovaToolsByCapabilities({ tools, probe })`
+  in `index.js` NOVA AGENT section (right after `_coerceNovaCapabilities`).
+  Contract:
+  - `probe.present === false` → drop every bridge-backed tool
+    (prefix `fs_` or `shell_` per `NOVA_BRIDGE_TOOL_PREFIXES`). Non-
+    bridge tools (`nova_*`, `phone_*`, `st_*`) kept.
+  - `probe.present` truthy with a `capabilities` map → drop any tool
+    whose capability key is **explicitly `false`**. Unlisted tools
+    pass through (forward-compat: capabilities-light plugin builds
+    stay usable when the extension lists a newer tool than the plugin
+    knows about).
+  - Missing / malformed `probe` or missing `capabilities` map → fail
+    open (return input). Matters for in-flight probe races.
+  - Never throws; returns a fresh array.
+  `novaHandleSend` awaits `probeNovaBridge({ baseUrl: nova.pluginBaseUrl })`
+  before `sendNovaTurn`, pipes the result through the filter, and passes
+  the result as `tools:` (`effectiveTools` local). When the bridge is
+  absent and something was actually filtered, emits a single transcript
+  notice: **"⚠︎ Nova bridge plugin not detected — filesystem and shell
+  tools are disabled this turn. Install `nova-agent-bridge` to enable
+  them."** — that's the plan's "yellow banner" rendered in-transcript,
+  since the transcript is Nova's primary surface. Covered by
+  `test/nova-capability-filter.test.mjs` (45 assertions across 5 suites:
+  fail-open matrix, present:false drop rules, present:true capability
+  gating, forward-compat for unknown tools, never-throws fuzz) +
+  source-contract assertion in `test/nova-ui-wiring.test.mjs`.
 
 ---
 
@@ -430,7 +504,15 @@ Always concatenated into the Nova system prompt regardless of skill.
     `nova_overwrite_memory({ content })` (Write).
 - [ ] Route through `fs_write` when plugin installed; fall back to
   `POST /api/files/*` into `SillyTavern/data/<user>/user/files/nova/`.
-- [ ] In-phone Settings: "Soul & Memory" pane with textareas + Save + Reset.
+- [x] In-phone Settings: "Soul & Memory" pane with textareas + Save + Reset.
+  - **Shipped:** `openNovaSoulMemoryEditor()` modal in `index.js` (NOVA AGENT
+    section), triggered by the `📝 Edit Soul & Memory` button in the phone
+    Settings → NOVA section. Loads via `loadNovaSoulMemory({ force: true })`,
+    writes via `_novaBridgeWrite` (POST `/fs/write`), invalidates cache on
+    successful save. Reload-from-disk button covers the "Reset" case
+    (re-fetches whatever's on disk, discarding unsaved edits). Inline
+    aria-live status banner reports load/save outcome (and tells the user to
+    install the bridge plugin if the write fails).
 
 ### 6c. Prompt composition order
 ```
@@ -546,8 +628,41 @@ Always concatenated into the Nova system prompt regardless of skill.
   `FS_WRITE_HARD_CAP_BYTES` (decoded buffer length, so base64 inputs
   are clamped to the same on-disk size).
 - [ ] Shell: no `shell: true`; binaries resolved via allow-list at startup.
-- [ ] CSRF protection mirroring ST's header check.
-- [ ] Require ST session cookie on every route.
+- [x] CSRF protection mirroring ST's header check.
+  - **Shipped (plugin side):** `server-plugin/nova-agent-bridge/middleware.js`
+    exports `buildNovaSecurityMiddleware({ csrfRequired?, sessionRequired?,
+    skip? })`. Mounted as the first `router.use(...)` in plugin `init()`.
+    Rejects state-changing methods (POST/PUT/PATCH/DELETE) with 403 +
+    closed-enum `{ error: 'nova-csrf-missing' | 'nova-csrf-stale-session'
+    | 'nova-csrf-mismatch' }` when the `x-csrf-token` header is absent,
+    empty, or doesn't match `req.session.csrfToken` (constant-time
+    compare). GETs, HEAD, OPTIONS, and the read-only `/health` +
+    `/manifest` routes bypass the check so the extension's capability
+    probe keeps working before a user session is fully wired.
+    ST's global `csrf-sync` middleware still fires first; this layer
+    is belt-and-suspenders for `--disableCsrf` and non-ST embedding.
+  - **Shipped (extension side):** `import { getRequestHeaders } from
+    '../../../../script.js'`. `_novaBridgeRequest` and `_novaBridgeWrite`
+    accept an injectable `headersProvider` (default: the imported
+    `getRequestHeaders`) and merge its output into `init.headers` so
+    every bridge call carries `X-CSRF-Token`. Provider is called with
+    `{ omitContentType: true }` so the bridge can own the Content-Type
+    for JSON bodies. Provider exceptions fail open (request goes out
+    without auth; server rejects as before) rather than blocking the
+    user.
+  - Covered by `test/nova-plugin-middleware.test.mjs` (41 assertions
+    across 6 suites: exports, skip-list, session check, CSRF matrix,
+    defensive/never-throws, internal constant-time compare) and new
+    CSRF-propagation suites in `test/nova-shell-handler.test.mjs` +
+    plugin-wiring assertion in `test/nova-plugin.test.mjs` + source-
+    contract assertion in `test/nova-ui-wiring.test.mjs`.
+- [x] Require ST session cookie on every route. **Shipped** as part of
+  the same middleware above (`sessionRequired` default `true`): the
+  middleware requires `req.session` to carry either a `handle` (ST's
+  per-user slot populated by `setUserDataMiddleware`) or a
+  `csrfToken`. Missing/empty session → 401 `nova-unauthorized`.
+  `/health` and `/manifest` remain exempt so unauthenticated capability
+  probes succeed.
 - [x] Audit log: append to `SillyTavern/data/_nova-audit.jsonl` with
   `{ ts, user?, route, argsSummary, outcome, bytes?, backup?, error? }`.
   **Shipped** as `server-plugin/nova-agent-bridge/audit.js` —
@@ -675,7 +790,24 @@ All under `test/` using Node `--test`.
     module-level controller up to the composer UI.
 - [x] `nova-prompt-compose.test.mjs` — soul+memory concatenation, truncation,
   skill ordering.
-- [ ] `nova-audit-redact.test.mjs` — audit entries never include raw content.
+- [x] `nova-audit-redact.test.mjs` — audit entries never include raw content.
+  **Shipped.** Drives the real `/fs/write`, `/fs/delete`, `/fs/move`
+  handler factories against a tempdir + capturing audit logger, with
+  realistic payloads (UTF-8 prose, fake PEM private key, password +
+  bearer-token strings, JSON with nested `content`/`data`/`payload`
+  keys, a 2 KB uniform string). Each captured audit entry is checked
+  two ways: (1) `JSON.stringify(entry)` substring scan; (2) the real
+  `formatEntry` (the on-disk JSONL serialiser) substring scan. Also
+  enforces a closed-enum `argsSummary` key allow-list (`path`, `from`,
+  `to`, `encoding`, `createParents`, `overwrite`, `overwrote`,
+  `overwroteDest`, `recursive`, `entries`, `type`) — adding a new key
+  requires a conscious test edit. Covers create, overwrite, refused-
+  exists, base64 (asserts both b64 and decoded plaintext absent),
+  delete (trashed), move (success), the formatEntry backstop for
+  top-level + nested redacted keys, AND an end-to-end run through
+  `buildAuditLogger` with a real on-disk JSONL log read back from
+  disk to confirm no payload byte ever lands on disk. 13 tests / 5
+  suites.
 - [x] `nova-preset.test.mjs` — validates the shipped preset JSON parses,
   contains required top-level fields, has all marker prompts present, and
   `prompt_order` references only defined identifiers.
@@ -761,3 +893,10 @@ All under `test/` using Node `--test`.
   `/manifest` now reports the resolved `auditLogPath`. `exit()` now calls
   `auditLogger.close()` (no-op today; reserved for the rotation sprint).
   Shell (`/shell/run`) is the only remaining 501 stub.
+- **2026-04-24 (phone handlers)** — Plan audit + first slice of §4e
+  handler wiring. `buildNovaPhoneHandlers` factory lands the 8
+  `phone_*` handlers behind the same DI+factory pattern as
+  `buildNovaSoulMemoryHandlers`. `novaHandleSend` composes both maps
+  into its `toolHandlers` arg. Pure local stores — no plugin, no
+  network, no approval gate beyond the dispatcher's tier check. 485
+  tests green (+39).

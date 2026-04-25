@@ -4,28 +4,38 @@
 
 ## What This Is
 
-A SillyTavern third-party extension (v0.10.0) that adds a smartphone UI overlay to RP chats. Five apps: **Command-X** (neural commands + unified messaging), **Profiles** (NPC intel cards), **Quests** (persistent story tracker), **OpenClaw** (bridge console), and **Settings**. Messages flow through the RP — the extension injects system prompts so the LLM wraps phone replies in `[sms]` tags, which get extracted for the phone UI.
+A SillyTavern third-party extension (v0.13.0) that adds a smartphone UI overlay to RP chats. Six apps: **Command-X** (neural commands + unified messaging), **Profiles** (NPC intel cards), **Quests** (persistent story tracker), **Map** (contact location tracking), **Nova** (agentic assistant — approval-gated tool calls via a companion server plugin; still in active development, see `docs/nova-agent-plan.md`), and **Settings**. Messages flow through the RP — the extension injects system prompts so the LLM wraps phone replies in `[sms]` tags, which get extracted for the phone UI.
 
 ## File Layout
 
 ```
 command-x/
-├── index.js          # All extension logic (~3.8k lines)
-├── style.css         # All styling (~750 lines)
-├── manifest.json     # ST extension manifest (v0.10.0)
-├── settings.html     # ST settings panel (checkboxes + number inputs)
+├── index.js          # All extension logic (~7.9k lines)
+├── style.css         # All styling (~1.5k lines)
+├── manifest.json     # ST extension manifest (v0.13.0)
+├── settings.html     # ST settings panel (toggles, number inputs, Nova config)
 ├── README.md         # User-facing docs
 ├── LICENSE           # MIT
 ├── .gitignore
-├── docs/             # In-repo docs
-│   └── code-review-plan.md
-├── test/             # Node --test unit tests
-│   └── helpers.test.mjs  # 63 assertions for pure helpers
+├── docs/             # In-repo design / review notes
+│   ├── code-review-plan.md              # Historical v0.10.0 code review checklist
+│   ├── nova-agent-plan.md               # Live Nova implementation plan
+│   ├── private-phone-hybrid-plan.md     # Historical (shipped)
+│   ├── quest-tracker-plan.md            # Historical (shipped)
+│   ├── quest-tracker-interactive-plan.md# Historical (shipped)
+│   └── quest-tracker-interactive-spec.md
+├── nova/             # Starter soul.md / memory.md loaded by Nova on fresh chats
+├── presets/          # OpenAI-shaped connection presets shipped for Nova
+├── server-plugin/
+│   └── nova-agent-bridge/   # Companion ST server plugin for Nova (fs/shell routes)
+├── test/             # Node --test suites
+│   ├── helpers.test.mjs              # Pure phone helpers
+│   └── nova-*.test.mjs               # Nova agent (state, tools, dispatch, approval modal, plugin, diff, …)
 ├── .github/          # GitHub config
 └── st-docs/          # Local copy of SillyTavern docs (reference only)
 ```
 
-This is a **single-file JS architecture**. All logic lives in `index.js`. Don't split it — ST loads one JS entry point per extension.
+This is a **single-file JS architecture** on the frontend. All extension logic lives in `index.js`. Don't split it — ST loads one JS entry point per extension. The Nova server plugin under `server-plugin/nova-agent-bridge/` is a separate Node module loaded by SillyTavern's plugin system.
 
 ## Core Architecture
 
@@ -54,14 +64,16 @@ LLM RESPONDS:
     2. Route each block to correct contact by from/to attributes
     3. extractContacts() — parse [status] tags SECOND
     4. extractQuests() — parse [quests] tags THIRD
-    5. mergeNpcs() + mergeQuests() + rebuildPhone() if panel visible
-    6. applyInjectionThrottle() — manage per-turn prompt injection cadence
+    5. extractPlaces() — parse [place] tags FOURTH (Map app)
+    6. mergeNpcs() + mergeQuests() + mergePlaces() + rebuildPhone() if panel visible
+    7. applyInjectionThrottle() — manage per-turn prompt injection cadence
 
   CHARACTER_MESSAGE_RENDERED →
     1. hideSmsTagsInDom() — replace [sms] with 📱 indicator
     2. hideContactsTagsInDom() — strip [status] entirely
     3. hideQuestTagsInDom() — strip [quests] entirely
-    4. styleCommandsInMessage() — color {{COMMAND}} syntax
+    4. hidePlaceTagsInDom() — strip [place] entirely
+    5. styleCommandsInMessage() — color {{COMMAND}} syntax
 
   MESSAGE_DELETED / MESSAGE_SWIPED →
     removeMessagesForMesId() — clean up phone messages tied to that ST message
@@ -74,8 +86,13 @@ LLM RESPONDS:
 ```javascript
 // --- Module-level ---
 settings            // {enabled, styleCommands, showLockscreen, panelOpen, batchMode,
-                    //  autoDetectNpcs, manualHybridPrivateTexts, openclawMode,
-                    //  contactsInjectEveryN, questsInjectEveryN}
+                    //  autoDetectNpcs, manualHybridPrivateTexts,
+                    //  contactsInjectEveryN, questsInjectEveryN, autoPrivatePollEveryN,
+                    //  trackLocations, autoRegisterPlaces, mapInjectEveryN,
+                    //  showLocationTrails, nova: { enabled, profileName, defaultTier,
+                    //  maxToolCalls, turnTimeoutMs, pluginBaseUrl,
+                    //  rememberApprovalsSession, activeSkill }}
+                    // NOTE: legacy `openclawMode` is migrated out on load (see LEGACY_KEYS).
 phoneContainer      // HTMLElement | null — wrapper div injected into body
 clockIntervalId     // setInterval ID — cleared in destroyPanel() + wirePhone()
 commandMode         // null | 'COMMAND' | 'BELIEVE' | 'FORGET' | 'COMPEL'
@@ -90,7 +107,7 @@ _historyContactNamesCache // { chatId, names } — invalidated on write
 _lastMsgTsCache     // Map<`${chatId}::${name}` → timestamp>
 
 // --- Interaction-level (set in wirePhone / event handlers) ---
-currentApp          // 'cmdx' | 'profiles' | 'quests' | 'openclaw' | 'phone-settings' | null
+currentApp          // 'cmdx' | 'profiles' | 'quests' | 'map' | 'nova' | 'phone-settings' | null
 currentContactName  // Name of the contact whose chat is open
 awaitingReply       // true after sending, false when [sms] received or timeout
 typingTimeout       // setTimeout ID for the 30s awaitingReply cleanup
@@ -99,13 +116,16 @@ typingTimeout       // setTimeout ID for the 30s awaitingReply cleanup
 ### Named Constants
 
 ```javascript
-VERSION              // '0.10.0' — single-sourced
+VERSION              // '0.13.0' — single-sourced
 AWAIT_TIMEOUT_MS     // 30_000 — awaitingReply auto-clear timeout
 CLOCK_INTERVAL_MS    // 30_000 — clock display refresh interval
 MESSAGE_HISTORY_CAP  // 200 — max messages stored per contact
 QUEST_HISTORY_CAP    // 150 — max quests stored
+PLACES_CAP           // 40  — max registered places per chat
+LOCATION_TRAIL_CAP   // 50  — max trail entries per contact
 TOAST_DURATION_MS    // 4_000 — toast auto-dismiss
 MAX_AVATAR_FILE_BYTES // 8MB — safeDataUrlFromFile input size cap
+MAX_MAP_IMAGE_WIDTH  // 1024 — max downscaled width for uploaded map image
 CONTACT_GRADIENTS    // string[] — avatar background gradient palette
 CONTACT_EMOJIS       // string[] — default avatar emoji pool
 ```
@@ -117,6 +137,10 @@ All keyed per SillyTavern chat ID:
 - **`cx-npcs-{chatId}`** — NPC store array (capped at 50)
 - **`cx-unread-{chatId}-{contactName}`** — Unread count integer
 - **`cx-quests-{chatId}`** — Quest store array (capped at `QUEST_HISTORY_CAP`)
+- **`cx-places-{chatId}`** — Map place store (capped at `PLACES_CAP`)
+- **`cx-map-image-{chatId}`** — Uploaded map background (JPEG data URL, optional)
+
+Nova-specific state lives in `ctx.chatMetadata[EXT].nova` (per-chat transcript, soul/memory pointers, approval history) rather than localStorage.
 
 Messages store `mesId` (the ST message index) so they can be cleaned up on swipe/regen.
 
@@ -140,20 +164,21 @@ Flow:
 
 Requires ST build that exposes `generateQuietPrompt`. Gated by `settings.manualHybridPrivateTexts`.
 
-## OpenClaw Operate Mode
+## Nova Agent
 
-OpenClaw is a bridge to a local `openclaw-bridge` ST server plugin. Three modes:
-- **observe** — Read-only context inspection
-- **assist** — Advice / planning over the current chat
-- **operate** — OpenClaw proposes `slash.run` actions; the user approves/rejects each before local execution
+Nova is an agentic assistant app (home-screen tile `data-app="nova"`) that talks to the LLM through a dedicated connection profile and runs **approval-gated tool calls** against both the ST frontend and a companion server plugin.
 
-Operate flow (`settings.openclawMode === 'operate'`):
-1. User sends context to OpenClaw via the OpenClaw app
-2. `sendToOpenClaw()` POSTs to `/api/plugins/openclaw-bridge/operate`
-3. Response contains an `actions[]` array of proposed slash commands
-4. `applyOpenClawResponse()` renders each action as an approval card
-5. On approve: card calls `executeApprovedAction()` which runs the slash via ST `/run`
-6. On reject: action is discarded, no side effects
+Architecture:
+- **Connection profile** — `settings.nova.profileName` selects an ST connection profile; Nova swaps to it for agent turns and restores the previous profile afterwards (serialized by a profile mutex).
+- **Tool registry** — Schemas cover `nova_*` (self-edit of soul/memory), `phone_*` (local phone stores), `st_*` (ST API — characters, worldbooks, slash, context, profiles), `fs_*` (filesystem via plugin), and `shell_run` (shell via plugin). Each tool declares a **tier** (`read` / `write` / `shell`); `settings.nova.defaultTier` gates what can run without prompting.
+- **Approval modal** — Writes and shell calls open `cxNovaApprovalModal` with an optional unified-diff preview (`buildNovaUnifiedDiff`) before execution.
+- **Transcript** — Per-chat, stored under `ctx.chatMetadata[EXT].nova`, replayed into the phone's Nova view.
+- **Soul / memory** — Markdown docs under `nova/soul.md` and `nova/memory.md` (seeded on first use, then per-chat editable via the `nova_write_soul` / `nova_write_memory` tools behind the approval gate).
+- **Server plugin** — `server-plugin/nova-agent-bridge/` exposes `/fs/*` routes (list, read, stat, search, write, delete, move — with `.nova-trash` safety and audit log) and a reserved `/shell/run` route. The extension probes `/health` on startup to discover plugin capabilities.
+
+Current status and remaining work are tracked in `docs/nova-agent-plan.md`.
+
+> **Legacy note:** A previous "OpenClaw" bridge app was retired in favor of Nova. Any existing `ctx.chatMetadata[EXT].openclaw` blobs are migrated to `.legacy_openclaw` on load (see `migrateLegacyOpenClawMetadata`), and `settings.openclawMode` is stripped by `LEGACY_KEYS` in `loadSettings`. Do not re-introduce OpenClaw references in new code.
 
 ## SillyTavern APIs Used
 
@@ -201,6 +226,12 @@ Also accepts legacy `[contacts]...[/contacts]` tag.
 ```
 Also accepts `{"quests":[...]}` wrapper format.
 
+### Places (Map app)
+```
+[place][{"name":"Lighthouse Café","emoji":"☕","occupants":["Sarah"]}][/place]
+```
+Registers places on the Map app and moves contacts between them. Manual user edits are preserved across auto-updates.
+
 ## Common Pitfalls
 
 1. **Don't reorder SMS vs contacts extraction in MESSAGE_RECEIVED.** SMS first, always.
@@ -214,9 +245,15 @@ Also accepts `{"quests":[...]}` wrapper format.
 
 ## Testing
 
-Run the pure-helper unit tests with:
+Run the full suite (pure phone helpers + Nova agent):
+```
+node --test test/*.mjs
+```
+
+Or target a specific file:
 ```
 node --test test/helpers.test.mjs
+node --test test/nova-tool-dispatch.test.mjs
 ```
 
 Manual integration testing (no automated browser tests):
@@ -227,6 +264,8 @@ Manual integration testing (no automated browser tests):
 5. Check the Profiles app for [status] data
 6. Toggle batch mode in Settings and verify compose queue works
 7. Click "Check Messages" in the private-poll section with a character loaded
+8. Open the Map app, upload an image, drop pins, verify zoom/pan and that `[place]` tags register new places
+9. Open the Nova app, pick a connection profile, send a turn, approve a write, and verify the transcript + approval modal + diff preview all render correctly
 
 ## Style Notes
 
@@ -247,3 +286,6 @@ Manual integration testing (no automated browser tests):
 - **v0.8** — Unified Messages + Command-X, subliminal neural commands, user persona filter, neural toggle, `[sms from/to]` routing, swipe/regen handling
 - **v0.9** — Compose queue (batch mode), notification badges, `[status]` tag (replaces `[contacts]`), Profiles app, Settings app, toast notifications, recency sort, ST character avatars, dead app cleanup
 - **v0.10.0** — Quests app, OpenClaw app, `[quests]` tag, private polling, quest enrichment via `generateQuietPrompt`, per-chat metadata persistence, comprehensive code review (security escaping, CSP-safe avatar fallback, clock-leak fix, event-gate on `settings.enabled`, `MESSAGE_DELETED` mesId fix, `[sms]` routing tightened, caches, upload size cap, throttled injections, unit tests, accessibility, `cxAlert`/`cxConfirm`, toast improvements, send-button guard)
+- **v0.11** — Map app (visual location tracker with schematic or uploaded background, pins, zoom/pan, movement trails), `[place]` tag, interactive quest tracker upgrade (richer states, urgency, focus, next-action, subtasks, manual overrides preserved across auto-updates), group-chat contact dedupe
+- **v0.12** — Nova agent scaffolding: home-screen tile + view, connection-profile swap, per-chat transcript, approval-gated tool calls, tool registry tiers, skill packs, soul/memory markdown self-edit tools, companion `nova-agent-bridge` server plugin (fs routes with `.nova-trash` safety + audit log), plugin capability probe
+- **v0.13.0** — OpenClaw app fully retired (legacy metadata migrated to `.legacy_openclaw`, `settings.openclawMode` stripped via `LEGACY_KEYS`); Nova phone-handler factory (`buildNovaPhoneHandlers`) wires `phone_*` tools to the real local stores; expanded Nova test suites
