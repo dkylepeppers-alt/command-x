@@ -1594,3 +1594,58 @@ requires the bridge.
 - §7a/§7c unchecked items are mostly already shipped (they are the
   same items that were stale-checked in §6b before this PR). A
   future cleanup-only PR could tick those after a careful audit.
+
+---
+
+## 2026-04-25 (later still) — PR #21 review-comment cleanup
+
+Doc-only follow-up to the §6b editor PR. Three reviewer comments on
+`37e32eb`, all addressed:
+
+1. **`server-plugin/nova-agent-bridge/middleware.js` JSDoc.** The
+   `opts.skip` param was documented as "route prefixes" but the
+   implementation uses `Set.prototype.has(relPath)` (exact-string
+   match). Updated the JSDoc to say "Exact route paths" and to call
+   out the `Set.has` semantics so future edits don't introduce a
+   prefix-vs-exact ambiguity. No behaviour change.
+
+2. **`test/nova-fs-integration.test.mjs` + `test/nova-fs-tools.test.mjs`
+   inline `_novaBridgeRequest` copies.** Production grew a
+   `headersProvider` param + auth-header merge in plan §8c; these test
+   copies were intentionally trimmed but didn't say so, which made the
+   drift look accidental. Added an "INTENTIONALLY TRIMMED" header
+   comment on each that:
+     - calls out exactly what's missing (`headersProvider` + auth
+       header merge);
+     - explains why these tests don't need it (they cover handler
+       contract / route shape / never-throws);
+     - points future maintainers at where header behaviour *is*
+       covered: `test/nova-shell-handler.test.mjs`'s
+       "headersProvider …" suite, plus `test/nova-ui-wiring.test.mjs`
+       which has a regression check that the production signature
+       still includes `headersProvider`.
+
+   No code change in either test file — only the leading comment.
+
+**Hand-off notes for next session:**
+
+- Two unchecked plan items remain prominent and would each be a
+  one-PR slice:
+  - **§2b audit-log drawer / §7b "View audit log" link.** The
+    server plugin already writes `.nova-audit.log`; need a phone-side
+    drawer that fetches and renders recent entries (read-only). Plan
+    file is the source of truth for the shape.
+  - **§13 dedicated `nova-profile-swap.test.mjs`.** The plan calls
+    out the file by name; the swap chain is *already* exercised by
+    `test/nova-profile-mutex.test.mjs`, but a focused test file
+    matching the plan's name + scope would close the §13 gap.
+- `§7a/§7c` checkbox sweep: most items are already shipped but still
+  show as unchecked. A careful audit + tick-only PR would help, but
+  watch out — some unticked items are genuinely deferred (preset
+  installer button, "Install Command-X Chat Completion preset"). Do
+  not blanket-tick.
+- The `_novaBridgeRequest` inline-copy pattern in tests is now
+  documented as deliberate. If a future change makes those tests
+  *need* the header-merge branch, mirror the production signature in
+  the inline copy and update the header comment to match — don't
+  silently desync.

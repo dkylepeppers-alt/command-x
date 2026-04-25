@@ -83,6 +83,17 @@ const {
 // ============================================================
 // Inline copy of production helpers from index.js
 // (NOVA AGENT section, after `buildNovaPhoneHandlers`).
+//
+// INTENTIONALLY TRIMMED. The production `_novaBridgeRequest`
+// (index.js, NOVA AGENT section) also accepts a `headersProvider`
+// param and merges ST's `X-CSRF-Token` / session headers into
+// `init.headers` for plan §8c. This test deliberately omits that
+// branch — these tests exercise the fs *handler* contract (route
+// shape, error normalisation, never-throws), not the auth-header
+// composition, which is covered by `test/nova-shell-handler.test.mjs`
+// ("headersProvider …" suite) and `test/nova-ui-wiring.test.mjs`
+// (production-signature regression check).
+// If you need to test header propagation, do it there, not here.
 // ============================================================
 
 const NOVA_DEFAULTS = { pluginBaseUrl: '/api/plugins/nova-agent-bridge' };

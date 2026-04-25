@@ -48,10 +48,12 @@ const STATE_CHANGING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
  * @param {boolean} [opts.sessionRequired=true] — Require a populated
  *   `req.session`. Opt-out exists for self-tests that hit `/health`
  *   before a user has signed in.
- * @param {Set<string>|string[]} [opts.skip] — Route prefixes (relative
- *   to the plugin mount point, so `/health` not `/api/plugins/.../health`)
- *   that bypass both checks. Defaults to `['/health', '/manifest']`
- *   which match the extension's capability probe — those are read-only
+ * @param {Set<string>|string[]} [opts.skip] — Exact route paths
+ *   (relative to the plugin mount point, so `/health` not
+ *   `/api/plugins/.../health`) that bypass both checks. Matched with
+ *   `Set.prototype.has`, so this is exact-string equality — *not* a
+ *   prefix match. Defaults to `['/health', '/manifest']` which match
+ *   the extension's capability probe — those are read-only
  *   advertisements and must work before any user context is wired up.
  * @returns {function(req, res, next): void} Express middleware.
  */
