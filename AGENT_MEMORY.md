@@ -1984,3 +1984,114 @@ priority order:
 
 The §14 manual-validation list is the right user-facing acceptance
 gate for a v0.13.0 release tag; an agent should never tick those.
+
+---
+
+## 2026-04-25 (very final) — §4b remember-approvals toggle + §12 README rewrite
+
+**Goal of this PR:** finish the remaining agent-completable work on
+the Nova implementation per the prior session's hand-off priority list.
+The `[ ]` items the previous sweep left as "genuinely deferred" or
+"open question" stay deferred; the two well-scoped items ship here.
+
+**Shipped:**
+
+1. **§4b "Remember approvals this session" toggle** — full plumbing.
+   - **Setting**: `settings.nova.rememberApprovalsSession` was already
+     declared in `NOVA_DEFAULTS` but had no UI and no plumbing. Now
+     declared in `NOVA_SETTING_BINDINGS` as `type: 'bool'` with both
+     DOM ids wired (`cx_nova_remember_approvals` for ST's settings
+     panel, `cx-set-nova-remember-approvals` for in-phone Settings →
+     NOVA). The existing table-driven `loadSettings` / `saveSettings`
+     pipeline picks it up without bespoke handlers.
+   - **UI**: checkbox in `settings.html` under the Nova section, and
+     a `cx-toggle`-styled row in the in-phone Settings → NOVA section
+     directly under the bridge plugin URL.
+   - **Per-session state**: new module-level
+     `novaSessionApprovedTools = new Set()` plus accessor
+     `getNovaSessionApprovedTools()` and clearer
+     `clearNovaSessionApprovedTools()`. Lifecycle is documented in
+     the comment block: toggle on keeps existing entries, toggle off
+     clears, page reload starts fresh-empty, user-rejected calls
+     never get added.
+   - **Plumbing**: `novaHandleSend` now passes
+     `rememberedApprovals: nova.rememberApprovalsSession ?
+     novaSessionApprovedTools : null` into `sendNovaTurn`, which
+     forwards it to `runNovaToolDispatch`, which forwards it to
+     `novaToolGate`. The composer's `confirmApproval` callback adds
+     the tool name to the Set only when (a) the user clicked OK,
+     (b) the toggle is on, and (c) the tool has a name — reads never
+     reach this branch because the gate returns
+     `requiresApproval:false` for `read` permission upstream.
+   - **Auto-clear on toggle-off**: `saveSettings` snapshots the prior
+     `rememberApprovalsSession` boolean before applying DOM values
+     and calls `clearNovaSessionApprovedTools()` on a true→false
+     transition. So unchecking the box has the same effect as starting
+     a fresh session — every previously-remembered tool re-prompts
+     next time.
+   - **Tests**: new `test/nova-remember-approvals.test.mjs`
+     (14 assertions, 3 suites): bindings + DOM-surface + composer
+     wiring source-shape assertions, plus an inline-copy
+     behavioural contract for `novaToolGate` proving that the Set
+     short-circuits approval correctly, doesn't bypass tier-too-low
+     denial, and treats null/empty containers identically.
+
+2. **§12 README rewrite** — promote Nova from a `> **Note:**` callout
+   to a top-level section.
+   - Order is now Features → Install → Usage → **`## ✴︎ Nova Agent`**
+     → **`## Chat-Completion Preset`** → How It Works (RP messaging) →
+     Private Polling → Tag Reference → Architecture, matching the
+     plan's prescribed structure.
+   - The Features list also gained a `### ✴︎ Nova App (Agentic
+     Assistant)` subsection that cross-links to the top-level Nova
+     section.
+   - The Usage list's item 9 now points at `[Nova Agent](#-nova-agent)`
+     instead of "preview; see `docs/nova-agent-plan.md`".
+   - The new top-level Nova Agent section covers Quick start,
+     How it works (ASCII flow diagram), Permission tiers (table),
+     Soul and memory, Skills, the bridge plugin, and
+     Cancellation/errors/audit. Most prose is re-shaped from
+     `CLAUDE.md` and `docs/nova-agent-plan.md`.
+   - The new Chat-Completion Preset section documents both the
+     "Install Command-X chat-completion preset" button and the
+     manual import path, and points at `presets/openai/README.md`
+     for the field-by-field rationale.
+
+**Plan + memory updates:**
+- `docs/nova-agent-plan.md`: §4b "UI toggle still pending" → fully
+  ticked with the implementation contract; §12 README rewrite
+  ticked; banner block at the top updated to call out the
+  stabilisation sweep; new amendment appended.
+- This entry.
+
+**Validation:**
+- `node --check index.js` clean.
+- `node --test test/*.mjs` → **793/793 pass** (was 779; +14 from the
+  new file).
+- `parallel_validation` run before completing the task.
+
+**Hand-off notes for next session:**
+
+The genuinely deferred items remain deferred, by design:
+
+1. **§3c registered-path fallback** — only matters for ST builds
+   missing `ConnectionManagerRequestService` (pre-1.12.6). Current
+   `cxAlert`-and-bail is the right v0.13.0 behaviour. If a future
+   user hits this, the fix is to add a `ctx.registerFunctionTool`
+   loop in `novaHandleSend`'s textOnlyFallback branch with
+   `shouldRegister: () => true` for the duration of the turn, then
+   un-register in the `finally` block.
+2. **§10 starter-file auto-creation** — depends on the open question
+   of whether to support no-bridge soul/memory writes at all.
+   Without the bridge plugin, the `nova_write_*` handlers fail
+   gracefully today; auto-seeding the user data dir on first Nova
+   load would only matter for installs that want soul/memory to
+   work without ever installing `nova-agent-bridge`. That tradeoff
+   should be a user decision, not an agent guess.
+3. **§14 manual-validation walk-through** — permanent `[ ]` user
+   checklist; never agent-tickable. Run through it before tagging a
+   v0.13.0 release.
+
+Nothing structural is left for the v0.13.0 critical path. The next
+sensible direction is whatever the user prioritises after a release
+tag.

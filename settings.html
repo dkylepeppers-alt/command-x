@@ -101,6 +101,10 @@
                 <label for="cx_nova_plugin_base_url"><span>Bridge plugin base URL</span></label>
                 <input id="cx_nova_plugin_base_url" type="text" class="text_pole" placeholder="/api/plugins/nova-agent-bridge" />
             </div>
+            <label class="checkbox_label" for="cx_nova_remember_approvals">
+                <input id="cx_nova_remember_approvals" type="checkbox" />
+                <span>Remember approvals for the current session (skip the modal for tools you've already approved this session)</span>
+            </label>
             <div class="cx-opt">
                 <button id="cx_nova_install_preset" type="button" class="menu_button">Install Command-X chat-completion preset</button>
                 <small>Copies <code>presets/openai/Command-X.json</code> into your user presets so Nova has a known-good starting config.</small>

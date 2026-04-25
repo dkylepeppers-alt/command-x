@@ -13,11 +13,20 @@ bottom.
 > `turnTimeoutMs` clamp floor to 10000 across `novaHandleSend` /
 > `loadSettings` / UI `min`, added keyboard handlers to
 > `cxPickList` rows, and corrected the `no-handler` vs
-> `unknown-tool` dispatcher-surface comment. The only remaining
-> gaps for a "fully stocked" Nova are the `nova-agent-bridge`
-> server plugin (§8) and real handlers for `fs_*` / `shell_*` /
-> `st_*` / `phone_*` tools. See AGENT_MEMORY 2026-04-24 for the
-> full delta and next-PR checklist.
+> `unknown-tool` dispatcher-surface comment.
+>
+> **2026-04-25 (final stabilisation sweep) — §4b + §12 shipped.**
+> The "Remember approvals this session" UI toggle (§4b) is now
+> wired in both settings surfaces with full plumbing (Set →
+> dispatch → gate → settings-toggle-clears) and 14 new tests; the
+> README has been restructured (§12) to promote Nova from a
+> `> **Note:**` callout to a top-level section between Usage and
+> Tag Reference, with a new Chat-Completion Preset section
+> following. The remaining unticked items are the §3c
+> registered-path fallback (older-ST compat, low priority), the
+> §10 starter-file auto-creation (depends on the open question of
+> whether to support no-bridge writes), and the §14 manual-validation
+> walk-through (permanent user checklist, never agent-ticked).
 
 Rewrite target: replace the `openclaw` app with **Nova**, an interactive
 tool-calling agent inside the Command-X phone. Nova has full read/write access
@@ -343,8 +352,21 @@ own plugin folder by default.
 - [x] Full tier only; per-call approval unless
   "Remember approvals this session" is on — upstream gate is enforced
   by `novaToolGate` + `runNovaToolDispatch` + `cxNovaApprovalModal`,
-  and the plugin route is now live (see §8b). UI toggle for "Remember
-  approvals this session" is still pending the Phase 7 settings work.
+  and the plugin route is now live (see §8b). **UI toggle shipped**:
+  `settings.nova.rememberApprovalsSession` (boolean, default `false`)
+  is wired into `NOVA_SETTING_BINDINGS` and exposed in both the
+  ST-side settings panel (`#cx_nova_remember_approvals`) and the
+  in-phone Settings → NOVA section (`#cx-set-nova-remember-approvals`).
+  When ON, `novaHandleSend` passes the module-level
+  `novaSessionApprovedTools` Set as `rememberedApprovals` and the
+  `confirmApproval` composer adds the tool name to that Set on user
+  approval, so subsequent calls to the same tool skip the modal for
+  the rest of the page session. `saveSettings` clears the Set on a
+  true→false toggle transition so unchecking the box has the same
+  effect as starting a fresh session. Covered by
+  `test/nova-remember-approvals.test.mjs` (14 assertions across 3
+  suites: bindings/source-shape, composer wiring, gate behavioural
+  contract).
 
 ### 4c. Diff preview helper
 - [x] For every `fs_write` approval: fetch current file, render unified diff
@@ -888,11 +910,15 @@ on ST's own `default/content/presets/openai/Default.json` schema.
 
 ## 12. Documentation Updates
 
-- [ ] `README.md`: rewrite order — Features → Install → Nova Agent → Preset →
+- [x] `README.md`: rewrite order — Features → Install → Nova Agent → Preset →
   Tag Reference → Advanced.
-  *(Genuinely deferred — README has a brief Nova `> **Note:**` callout
-  but the full rewrite that promotes Nova to a top-level section is
-  out of scope for the v0.13.0 stabilisation sprint.)*
+  *(Shipped — Nova promoted from a `> **Note:**` callout to a top-level
+  `## ✴︎ Nova Agent` section between Usage and Tag Reference, with
+  Quick start / How it works / Permission tiers / Soul and memory /
+  Skills / Bridge plugin / Cancellation+audit subsections. A new
+  `## Chat-Completion Preset` section follows immediately. The
+  Features list now also has a `### ✴︎ Nova App (Agentic Assistant)`
+  subsection that cross-links to the top-level section.)*
 - [x] `docs/nova-agent-plan.md` (this file).
   *(This sweep — 2026-04-25 — is the latest update.)*
 - [x] Update `.github/copilot-instructions.md` and `CLAUDE.md`: drop OpenClaw,
@@ -1034,3 +1060,21 @@ All under `test/` using Node `--test`.
   into its `toolHandlers` arg. Pure local stores — no plugin, no
   network, no approval gate beyond the dispatcher's tier check. 485
   tests green (+39).
+- **2026-04-25 (final stabilisation)** — §4b "Remember approvals this
+  session" toggle + §12 README rewrite shipped. The Set-based
+  per-session approval cache lives module-level
+  (`novaSessionApprovedTools`), gated by
+  `settings.nova.rememberApprovalsSession`, populated by the
+  `confirmApproval` composer in `novaHandleSend` only on user
+  approval, and cleared automatically by `saveSettings` on a
+  true→false toggle transition. `NOVA_SETTING_BINDINGS` declares the
+  new boolean with both DOM ids (`cx_nova_remember_approvals` for the
+  ST settings panel, `cx-set-nova-remember-approvals` for in-phone
+  Settings → NOVA), so the existing table-driven `loadSettings` /
+  `saveSettings` pipeline picks it up automatically. README now opens
+  with Features → Install → Usage → Nova Agent → Chat-Completion
+  Preset → How It Works → Tag Reference → Architecture, matching the
+  plan's prescribed order. New test file
+  `test/nova-remember-approvals.test.mjs` (14 assertions across 3
+  suites: source-shape, composer wiring, gate behavioural contract);
+  full suite **793/793 pass**.
