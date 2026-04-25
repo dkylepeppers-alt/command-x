@@ -1675,3 +1675,145 @@ Doc-only follow-up to the §6b editor PR. Three reviewer comments on
   *need* the header-merge branch, mirror the production signature in
   the inline copy and update the header comment to match — don't
   silently desync.
+
+---
+
+## 2026-04-25 (later still still) — §2b/§7b Nova audit-log viewer
+
+**Goal of this PR:** continue the Nova rollout by shipping the next
+unblocking surface — the **audit-log viewer** (plan §2b "📜 icon —
+tailing view of persisted tool calls" + §7b "View audit log"). This
+was named in the prior session's hand-off notes as the most
+prominent remaining one-PR slice.
+
+**Why this slice (most logical, not easiest):** the data was
+*already* populated. Every tool dispatch decision (`ok`,
+`denied:*`, `error:*`, `aborted`, `cap-hit`) lands on
+`state.auditLog` (cap 500) via `appendNovaAuditLog`, so a user
+running Nova has been *generating* audit entries with **no UI to
+read them**. Without this surface, denials and dispatch errors are
+silent — that's the highest-impact gap on the §14 manual-validation
+walk-through after the Soul/Memory editor shipped.
+
+**What shipped:**
+
+- **Pure helper `buildNovaAuditLogModalBody(entries, { now, limit })`**
+  in `index.js` near `buildNovaApprovalModalBody` (parity with the
+  approval-modal pattern). Renders newest-first, capped at `limit`
+  rows (default 200, hard ceiling 500), with a header summary
+  ("Showing N of M tool call(s) (newest first)") and a footer
+  ("…N older entries hidden") when truncated. Empty state shows a
+  friendly "No tool calls recorded yet" placeholder explaining the
+  500-entry cap.
+- **Pure helper `classifyNovaAuditOutcome(outcome)`** — closed-enum
+  → severity bucket (`ok` / `warn` / `error` / `info`) used to
+  colour rows. Knows the dispatcher's exact outcome strings: `ok`
+  is green, `cap-hit` / `aborted` / `denied:*` are amber,
+  `error:*` is red, everything else (including blank / hostile
+  input) defaults to grey "info". Hardened against `Object.create(null)`
+  via try/catch around `String(...)`.
+- **Pure helper `_novaFormatAuditTimestamp(ts, { nowImpl })`** —
+  HH:MM:SS for same-day, MM/DD HH:MM:SS for older entries. Uses an
+  injectable `nowImpl` so the same-day branch is testable without
+  monkey-patching `Date.now`.
+- **DOM wrapper `openNovaAuditLogViewer()`** in `index.js` next to
+  `openNovaSoulMemoryEditor`. Mirrors that modal's pattern: reuses
+  `.cx-modal-overlay` + `.cx-modal-box`, Escape closes, click-on-
+  backdrop closes, Refresh button re-reads the in-memory log so a
+  user who leaves the modal open across a turn sees new entries.
+  Reads the log via `getNovaState(ctx).auditLog` — the same lazy
+  heal path the dispatcher uses, so a stale or malformed
+  `chatMetadata[EXT].nova` blob never crashes the modal.
+- **CSS** — new `.cx-nova-audit-*` rules in `style.css`. Severity
+  colours via `[data-sev="ok|warn|error|info"]` border-left + tinted
+  background. Monospace font for the row body to match the audit
+  log's CLI-ish nature.
+- **Settings wiring** — new `<button id="cx-set-nova-audit">📜 View
+  audit log</button>` row in the phone Settings → NOVA section,
+  immediately under the Soul/Memory editor button. Wired in
+  `wirePhone()`.
+
+**Implementation choices:**
+
+- **In-memory log, not the plugin JSONL log.** There are two audit
+  surfaces in this codebase: (1) the per-chat `state.auditLog` at
+  `chatMetadata[EXT].nova.auditLog` (capped 500), populated by
+  `runNovaToolDispatch` for *every* decision incl. denials/errors/
+  cap-hits/aborts; (2) the server-plugin `<root>/data/_nova-audit.jsonl`
+  for fs writes/deletes/moves only. The user-facing "what just
+  happened?" question is answered by (1) — it's chat-scoped,
+  always-present (no plugin required), and richer (it sees the
+  whole dispatch envelope, not just the bridge ops). The viewer
+  reads (1) only. (2) is a server-side compliance log; if a future
+  power-user surface needs it, that's a separate sprint.
+- **Modal, not drawer.** The plan calls it a "drawer" but the
+  `.cx-modal-overlay` / `.cx-modal-box` shell is what every other
+  Nova UI piece reuses (approval modal, Soul/Memory editor, picker
+  modals). Inventing a new drawer pattern for one screen would
+  add CSS surface for negligible UX win — modals fit the
+  "occasional read-only inspection" use case better than a
+  persistent drawer would.
+- **Pure-helper split.** All escape-safety + ordering + truncation
+  logic lives in `buildNovaAuditLogModalBody`, which is unit-tested
+  without JSDOM (matching the `buildNovaApprovalModalBody` precedent).
+  The DOM wrapper is intentionally thin: read state → call helper →
+  set innerHTML. Refresh button just re-runs that same path.
+- **No new tests for the DOM wrapper.** The pure builder + classifier
+  carry the escape-safety contract; the DOM wrapper is glue. This
+  matches the §6b editor's choice not to JSDOM-mock textareas.
+- **Limit clamping.** `limit` is sanitised to `[1, 500]`; non-finite
+  / non-positive falls back to the 200 default. This keeps a
+  hostile / misconfigured caller from collapsing the viewer to a
+  single row (which would defeat its purpose).
+- **`data-sev` attribute, not class, for severity.** Lets us style
+  via `[data-sev="…"]` selectors and inspect via DOM in DevTools
+  without polluting the class list. Same pattern as the Soul/Memory
+  status banner (`[data-kind="ok|warn|error"]`).
+
+**New tests:** `test/nova-audit-viewer.test.mjs` — 20 assertions
+across 7 suites covering classifier matrix (every dispatcher
+closed-enum outcome + blank/null/hostile fallbacks),
+timestamp formatting (same-day vs cross-day, non-finite input),
+empty state (real + hostile non-array input), rendering (newest-
+first ordering, severity classification per row, args-block
+elision when empty, singularisation, junk-entry resilience),
+limit / truncation (cap enforcement, footer presence/absence,
+clamp matrix for 0 / negative / huge limits), escape safety
+(hostile tool / args / outcome cannot leak `<script>`,
+`<img onerror=>`, or `</span>` markup; severity attribute is
+closed-enum-bound), and a source-shape contract that fails fast
+if any of `classifyNovaAuditOutcome`, `buildNovaAuditLogModalBody`,
+`openNovaAuditLogViewer`, the Settings button, or the wirePhone
+binding drift.
+
+**Updated tests:** `test/nova-ui-wiring.test.mjs` declares the three
+new symbols (`openNovaAuditLogViewer`, `buildNovaAuditLogModalBody`,
+`classifyNovaAuditOutcome`) in its required-functions list.
+
+**Validation:** `node --test test/*.mjs` → **747/747 pass** (was
+727; +20 new). `node -e "import('./index.js')"` clean.
+
+**§14 step that now passes:** the audit-log inspection part of
+step 9 ("Install `nova-agent-bridge` → … → audit log exists")
+— the audit log was *always* there; this PR makes it visible.
+
+**Still deferred (unchanged, and now genuinely the smallest gaps):**
+
+- §13 dedicated `nova-profile-swap.test.mjs` (chain already covered
+  by `nova-profile-mutex.test.mjs`; the file-name gap is purely
+  cosmetic).
+- §7a/§7c stale-checkbox sweep (already-shipped items still ticked
+  unchecked in the plan markdown). A careful audit + tick-only PR
+  would close these. **Watch out** — some unchecked items there are
+  *genuinely* deferred (e.g. real `/api/presets/save` install vs
+  the current download-and-instruct flow). Don't blanket-tick.
+
+**Next session recommendation:** `nova-profile-swap.test.mjs` is
+the smallest remaining slice — write a focused test file that
+mirrors the swap-and-restore chain (snapshot via `/profile`,
+swap via `/profile <name>`, restore-on-throw, mutex serialisation)
+to close the §13 gap without changing production code. After that,
+the plan's *implementation* surface is fully covered and the
+remaining work is documentation hygiene (stale-checkbox sweep,
+§12 docs alignment) and the deferred preset-installer / shell
+sandbox sprints.

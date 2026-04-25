@@ -129,8 +129,22 @@ Chat-style agent transcript. Layout (top → bottom):
   "Clear transcript"/"New session".
   *(Scaffolding: textarea + Send (disabled) + Cancel (hidden) only. "+" sheet
   deferred.)*
-- [ ] **Audit-log drawer** (via 📜 icon) — tailing view of persisted tool
+- [x] **Audit-log drawer** (via 📜 icon) — tailing view of persisted tool
   calls.
+  - **Shipped** as a modal viewer (not a separate drawer) reachable
+    from phone Settings → NOVA → "📜 View audit log". Reuses the
+    `.cx-modal-overlay` / `.cx-modal-box` shell. Reads the per-chat
+    in-memory `state.auditLog` (cap 500) populated by
+    `runNovaToolDispatch`. Pure helper `buildNovaAuditLogModalBody`
+    + `classifyNovaAuditOutcome` + `_novaFormatAuditTimestamp` +
+    DOM wrapper `openNovaAuditLogViewer` in `index.js`. Newest-first
+    ordering, severity colouring per dispatcher closed-enum
+    outcome, escape-safe rendering of hostile tool/args/outcome
+    strings. Refresh button re-reads in-memory log without closing.
+    Covered by `test/nova-audit-viewer.test.mjs` (20 assertions
+    across 7 suites). Source-shape contract added to
+    `test/nova-ui-wiring.test.mjs`. See AGENT_MEMORY 2026-04-25
+    (later still still) for the full design rationale.
 - [x] Back button exits Nova; transcript is persisted.
   *(Nav footer returns to home. Transcript persistence is Phase 3.)*
 
