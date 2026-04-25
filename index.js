@@ -8423,13 +8423,17 @@ function buildNovaFsHandlers({ pluginBaseUrl, fetchImpl } = {}) {
 const SHELL_TIMEOUT_MIN_MS = 100;
 const SHELL_TIMEOUT_MAX_MS = 300000;
 
-function buildNovaShellHandler({ pluginBaseUrl, fetchImpl } = {}) {
+function buildNovaShellHandler({ pluginBaseUrl, fetchImpl, headersProvider } = {}) {
     const base = pluginBaseUrl || (typeof settings !== 'undefined' && settings?.nova?.pluginBaseUrl) || NOVA_DEFAULTS.pluginBaseUrl;
 
     const isObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
     const safeArgs = (v) => (isObject(v) ? v : {});
+    // `headersProvider` matches the `_novaBridgeRequest` DI surface so the
+    // shipped handler factory mirrors its inline test copy and lets
+    // unit tests stub the auth-header path. When omitted, the request
+    // helper falls back to the module-level `getRequestHeaders` resolver.
     const req = (method, route, opts) => _novaBridgeRequest({
-        pluginBaseUrl: base, method, route, fetchImpl, ...opts,
+        pluginBaseUrl: base, method, route, fetchImpl, headersProvider, ...opts,
     });
 
     return {

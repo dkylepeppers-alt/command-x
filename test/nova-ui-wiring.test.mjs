@@ -183,6 +183,10 @@ test('shell_run handler is declared and wired into the dispatcher (plan §4b)', 
         'buildNovaShellHandler must export a shell_run handler');
     assert.match(factoryBody[0], /['"]\/shell\/run['"]/,
         'shell_run must POST to /shell/run');
+    // §8c: production factory must accept and forward `headersProvider`
+    // so unit tests stub the same auth-header path the shipped code uses.
+    assert.match(factoryBody[0], /headersProvider/,
+        'buildNovaShellHandler must accept and forward headersProvider');
     // novaHandleSend must merge the shell handler into the dispatch map.
     const novaHandleSend = js.match(/async function novaHandleSend\([\s\S]*?\n\}/);
     assert.ok(novaHandleSend, 'novaHandleSend body not found');
