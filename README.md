@@ -69,8 +69,8 @@ Messages flow through the RP naturally. The extension uses prompt injection so t
 - **Three permission tiers** — `read` (read-only tools), `write` (adds file/character/worldbook writes, every destructive call needs approval), and `full` (also enables the shell allow-list). Configure the default in Settings → NOVA
 - **Approval modal with diff preview** — Every write or shell call opens a modal showing the tool, the parsed arguments, and (for `fs_write`) a unified diff against the current file. Click Approve to execute, Cancel to deny
 - **Skills** — A skill pack (Character Creator, Worldbook Creator, Image Prompter, free-form helper, STscript & Regex) shapes Nova's system prompt for the task at hand
-- **Soul + memory** — Nova reads `nova/soul.md` (persona) and `nova/memory.md` (running notes) on every turn and can edit them through the same approval gate via the `nova_write_soul` / `nova_write_memory` tools
-- **Audit log** — Every dispatched tool call (approved, denied, errored) appends a JSONL line to `<root>/data/_nova-audit.jsonl` (preferred) or `<root>/_nova-audit.jsonl` (fallback) on the server side, and to the in-phone Settings → 📜 audit-log viewer (client side). Raw `content` / `data` / `payload` is **never** logged
+- **Soul + memory** — Nova reads `nova/soul.md` (persona) and `nova/memory.md` (running notes) on every turn and can edit them through the same approval gate via the `nova_write_soul`, `nova_append_memory`, and `nova_overwrite_memory` tools
+- **Audit log** — Executed bridge requests append a JSONL line to `<root>/data/_nova-audit.jsonl` (preferred) or `<root>/_nova-audit.jsonl` (fallback) on the server side, including bridge-side refusals/errors. The in-phone Settings → 📜 audit-log viewer (client side) also records approval outcomes such as user approvals/denials before dispatch. Raw `content` / `data` / `payload` is **never** logged
 - **Companion server plugin** — `server-plugin/nova-agent-bridge/` exposes scoped `/fs/*` and `/shell/run` routes. Without the plugin, only ST-API tools are available; a yellow banner in the transcript explains what's filtered.
 
 See the [Nova Agent](#-nova-agent) section below for setup.
@@ -155,7 +155,7 @@ Nova swaps to your dedicated connection profile (then restores after)
         ↓
 System prompt = base + active skill + soul.md + memory.md + tool contract
         ↓
-LLM calls back with tool_calls (e.g. `fs_read`, `st_create_character`)
+LLM calls back with tool_calls (e.g. `fs_read`, `st_write_character`)
         ↓
 Each call → tier check → approval modal (writes/shells) → handler → tool result back to LLM
         ↓
@@ -176,7 +176,7 @@ Toggle **Settings → NOVA → Remember approvals (this session)** to skip the m
 
 ### Soul and memory
 
-`nova/soul.md` and `nova/memory.md` are markdown files that get prepended to every Nova system prompt. The repo ships starter templates; the live runtime copies live under your ST install root and are edited by Nova itself through the `nova_write_soul` / `nova_write_memory` tools (approval-gated, with diff preview). Use **Settings → NOVA → 📝 Edit Soul & Memory** to edit them by hand from inside the phone.
+`nova/soul.md` and `nova/memory.md` are markdown files that get prepended to every Nova system prompt. The repo ships starter templates; the live runtime copies live under your ST install root and are edited by Nova itself through the `nova_write_soul`, `nova_read_memory`, `nova_append_memory`, and `nova_overwrite_memory` tools (approval-gated, with diff preview). Use **Settings → NOVA → 📝 Edit Soul & Memory** to edit them by hand from inside the phone.
 
 ### Skills
 

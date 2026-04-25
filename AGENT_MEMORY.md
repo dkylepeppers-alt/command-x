@@ -2125,7 +2125,14 @@ Also tightened Quick Start step 4 ("Install the bridge plugin") to point back to
 
 ### Validation
 
-Doc-only change; no build/test impact. `node --test test/*.mjs` was not re-run because nothing under `index.js` / `test/` / `server-plugin/` was touched. The new anchor `#sillytavern-prerequisites` and the existing `#private-polling` anchor both use GitHub's standard kebab-case heading slug, so the in-page links resolve.
+Scope note: this memory entry records only the README prerequisites follow-up
+commit. The broader PR also includes the earlier `index.js` / `settings.html` /
+`test/nova-remember-approvals.test.mjs` remember-approvals implementation and a
+later `server-plugin/nova-agent-bridge/README.md` documentation refresh. The new
+anchor `#sillytavern-prerequisites` and the existing `#private-polling` anchor
+both use GitHub's standard kebab-case heading slug, so the in-page links resolve.
+The full PR was later sanity-validated with `node --test test/*.mjs` (793/793
+pass) after the manual-validation/docs sweep.
 
 ---
 
@@ -2209,5 +2216,50 @@ RP-chat isolation + non-Nova phone-app smoke).
 ### Validation
 
 Doc-only changes; no `index.js`/`test/`/`server-plugin/*.js` files touched.
-`grep -r '\.nova-trash/audit\|YYYY-MM-DD\.jsonl' .` returns zero matches
-post-edit, confirming the stale path is gone everywhere.
+`grep -r '\.nova-trash/audit\|YYYY-MM-DD\.jsonl' README.md CLAUDE.md docs server-plugin`
+returns only historical mentions in `AGENT_MEMORY.md` (when included) and no
+live user-facing instructions, confirming the stale path is gone from the docs
+users follow.
+
+---
+
+## 2026-04-25 (review follow-up) — README tool names, audit wording, settings layout
+
+### Why
+
+PR review flagged several documentation/layout mismatches left over from the
+Nova docs sweep:
+
+- `README.md` still referenced non-existent `nova_write_memory` and
+  `st_create_character` names. The implemented tools are `nova_append_memory`,
+  `nova_overwrite_memory`, and `st_write_character`.
+- The README audit bullet blurred two different logs: user approval denials are
+  captured client-side in the in-phone audit viewer, but never reach the bridge
+  and therefore cannot be written to the server-side JSONL file.
+- The ST extension settings checkbox `cx_nova_remember_approvals` was missing
+  the surrounding `.cx-opt` wrapper used by neighboring controls.
+- The earlier AGENT_MEMORY validation note was scoped to a single README commit
+  but could be misread as describing the whole PR, which also includes code,
+  settings, and test changes.
+
+### Change
+
+- `README.md`: replaced `nova_write_memory` references with
+  `nova_append_memory` / `nova_overwrite_memory` (and `nova_read_memory` where
+  the section lists the read/edit tool set), changed the flow example to
+  `st_write_character`, and split audit wording into server-side executed bridge
+  requests vs client-side approval outcomes.
+- `CLAUDE.md`: kept the Nova soul/memory tool-name list aligned with README.
+- `index.js`: updated a stale helper comment that mentioned `nova_write_memory`.
+- `settings.html`: wrapped `cx_nova_remember_approvals` in `<div class="cx-opt">`
+  for the same layout structure as the surrounding controls.
+- `AGENT_MEMORY.md`: clarified the older README-prerequisites validation note so
+  future readers do not mistake it for whole-PR validation.
+
+### Validation
+
+- `rg 'nova_write_memory|st_create_character' /home/runner/work/command-x/command-x`
+  → no matches.
+- `rg '\.nova-trash/audit|YYYY-MM-DD\.jsonl' README.md CLAUDE.md docs server-plugin`
+  → no matches.
+- `node --test test/nova-remember-approvals.test.mjs` → 14/14 pass.

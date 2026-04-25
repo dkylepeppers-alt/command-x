@@ -6125,9 +6125,10 @@ async function probeNovaBridge({
    - Both files are fetched in parallel via `Promise.all`. A failure
      on one does not take down the other.
    - Result is cached in a module-level cache for
-     `NOVA_SOUL_MEMORY_TTL_MS` (5 min). `invalidateNovaSoulMemoryCache()`
-     drops the cache; callers should invoke it after a `nova_write_soul`
-     / `nova_write_memory` / "Reload soul/memory" action.
+      `NOVA_SOUL_MEMORY_TTL_MS` (5 min). `invalidateNovaSoulMemoryCache()`
+      drops the cache; callers should invoke it after a `nova_write_soul`
+      / `nova_append_memory` / `nova_overwrite_memory` / "Reload
+      soul/memory" action.
    - `fetchImpl` / `nowImpl` are injectable so
      `test/nova-soul-memory.test.mjs` can drive the helper without a
      live network or real timers.
