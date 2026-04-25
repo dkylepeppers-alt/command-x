@@ -1,0 +1,12 @@
+{"route":"/shell/run","outcome":"refused-bad-arg","argsSummary":{"cmd":"","argsCount":0},"error":"cmd-required","ts":"2026-04-25T20:30:56.714Z"}
+{"route":"/shell/run","outcome":"refused-bad-arg","argsSummary":{"cmd":"","argsCount":0},"error":"cmd-required","ts":"2026-04-25T20:31:00.170Z"}
+{"route":"/shell/run","outcome":"refused-not-allowed","argsSummary":{"cmd":"absolutely-not-a-real-binary-xyz","argsCount":0},"ts":"2026-04-25T20:31:59.821Z"}
+{"route":"/shell/run","outcome":"refused-bad-arg","argsSummary":{"cmd":"","argsCount":0},"error":"cmd-required","ts":"2026-04-25T20:31:59.827Z"}
+{"route":"/shell/run","outcome":"refused-not-allowed","argsSummary":{"cmd":"absolutely-not-a-real-binary-xyz","argsCount":0},"ts":"2026-04-25T20:34:05.561Z"}
+{"route":"/shell/run","outcome":"refused-bad-arg","argsSummary":{"cmd":"","argsCount":0},"error":"cmd-required","ts":"2026-04-25T20:34:05.568Z"}
+{"route":"/shell/run","outcome":"refused-not-allowed","argsSummary":{"cmd":"absolutely-not-a-real-binary-xyz","argsCount":0},"ts":"2026-04-25T20:35:09.000Z"}
+{"route":"/shell/run","outcome":"refused-bad-arg","argsSummary":{"cmd":"","argsCount":0},"error":"cmd-required","ts":"2026-04-25T20:35:09.014Z"}
+{"route":"/shell/run","outcome":"refused-not-allowed","argsSummary":{"cmd":"absolutely-not-a-real-binary-xyz","argsCount":0},"ts":"2026-04-25T20:35:21.916Z"}
+{"route":"/shell/run","outcome":"refused-bad-arg","argsSummary":{"cmd":"","argsCount":0},"error":"cmd-required","ts":"2026-04-25T20:35:21.926Z"}
+{"route":"/shell/run","outcome":"refused-not-allowed","argsSummary":{"cmd":"absolutely-not-a-real-binary-xyz","argsCount":0},"ts":"2026-04-25T20:37:29.219Z"}
+{"route":"/shell/run","outcome":"refused-bad-arg","argsSummary":{"cmd":"","argsCount":0},"error":"cmd-required","ts":"2026-04-25T20:37:29.227Z"}

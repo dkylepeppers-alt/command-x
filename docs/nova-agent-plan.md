@@ -340,11 +340,11 @@ own plugin folder by default.
   response passthrough, base URL handling, auth-header propagation,
   never-throws fuzz) + source-contract assertion in
   `test/nova-ui-wiring.test.mjs`.
-- [ ] Full tier only; per-call approval unless
-  "Remember approvals this session" is on — upstream gate is already
-  enforced by `novaToolGate` + `runNovaToolDispatch` +
-  `cxNovaApprovalModal`; UI toggle for "Remember approvals this session"
-  is still pending the Phase 7 settings work.
+- [x] Full tier only; per-call approval unless
+  "Remember approvals this session" is on — upstream gate is enforced
+  by `novaToolGate` + `runNovaToolDispatch` + `cxNovaApprovalModal`,
+  and the plugin route is now live (see §8b). UI toggle for "Remember
+  approvals this session" is still pending the Phase 7 settings work.
 
 ### 4c. Diff preview helper
 - [x] For every `fs_write` approval: fetch current file, render unified diff
@@ -665,9 +665,22 @@ Always concatenated into the Nova system prompt regardless of skill.
   `test/nova-fs-write.test.mjs` (23 assertions). `POST /shell/run` —
   still `501 not-implemented`; shell needs allow-list + spawn-without-shell
   + hard-timeout and lands in the next sprint.
-- [ ] `POST /shell/run` (NDJSON streaming `stdout`/`stderr`/`exit`).
-  **Route wired as `501 not-implemented` stub**; real handler blocked on
-  same.
+- [x] `POST /shell/run` — **shipped** as a single-shot JSON response
+  (final stdout/stderr/exitCode/signal/timedOut/durationMs). Allow-list
+  resolved at startup via `resolveAllowList(DEFAULT_SHELL_ALLOW)`
+  (walks `process.env.PATH`, drops missing). Spawned with
+  `shell: false` and `stdio: ['ignore','pipe','pipe']` (stdin closed).
+  Hard timeout (default 60s, clamped 100ms..5min) — SIGTERM, then
+  SIGKILL after a 500ms grace window. Per-stream output cap
+  `SHELL_OUTPUT_CAP_BYTES = 1 MB` with truncation flags surfaced in
+  the response. Audit entry per call with no raw stdout/stderr/args.
+  Manifest's `capabilities.shell_run` is `true` iff at least one
+  binary resolved on PATH. Covered by `test/nova-shell-route.test.mjs`
+  (24 assertions) + shell coverage in `test/nova-audit-redact.test.mjs`.
+  NDJSON streaming is still TODO and remains a UX nice-to-have —
+  the current JSON shape matches what `_novaBridgeRequest` can
+  consume and is sufficient for every shell tool the LLM is likely
+  to call.
 
 ### 8c. Security
 - [x] Root = `process.cwd()` by default; override via `config.yaml: root:`.
@@ -688,7 +701,15 @@ Always concatenated into the Nova system prompt regardless of skill.
   at 1 MB. `/fs/write` content capped at 20 MB via
   `FS_WRITE_HARD_CAP_BYTES` (decoded buffer length, so base64 inputs
   are clamped to the same on-disk size).
-- [ ] Shell: no `shell: true`; binaries resolved via allow-list at startup.
+- [x] Shell: no `shell: true`; binaries resolved via allow-list at startup.
+  **Shipped** — `resolveAllowList` walks `PATH` once at `init()` time,
+  building a `name → absolutePath` map. The shell handler spawns the
+  resolved absolute path (not the bare name), so a later PATH change
+  cannot redirect mid-session. `child_process.spawn(absPath, args,
+  { shell: false, stdio: ['ignore','pipe','pipe'] })` — shell-metachar
+  interpretation is disabled and stdin is closed. Names not on the
+  allow-list (or path-like names containing `/` or `\`) are refused
+  before spawn with closed-enum `command-not-allowed`.
 - [x] CSRF protection mirroring ST's header check.
   - **Shipped (plugin side):** `server-plugin/nova-agent-bridge/middleware.js`
     exports `buildNovaSecurityMiddleware({ csrfRequired?, sessionRequired?,

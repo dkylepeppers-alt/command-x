@@ -77,6 +77,51 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-25 (shell route) — `POST /shell/run` plugin route shipped (plan §4b/§8b)
+
+**Context:** Continuing the "tackle the most important tasks first, lets finish this thing" sweep. The Nova plan's biggest remaining functional gap was `/shell/run`: the extension-side `buildNovaShellHandler` factory shipped weeks ago (fully tested), the approval pipeline + tier gate + audit log all routed through it, but the plugin route itself was a 501 stub. So the LLM could see `shell_run` in the tool list (when `defaultTier:'full'`), the user could approve a call, the dispatcher could dispatch it, the `_novaBridgeRequest` would happily POST to `/shell/run` — and the plugin would always return `{ error: 'not-implemented' }`. End-to-end shell execution was the only Nova capability that was completely non-functional.
+
+**What shipped:**
+- **`server-plugin/nova-agent-bridge/routes-shell.js`** — new module exporting `createShellRunHandler({ root, normalizePath, allowList, auditLogger?, spawnImpl?, nowImpl?, realpathImpl? })`. Mirrors the `routes-fs-*` factory contract: pure CommonJS, never throws, all deps DI'd, returns `(req, res) => Promise<void>`.
+- **`server-plugin/nova-agent-bridge/index.js`** — added `resolveAllowList(names)` walking `process.env.PATH` once at `init()` time, builds a `name → absolutePath` map, drops missing binaries. The route handler spawns the *absolute path* (not the bare name) so a later PATH change can't redirect mid-session. Manifest's `capabilities.shell_run` is now `true` iff at least one allow-listed binary was found on PATH; `BASE_CAPABILITIES` (frozen) carries the static fs flags and the dynamic shell flag is merged in `init()` against the resolved allow-list.
+- **`shellAllowList` in `/manifest`** — kept as `Array<string>` (just the names of resolved binaries) NOT a `{name: path}` map, because the existing extension probe hard-checks `Array.isArray(body.shellAllowList)` (`index.js:6025`). Internal absolute paths stay inside the plugin process.
+- **Safety contract enforced by tests:**
+  - `cmd` not on the allow-list → 403 `command-not-allowed` (closed enum), audit `refused-not-allowed`.
+  - Empty/non-string `cmd` → 400 `cmd-required`, audit `refused-bad-arg`.
+  - `cwd` (when supplied) goes through the same `resolveRequestPath` pipeline as the fs routes — symlink-escape, deny-list, parent-realpath check all apply. Default cwd = root. Non-existent cwd → 400 `cwd-not-found`. cwd pointing at a file → 400 `cwd-not-a-directory`.
+  - Spawned with `spawn(absPath, args, { shell: false, stdio: ['ignore','pipe','pipe'], env: process.env, cwd: cwdAbs })`. `shell: false` is the line that matters most — it disables `/bin/sh` interpretation so shell metachars in `args` are literal. `stdio: ['ignore','pipe','pipe']` closes stdin so interactive prompts immediately EOF.
+  - Per-stream output cap `SHELL_OUTPUT_CAP_BYTES = 1 MB`. The capture helper drains streams to avoid blocking the child on backpressure but stops appending past the cap; `truncated.{stdout,stderr}` flags surface to the response and audit. Total bytes seen are also recorded (`stdoutBytes` / `stderrBytes`).
+  - Hard timeout (default 60s, clamped `[100ms, 5min]`). On timeout: SIGTERM, then SIGKILL after `SHELL_KILL_GRACE_MS = 500`. `timedOut: true` in the response, audit `outcome: 'timed-out'`. `setTimeout(...).unref?.()` so a stuck timer can't block test process exit.
+  - Audit entry per call. Outcomes: `refused-bad-arg`, `refused-not-allowed`, `refused-cwd`, `spawn-failed`, `completed`, `timed-out`. **Never logs `args` values or stdout/stderr bytes.** `argsSummary` carries `cmd` (allow-list-validated literal), `argsCount` (integer), `cwd` (resolved relative path), `timeoutMs` (clamped integer). Top-level fields: `exitCode`, `signal`, `stdoutBytes`, `stderrBytes`, `truncated`, `durationMs`. The argsSummary + entry-key allow-lists in `nova-audit-redact.test.mjs` were extended to cover these.
+- **Tests** (51 net new):
+  - `test/nova-shell-route.test.mjs` (24 assertions across 7 suites): factory shape, arg validation including the `Number([])` foot-gun in timeout coercion, cwd handling (non-existent / escapes-root / file-not-dir), fake-spawn flow asserting `shell:false` and `stdio: ['ignore','pipe','pipe']` are mandatory, real-spawn against `node` (skipped if not on PATH), output truncation, timeout → SIGTERM, audit no-leak.
+  - `test/nova-audit-redact.test.mjs` extended: 6 new shell-route subtests covering all `RAW_PAYLOADS` as both arg-vector AND stdout/stderr content. Added shell-specific keys to both `ALLOWED_ARGS_SUMMARY_KEYS` and `ALLOWED_ENTRY_KEYS` allow-lists with rationale comments.
+  - `test/nova-plugin.test.mjs` (3 updated): `/shell/run` is no longer 501 → asserts `command-not-allowed` + `cmd-required` instead. Manifest's `shellAllowList` is now the resolved-on-PATH subset (don't hard-assert `git` is present — Windows/minimal containers may legitimately be missing it). `/manifest` capability test now asserts `caps.shell_run === (shellAllowList.length > 0)` instead of a hard `false`.
+
+**What's deliberately NOT in this PR:**
+- **NDJSON streaming.** Plan §8b mentions it as the eventual target. The current `_novaBridgeRequest` is JSON-only — it does `await resp.text()` then `JSON.parse`. Rewriting the transport for streaming would be a larger architectural change AND the per-stream 1 MB cap means a single JSON response is never going to be unreasonably large. JSON-only end-to-end is enough for every shell tool the LLM is likely to invoke. Streaming is a UX nice-to-have we can land later without changing the route's input shape.
+- **"Remember approvals this session" UI toggle (plan §4b).** `settings.nova.rememberApprovalsSession` is in `NOVA_DEFAULTS` but currently dead — no UI toggle wires it, and the dispatch path doesn't read it into `rememberedApprovals`. That's a separate orthogonal slice; not blocking shell.
+- **README rewrite (plan §12).** Docs slice; orthogonal.
+
+**Non-obvious decisions to know about:**
+- **`Number(Infinity)` is finite-shaped per `typeof`** but `Number.isFinite(Infinity) === false`, so my `coerceTimeout` falls back to default rather than clamping. Initially the test asserted clamped → 300000; that was wrong. Documented this in the test (`Non-finite (including Infinity) → default, not clamped`). If you ever change this, also check `Number([])` (which IS finite, returns 0) — the explicit `typeof === 'number' || 'string'` gate is what stops `[]` and `[42]` from sneaking through.
+- **`spawn` default vs explicit `cwd`**. When the LLM doesn't supply a `cwd`, we explicitly pass `cwd: ROOT` (the plugin's resolved root). Otherwise `spawn` would inherit `process.cwd()`, which on a SillyTavern install is usually but not always the same as the configured root. Belt-and-suspenders.
+- **`BASE_CAPABILITIES` vs the dynamic `capabilities` object.** The static frozen object only carries the fs flags. The shell flag is merged in `init()` against `resolvedAllowList` and the merged object is what `/manifest` returns. Keep this split — if `BASE_CAPABILITIES.shell_run` were `false` and we tried to set it true via spread, you'd be silently overwriting a frozen prop's read view rather than overriding it on the new object. (Spread DOES override correctly; the split exists for clarity and so a test reader sees "fs is static, shell is computed".)
+- **`resolveAllowList` refuses path-like names.** Inputs containing `/` or `\` are dropped before the PATH walk. This means you can't smuggle `../some/thing` through `DEFAULT_SHELL_ALLOW`. Belt-and-suspenders since `DEFAULT_SHELL_ALLOW` is hard-coded in the plugin source.
+- **The shell route is wired even when the allow-list resolves empty.** This is intentional: a 403 `command-not-allowed` on every call is a deterministic, LLM-readable outcome that the dispatcher can recover from. A 404 (route not registered) would cascade through `_novaBridgeRequest` as a confusing `nova-bridge-error` with raw HTML. The manifest's `capabilities.shell_run: false` tells the extension to filter `shell_run` out of the tool list anyway via `filterNovaToolsByCapabilities`, so the LLM rarely sees the closed-enum error in practice — but if it does, it can recover.
+- **CSRF is already enforced** via `buildNovaSecurityMiddleware` mounted before all routes. The shell route inherits this — no special-casing.
+- **Audit entry redaction is double-gated.** Inside the route handler I never put raw args/output into the entry; AND `nova-audit-redact.test.mjs` enforces an allow-list of permitted argsSummary/entry keys. If a future handler regression sneaks `body.content` into argsSummary, the test fails loudly.
+
+**Validation:** `node --check index.js` clean; `node --check server-plugin/nova-agent-bridge/index.js` clean; `node --check server-plugin/nova-agent-bridge/routes-shell.js` clean; `node --test test/*.mjs` → **778/778 pass** (+51 net since prior 727 baseline). CodeQL: clean (no string-concat into URLs/HTML; the only new external interfaces are `spawn` (already shell:false) and `process.env.PATH` (read-only string parse with strict path validation)). Code Review: clean.
+
+**What's still outstanding on the plan (copy-forward + updated):**
+1. **"Remember approvals this session" UI toggle (§4b).** `settings.nova.rememberApprovalsSession` exists in `NOVA_DEFAULTS` but is unwired. Settings UI + dispatch-path threading.
+2. **`st_write_character` + `st_write_worldbook` real implementations** — see prior "st handlers" entry for the 4-step follow-up path.
+3. **NDJSON streaming for `/shell/run`** — the route is functional with a JSON response; streaming is a UX nice-to-have.
+4. **Rich per-turn tool-card transcript rendering** (plan §2b/§3c).
+5. **README rewrite (§12).**
+6. **Registered-tool-path fallback (§3c)** — explicitly deferred.
+
 ### 2026-04-25 — Code-review sweep (excluding server plugin) (commit pending)
 
 **Context:** Acted on the recent code review's findings except the server-plugin specifics (those will be handled in a separate sweep). Worked in priority order: P0 security/correctness → P1 perf → P2 maintainability → P3 docs.
