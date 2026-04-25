@@ -4455,12 +4455,15 @@ async function novaHandleSend() {
 
     // Build the tool handler set. Shipped today: soul/memory self-edit
     // (§6b) + phone-internal stores (§4e) + plugin-backed filesystem
-    // (§4a). Bridge-backed `shell_run` and ST-API tools (`st_*`) still
-    // dispatch to `no-handler` until their factories land.
+    // (§4a) + ST-API tools (§4d, with `st_write_character` and
+    // `st_write_worldbook` deferred — see `buildNovaStTools` header).
+    // Bridge-backed `shell_run` still dispatches to `no-handler` until
+    // its factory + plugin route land.
     const toolHandlers = {
         ...buildNovaSoulMemoryHandlers({}),
         ...buildNovaPhoneHandlers({}),
         ...buildNovaFsHandlers({}),
+        ...buildNovaStTools({}),
     };
 
     setNovaInFlight(true);
@@ -7634,6 +7637,333 @@ function buildNovaFsHandlers({ pluginBaseUrl, fetchImpl } = {}) {
             const body = { from: f, to: t };
             if (overwrite !== undefined) body.overwrite = Boolean(overwrite);
             return req('POST', '/fs/move', { body });
+        },
+    };
+}
+
+/* ----------------------------------------------------------------------
+   NOVA AGENT — SillyTavern API tool handlers (plan §4d).
+
+   `buildNovaStTools` returns the `st_*` tool handlers that read/write
+   SillyTavern's own state (characters, worldbooks, chat context,
+   connection profiles, slash commands). No plugin dependency — these
+   handlers go through `getContext()` + `executeSlashCommandsWithOptions`
+   only, so they work even when `nova-agent-bridge` isn't installed.
+
+   Scope of THIS factory (8 of 10 schemas wired):
+     - `st_list_characters`, `st_read_character`     — read `ctx.characters`
+     - `st_list_worldbooks`, `st_read_worldbook`     — slash `/world` family
+     - `st_get_context`                              — synthesise from ctx
+     - `st_run_slash`                                — executeSlashCommands
+     - `st_list_profiles`, `st_get_profile`          — `/profile-list` etc.
+
+   Deferred (returns closed-enum `{ error: 'not-implemented', hint }`):
+     - `st_write_character`, `st_write_worldbook`
+
+   Why deferred: the documented public surface for editing a character
+   card or worldbook from a third-party extension is unstable. ST has
+   internal HTTP routes (and PNG metadata re-embedding for cards) that
+   are not exposed via `getContext()` and not captured in `st-docs/`. I'd
+   rather ship a closed-enum "not-implemented" surface than a fetch
+   against speculative endpoints that might silently corrupt user data.
+   The hint directs the LLM to the existing fs_write workaround at the
+   relevant JSON path; once the correct ST API surface is known, slot
+   real handlers into the same `buildNovaStTools` factory and the
+   skill-pack guidance ("Prefer st_write_character over fs_write…") will
+   start applying without any other code changes. See AGENT_MEMORY
+   2026-04-25 (st handlers) entry for the follow-up.
+
+   Contract — mirrors `buildNovaSoulMemoryHandlers` /
+   `buildNovaPhoneHandlers` / `buildNovaFsHandlers`:
+     - Handlers NEVER throw; errors resolve to `{ error: <kind>, ... }`.
+     - Reads return the relevant collection (`characters`, `worldbooks`,
+       `profiles`, `context`) so the LLM can inspect shape directly.
+     - `st_run_slash` returns `{ ok: true, pipe }` from the slash
+       executor; on failure `{ error: 'slash-failed', message }`.
+     - All deps are DI'd so tests can pass mocks; production passes `{}`.
+
+   Injected deps (all optional):
+     - `ctxImpl`           : default = `getContext()` at handler call time
+                             (lazy — picks up chat/character changes).
+     - `executeSlashImpl`  : default = the `executeSlash` returned by
+                             `novaGetExecuteSlash()` (lazy resolution so a
+                             test can pass a fake without ST loaded).
+     - `listProfilesImpl`  : default = production `listNovaProfiles`.
+   ---------------------------------------------------------------------- */
+
+function buildNovaStTools({
+    ctxImpl,
+    executeSlashImpl,
+    listProfilesImpl,
+} = {}) {
+    const isObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
+    const safeArgs = (v) => (isObject(v) ? v : {});
+    const safeName = (v) => (typeof v === 'string' ? v.trim() : '');
+
+    // Lazy resolution: each call re-fetches ctx so the handler picks up
+    // chat / character changes mid-turn. ctxImpl can also be a function
+    // (called per invocation) or a static object (used as-is).
+    const getCtx = () => {
+        if (ctxImpl !== undefined && ctxImpl !== null) {
+            return typeof ctxImpl === 'function' ? ctxImpl() : ctxImpl;
+        }
+        return typeof getContext === 'function' ? getContext() : null;
+    };
+    const getSlash = async () => {
+        if (typeof executeSlashImpl === 'function') return executeSlashImpl;
+        if (typeof novaGetExecuteSlash === 'function') return await novaGetExecuteSlash();
+        return null;
+    };
+    const getListProfiles = () => {
+        if (typeof listProfilesImpl === 'function') return listProfilesImpl;
+        if (typeof listNovaProfiles === 'function') return listNovaProfiles;
+        return null;
+    };
+
+    // Escape a string for embedding inside a `name="…"` slash-command
+    // argument. Backslashes MUST be escaped before quotes so a value
+    // ending in `\` doesn't escape the closing quote and break the
+    // parser (e.g. `foo\` becomes `foo\\` → safe to wrap in quotes).
+    const escSlashArg = (v) => String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+
+    // Slash output normaliser: ST returns either a string pipe or
+    // `{ pipe, ... }`. Always surface a string.
+    const pipeOf = (res) => {
+        if (res && typeof res === 'object' && 'pipe' in res) return String(res.pipe ?? '');
+        if (typeof res === 'string') return res;
+        return '';
+    };
+
+    // Light card sanitiser: pulls a stable shape out of `ctx.characters[i]`
+    // for `st_list_characters` so the LLM gets a small, predictable
+    // payload (full card dump goes through `st_read_character`).
+    const summarizeCharacter = (c) => {
+        if (!isObject(c)) return null;
+        return {
+            name: typeof c.name === 'string' ? c.name : '',
+            avatar: typeof c.avatar === 'string' ? c.avatar : '',
+            description: typeof c.description === 'string'
+                ? c.description.slice(0, 280) // truncate so list payload stays small
+                : '',
+            tags: Array.isArray(c.tags) ? c.tags.slice(0, 16) : [],
+            create_date: typeof c.create_date === 'string' ? c.create_date : '',
+        };
+    };
+
+    return {
+        st_list_characters: async () => {
+            const ctx = getCtx();
+            if (!ctx) return { error: 'no-context' };
+            const list = Array.isArray(ctx.characters) ? ctx.characters : [];
+            const characters = list
+                .map(summarizeCharacter)
+                .filter(c => c && c.name);
+            return { characters, count: characters.length };
+        },
+
+        st_read_character: async (rawArgs) => {
+            const { name } = safeArgs(rawArgs);
+            const cleanName = safeName(name);
+            if (!cleanName) return { error: 'name must be a non-empty string' };
+            const ctx = getCtx();
+            if (!ctx) return { error: 'no-context' };
+            const list = Array.isArray(ctx.characters) ? ctx.characters : [];
+            const card = list.find(c => isObject(c) && c.name === cleanName);
+            if (!card) return { error: 'not-found', name: cleanName };
+            // Return the card object directly. Cards are JSON-serialisable
+            // shapes per spec v2; the LLM consumes them as JSON.
+            return { name: cleanName, card };
+        },
+
+        st_write_character: async (rawArgs) => {
+            const { name } = safeArgs(rawArgs);
+            const cleanName = safeName(name);
+            // Validate args even on the not-implemented path so the LLM
+            // gets a useful error if it sent garbage. The hint always
+            // includes the canonical fs_write workaround.
+            if (!cleanName) return { error: 'name must be a non-empty string' };
+            return {
+                error: 'not-implemented',
+                tool: 'st_write_character',
+                hint: 'st_write_character is not wired in this build. As a workaround, '
+                    + `use fs_write at SillyTavern/data/<user>/characters/${cleanName}.json `
+                    + 'with the full character-card JSON. Note: this bypasses ST\'s PNG '
+                    + 'metadata re-embed and chat-index update; restart ST or use '
+                    + '/character-list to refresh the UI.',
+            };
+        },
+
+        st_list_worldbooks: async () => {
+            // Strategy: try the slash command first. ST's `/world list`
+            // (when present) returns a pipe of JSON or newline-separated
+            // names. If it's not available, fall back to a safe empty
+            // list with a hint so the LLM knows to use fs_list against
+            // the worlds directory.
+            const exec = await getSlash();
+            if (typeof exec === 'function') {
+                try {
+                    const res = await exec('/world list');
+                    const pipe = pipeOf(res);
+                    if (pipe) {
+                        // Best-effort parse: try JSON array, then
+                        // newline-separated, then comma-separated.
+                        let names = null;
+                        try {
+                            const parsed = JSON.parse(pipe);
+                            if (Array.isArray(parsed)) names = parsed.map(String);
+                        } catch (_) { /* fall through */ }
+                        if (!names) {
+                            names = pipe.split(/\r?\n|,/).map(s => s.trim()).filter(Boolean);
+                        }
+                        return { worldbooks: names, count: names.length };
+                    }
+                } catch (_) { /* fall through to hint */ }
+            }
+            return {
+                worldbooks: [],
+                count: 0,
+                hint: 'Slash command "/world list" returned no data on this ST build. '
+                    + 'Use fs_list at SillyTavern/data/<user>/worlds/ as a fallback.',
+            };
+        },
+
+        st_read_worldbook: async (rawArgs) => {
+            const { name } = safeArgs(rawArgs);
+            const cleanName = safeName(name);
+            if (!cleanName) return { error: 'name must be a non-empty string' };
+            const exec = await getSlash();
+            if (typeof exec === 'function') {
+                try {
+                    // ST exposes `/world get name=<n>` on recent builds.
+                    // Quote the name so spaces don't trip the parser.
+                    const cmd = `/world get name="${escSlashArg(cleanName)}"`;
+                    const res = await exec(cmd);
+                    const pipe = pipeOf(res);
+                    if (pipe) {
+                        try {
+                            const parsed = JSON.parse(pipe);
+                            return { name: cleanName, book: parsed };
+                        } catch (_) {
+                            return { name: cleanName, raw: pipe.slice(0, 4000) };
+                        }
+                    }
+                } catch (_) { /* fall through */ }
+            }
+            return {
+                error: 'not-found',
+                name: cleanName,
+                hint: 'Could not retrieve worldbook via "/world get". Try fs_read at '
+                    + `SillyTavern/data/<user>/worlds/${cleanName}.json`,
+            };
+        },
+
+        st_write_worldbook: async (rawArgs) => {
+            const { name } = safeArgs(rawArgs);
+            const cleanName = safeName(name);
+            if (!cleanName) return { error: 'name must be a non-empty string' };
+            return {
+                error: 'not-implemented',
+                tool: 'st_write_worldbook',
+                hint: 'st_write_worldbook is not wired in this build. As a workaround, '
+                    + `use fs_write at SillyTavern/data/<user>/worlds/${cleanName}.json `
+                    + 'with the full worldbook JSON. Note: this bypasses ST\'s uid '
+                    + 'normalisation; restart ST or run /world list to refresh the UI.',
+            };
+        },
+
+        st_run_slash: async (rawArgs) => {
+            const { command } = safeArgs(rawArgs);
+            if (typeof command !== 'string' || !command.trim()) {
+                return { error: 'command must be a non-empty string' };
+            }
+            const exec = await getSlash();
+            if (typeof exec !== 'function') {
+                return { error: 'slash-unavailable', hint: 'executeSlashCommandsWithOptions is not exposed by this ST build.' };
+            }
+            try {
+                const res = await exec(command);
+                return { ok: true, pipe: pipeOf(res) };
+            } catch (err) {
+                return { error: 'slash-failed', message: String(err?.message || err) };
+            }
+        },
+
+        st_get_context: async (rawArgs) => {
+            const { lastN } = safeArgs(rawArgs);
+            const ctx = getCtx();
+            if (!ctx) return { error: 'no-context' };
+            // Clamp lastN per the schema (1..50, default 10).
+            const n = Number.isFinite(Number(lastN))
+                ? Math.max(1, Math.min(50, Math.floor(Number(lastN))))
+                : 10;
+            const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+            const tail = chat.slice(-n).map((m) => {
+                if (!isObject(m)) return null;
+                return {
+                    name: typeof m.name === 'string' ? m.name : '',
+                    is_user: !!m.is_user,
+                    is_system: !!m.is_system,
+                    // Truncate per-message to keep payloads tractable.
+                    mes: typeof m.mes === 'string' ? m.mes.slice(0, 4000) : '',
+                    send_date: typeof m.send_date === 'string' ? m.send_date : '',
+                };
+            }).filter(Boolean);
+            const characters = Array.isArray(ctx.characters) ? ctx.characters : [];
+            const characterIdx = typeof ctx.characterId === 'number' || typeof ctx.characterId === 'string'
+                ? Number(ctx.characterId)
+                : -1;
+            const character = (Number.isFinite(characterIdx) && characterIdx >= 0 && isObject(characters[characterIdx]))
+                ? { name: characters[characterIdx].name || '', avatar: characters[characterIdx].avatar || '' }
+                : null;
+            return {
+                persona: typeof ctx.name1 === 'string' ? ctx.name1 : '',
+                character,
+                groupId: ctx.groupId || null,
+                chatId: ctx.chatId || null,
+                messages: tail,
+                count: tail.length,
+            };
+        },
+
+        st_list_profiles: async () => {
+            const exec = await getSlash();
+            const fn = getListProfiles();
+            if (!fn) return { error: 'list-profiles-unavailable' };
+            try {
+                const res = await fn({ executeSlash: exec });
+                if (res && res.ok) {
+                    return { profiles: Array.isArray(res.profiles) ? res.profiles : [] };
+                }
+                return { error: res?.reason || 'list-profiles-failed', profiles: [] };
+            } catch (err) {
+                return { error: 'list-profiles-failed', message: String(err?.message || err) };
+            }
+        },
+
+        st_get_profile: async (rawArgs) => {
+            const { name } = safeArgs(rawArgs);
+            const cleanName = safeName(name);
+            if (!cleanName) return { error: 'name must be a non-empty string' };
+            const exec = await getSlash();
+            if (typeof exec !== 'function') {
+                return { error: 'slash-unavailable' };
+            }
+            try {
+                // Quote the profile name so embedded spaces survive parsing.
+                const cmd = `/profile-get name="${escSlashArg(cleanName)}"`;
+                const res = await exec(cmd);
+                const pipe = pipeOf(res);
+                if (!pipe) return { error: 'not-found', name: cleanName };
+                // Try JSON; otherwise return the raw pipe truncated.
+                try {
+                    const parsed = JSON.parse(pipe);
+                    return { name: cleanName, profile: parsed };
+                } catch (_) {
+                    return { name: cleanName, raw: pipe.slice(0, 4000) };
+                }
+            } catch (err) {
+                return { error: 'slash-failed', message: String(err?.message || err) };
+            }
         },
     };
 }

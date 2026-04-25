@@ -303,12 +303,14 @@ own plugin folder by default.
     (17 assertions). Modal wiring lands with Phase 3c.
 
 ### 4d. SillyTavern API tools (no plugin)
-- [x] `st_list_characters`, `st_read_character`, `st_write_character` — schemas shipped.
-- [x] `st_list_worldbooks`, `st_read_worldbook`, `st_write_worldbook` — schemas shipped.
-- [x] `st_run_slash({ command })` — schema shipped; handler calls
-  `ctx.executeSlashCommandsWithOptions` in Phase 3c.
-- [x] `st_get_context()` — schema shipped (last N msgs, character, persona).
-- [x] `st_list_profiles`, `st_get_profile` — schemas shipped.
+- [x] `st_list_characters`, `st_read_character` — schemas + handlers shipped (read `ctx.characters`).
+- [x] `st_write_character` — schema shipped; handler returns closed-enum `{ error: 'not-implemented', hint }` pointing to `fs_write` at the character JSON path. **Deferred until the correct ST internal HTTP API surface is confirmed** — see AGENT_MEMORY 2026-04-25 (st handlers) for follow-up notes.
+- [x] `st_list_worldbooks`, `st_read_worldbook` — schemas + handlers shipped (slash `/world list` and `/world get name="..."`, with JSON / newline / comma-separated pipe parsing and `fs_list` / `fs_read` fallback hints).
+- [x] `st_write_worldbook` — schema shipped; handler returns closed-enum `{ error: 'not-implemented', hint }` pointing to `fs_write` at the worldbook JSON path. **Deferred for the same reason as `st_write_character`.**
+- [x] `st_run_slash({ command })` — schema + handler shipped; handler calls `ctx.executeSlashCommandsWithOptions` and forwards `{ ok: true, pipe }` on success or `{ error: 'slash-failed' | 'slash-unavailable', ... }` otherwise.
+- [x] `st_get_context()` — schema + handler shipped (last N msgs clamped to [1..50] default 10, character, persona, chatId/groupId, per-message text truncated to 4000 chars).
+- [x] `st_list_profiles`, `st_get_profile` — schemas + handlers shipped (`/profile-list` via the existing `listNovaProfiles`, `/profile-get name="..."` for individual profiles).
+- [x] **Factory shipped** — `buildNovaStTools({ ctxImpl?, executeSlashImpl?, listProfilesImpl? })` in `index.js` NOVA AGENT section (immediately after `buildNovaFsHandlers`). Mirrors the contract of the other three Nova handler factories: never throws, closed-enum errors, all deps DI'd. `novaHandleSend` composes the factory into the dispatch `toolHandlers` map alongside `buildNovaSoulMemoryHandlers` / `buildNovaPhoneHandlers` / `buildNovaFsHandlers`. Covered by `test/nova-st-tools.test.mjs` (47 assertions across 12 suites incl. fuzzing, lastN clamping, embedded-quote escaping for slash args, deferred-write closed-enum surface) and a source-contract assertion in `test/nova-ui-wiring.test.mjs`.
 
 ### 4e. Phone-internal tools
 - [x] `phone_list_npcs`, `phone_write_npc`, `phone_list_quests`,

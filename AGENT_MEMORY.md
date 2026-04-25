@@ -77,6 +77,44 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-25 (st handlers) — Nova `st_*` tool handlers shipped (plan §4d, partial)
+
+**Context:** Continuing the plan after the review-comment audit. The prior PR's handover identified `buildNovaStTools` as the natural next slice — ST-API only, no plugin dependency. Currently every `st_*` call resolves to `{ error: 'no-handler' }` in the dispatcher; this PR ships handlers for 8 of the 10 schemas and a clearly-documented closed-enum `{ error: 'not-implemented' }` surface for the other 2.
+
+**What shipped (8 of 10 handlers wired end-to-end):**
+- `st_list_characters` — reads `ctx.characters`, returns a stable summary shape `{ name, avatar, description (truncated 280 chars), tags (capped 16), create_date }` so the list payload stays tractable. `st_read_character` then returns the full card by name.
+- `st_list_worldbooks` — calls slash `/world list` and parses the pipe as JSON array first, then newline-separated, then comma-separated. Returns `{ worldbooks, count, hint? }`. If the slash isn't available or returns an empty pipe, returns an empty list with a `fs_list` fallback hint.
+- `st_read_worldbook` — calls slash `/world get name="..."` (with embedded `"` escaped). Returns parsed JSON when possible, raw pipe truncated to 4000 chars otherwise.
+- `st_run_slash` — wraps `ctx.executeSlashCommandsWithOptions` (resolved lazily via `novaGetExecuteSlash` so a test can pass a fake without ST loaded). Forwards `{ ok: true, pipe }` on success, closed-enum `{ error: 'slash-failed' | 'slash-unavailable', ... }` otherwise.
+- `st_get_context` — synthesises a compact snapshot from `ctx.chat`, `ctx.name1`, `ctx.characterId`, `ctx.characters`, `ctx.chatId`, `ctx.groupId`. `lastN` is clamped to `[1..50]` (default 10, floors floats, falls back to 10 on non-numeric). Per-message `mes` is truncated to 4000 chars.
+- `st_list_profiles` — reuses the existing `listNovaProfiles` helper (which in turn calls `/profile-list`). Forwards `{ profiles }` on success, `{ error: <reason> }` on failure.
+- `st_get_profile` — calls slash `/profile-get name="..."`. Same JSON-or-raw-truncated-pipe pattern as `st_read_worldbook`.
+
+**What's deferred (closed-enum surface, NOT silently broken):**
+- `st_write_character` and `st_write_worldbook` — both return `{ error: 'not-implemented', tool, hint }` on valid args. The hint directs the LLM to the existing `fs_write` workaround at the character / worldbook JSON path. The skill-pack guidance ("Prefer st_write_character over fs_write…") will start applying automatically once these handlers land — no skill-pack code changes needed.
+
+**Why deferred (not "didn't get to it"):** ST's documented public surface for editing a character card or worldbook from a third-party extension is unstable. Cards have PNG metadata that has to be re-embedded after a JSON edit; worldbooks have uid normalisation. Neither is exposed via `getContext()` and neither is captured in the local `st-docs/` reference. I'd rather ship a closed-enum `not-implemented` surface than a `fetch` against speculative endpoints that might silently corrupt user data — the closed-enum surface keeps the LLM's tool contract honest (it can detect unavailability and use the workaround on the same turn) and makes it impossible for the dispatcher to misinterpret a partial write. **This is a deliberate scope cut, not a bug.** The tests assert the not-implemented shape so the next agent can replace it without grepping for the right place.
+
+**Suggested follow-up path for the deferred 2:**
+1. Confirm the correct ST internal HTTP routes — likely `/api/characters/edit` (or `/merge-attributes`) for cards and something like `/api/worldinfo/edit` for worldbooks — by reading the ST source against your installed version (different majors have moved these). Don't rely on the `st-docs/` snapshot.
+2. Check whether `getContext()` exposes `getRequestHeaders` (it does on recent builds via `ctx.getRequestHeaders?.()` — that's where the CSRF token comes from).
+3. Replace ONLY the `st_write_character` and `st_write_worldbook` handler bodies in `buildNovaStTools` (and the inline copy in `test/nova-st-tools.test.mjs`). The factory shape and DI surface don't need to change.
+4. Update the deferred-shape unit tests to cover the success path. Keep at least one `not-implemented`-shape test gated behind a "if ST API is unreachable" branch so the closed-enum fallback stays exercised.
+
+**Inline-copy convention follow-through:**
+- The unit test file `test/nova-st-tools.test.mjs` inline-copies `buildNovaStTools` per the AGENT_MEMORY convention. The inline copy uses `ctxImpl: null → null` instead of the production fallback to `getContext()` (which doesn't exist in Node `--test`), and `executeSlashImpl: null → null` instead of falling back to `novaGetExecuteSlash`. Production source uses the real fallbacks. **When you edit the production helper, mirror the edit into the inline copy** — but don't try to "normalise" the fallback paths; making them match would either pull `getContext` into Node tests (impossible) or push the lazy fallback out of production (loses functionality).
+- The 12-handler fuzz suite walks every handler against `[undefined, null, 0, 1, '', 'a', true, false, NaN, [], ['x'], {}, { name: null }, { name: 0 }]` and asserts no throws + a known result shape (any of `error | ok | characters | worldbooks | profiles | character | book | persona | count | messages | card | profile | raw | name`). When you add a handler or change a return shape, extend the assertion list.
+
+**Validation:** `node --check index.js` clean; `node --test test/*.mjs` → **597/597 pass** (+48 net since prior baseline at 549: 47 new st-tools unit assertions + 1 new ui-wiring source-contract assertion).
+
+**What's still outstanding on the plan (copy-forward):**
+1. **`st_write_character` + `st_write_worldbook` real implementations** — see "Suggested follow-up path" above.
+2. **`/shell/run` plugin route** (still 501 stub). Once the route lands, a `buildNovaShellHandler` factory (single tool) slots in next to the other three. Plan text: `spawn(cmd, args, { shell: false })` + allow-list resolution + stdin disabled + per-request timeout (default 60 s, hard cap 5 min) + stdout/stderr size caps + audit entry.
+3. Rich per-turn tool-card transcript rendering (plan §2b/§3c).
+4. Diff preview in approval path: composer-side `fs_read` → `buildNovaUnifiedDiff` → `cxNovaApprovalModal`. **All three pieces exist** — `fs_read` has a real handler, `buildNovaUnifiedDiff` was shipped earlier, `cxNovaApprovalModal` already accepts a `diffText` arg. Wiring is just an `if (tool === 'fs_write') { ... }` branch in the composer before calling `confirmApproval`. Don't teach the dispatcher to read the filesystem itself.
+5. Plugin CSRF + session-cookie check on every route (plan §8c).
+6. Plan checkbox refresh pass (cosmetic).
+
 ### 2026-04-25 — Review-comment audit + missed CSS regression fix (PR #16 fallout)
 
 **Why this entry exists:** The user pushed back two sessions in a row that I'd been brushing off review comments — first on the fs-tools PR ("if the comment needs to be addressed, then address it"), then more broadly ("that worries me that this is something you've been doing the entire project"). Rather than reassure them, I audited every merged PR's review threads against the current source. They were right to worry: most review feedback HAS been addressed in follow-ups (just never marked resolved on GitHub, which is its own bad habit), but **one real regression slipped through and was sitting in the shipped code for two days**:

@@ -124,6 +124,30 @@ test('Nova filesystem tool handlers factory is exported and wired', async () => 
         'novaHandleSend must compose buildNovaFsHandlers into the toolHandlers map');
 });
 
+test('Nova ST-API tool handlers factory is exported and wired', async () => {
+    const { js } = await loadSources();
+    assert.match(js, /function buildNovaStTools\(/);
+    for (const name of [
+        'st_list_characters',
+        'st_read_character',
+        'st_write_character',
+        'st_list_worldbooks',
+        'st_read_worldbook',
+        'st_write_worldbook',
+        'st_run_slash',
+        'st_get_context',
+        'st_list_profiles',
+        'st_get_profile',
+    ]) {
+        assert.match(js, new RegExp(`\\b${name}\\b`), `Missing st handler key ${name}`);
+    }
+    // novaHandleSend must merge the st handlers into the tool handler set.
+    const novaHandleSend = js.match(/async function novaHandleSend\([\s\S]*?\n\}/);
+    assert.ok(novaHandleSend, 'novaHandleSend body not found');
+    assert.match(novaHandleSend[0], /buildNovaStTools\(/,
+        'novaHandleSend must compose buildNovaStTools into the toolHandlers map');
+});
+
 test('Profile-swap helpers are wired to the slash executor', async () => {
     const { js } = await loadSources();
     assert.match(js, /function listNovaProfiles\(/);
