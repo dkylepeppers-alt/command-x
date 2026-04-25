@@ -8443,20 +8443,43 @@ jQuery(async () => {
                     return;
                 }
                 const preset = await resp.json();
-                // Best-effort install: use the documented ST slash command.
-                if (typeof ctx?.executeSlashCommandsWithOptions === 'function') {
-                    // The /preset slash only selects by name; actual preset-save
-                    // in ST is done through the UI or direct file write. We
-                    // offer the user a text prompt they can paste for now, and
-                    // log the JSON to console so a power-user can persist it.
-                    console.log(`[${EXT}] Command-X preset JSON:`, preset);
-                    await cxAlert(
-                        'Preset JSON loaded and logged to DevTools console. To install it permanently: open SillyTavern → API Connections → Preset settings → Import, and paste the JSON from the console.',
-                        'Nova preset',
-                    );
-                } else {
-                    await cxAlert('Slash executor unavailable — preset logged to console.', 'Nova');
-                }
+                // ST has no documented programmatic preset-save endpoint, so
+                // we deliver the bundled preset two ways for the user to feed
+                // into ST's standard Preset → Import button:
+                //   1. Trigger a file download of `Command-X.json`
+                //   2. Best-effort copy the JSON text to the clipboard
+                // Both are best-effort; we always log the JSON as a final
+                // fallback so power-users can grab it from DevTools.
+                const presetJson = JSON.stringify(preset, null, 2);
+                let downloaded = false;
+                try {
+                    const blob = new Blob([presetJson], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = 'Command-X.json';
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    // Revoke on next tick so the click has time to start the download.
+                    setTimeout(() => URL.revokeObjectURL(url), 1000);
+                    downloaded = true;
+                } catch (_) { /* download unsupported — fall through */ }
+                let copied = false;
+                try {
+                    if (navigator?.clipboard?.writeText) {
+                        await navigator.clipboard.writeText(presetJson);
+                        copied = true;
+                    }
+                } catch (_) { /* clipboard blocked — fall through */ }
+                console.log(`[${EXT}] Command-X preset JSON:`, preset);
+                const lines = [];
+                if (downloaded) lines.push('• Saved Command-X.json to your downloads folder.');
+                if (copied) lines.push('• Copied the preset JSON to your clipboard.');
+                if (!downloaded && !copied) lines.push('• Preset JSON logged to the DevTools console.');
+                lines.push('');
+                lines.push('To finish installing: open SillyTavern → API Connections → Chat Completion preset → click the import (📥) button next to the preset dropdown, then select Command-X.json (or paste the JSON).');
+                await cxAlert(lines.join('\n'), 'Nova preset');
             } catch (err) {
                 await cxAlert(`Preset install failed: ${err?.message || err}`, 'Nova');
             } finally {

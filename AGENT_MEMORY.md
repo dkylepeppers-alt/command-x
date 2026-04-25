@@ -1434,3 +1434,84 @@ This session shipped the end-to-end wiring so Nova is usable today.
 **Validation:** `node --check index.js` clean; `node --test test/` →
 **369/369 pass** (+48 new: 21 self-edit, 16 profile-swap, 11 wiring;
 the existing scaffolding test was updated, not deleted, so net = +48).
+
+---
+
+## 2026-04-25 — Plan execution policy + §11 preset install upgrade
+
+**Why this entry:** prior sessions tended to "tick stale checkboxes"
+in `docs/nova-agent-plan.md` rather than ship user-visible §14 wins.
+This PR establishes a policy and ships one concrete §14-step-4
+improvement.
+
+**Policy for future "continue working the plan" sessions:**
+
+1. The single metric for session success is "at least one previously-
+   failing §14 manual-validation step now passes." Box-ticking and
+   new test files are not metrics.
+2. Read §14 top-to-bottom, find the earliest failing step, trace it
+   back to its §0–§13 work items, ship those as a coherent unit.
+3. The plan markdown is **stale**. Always source-read before
+   assuming an item is or isn't shipped. Many §0/§1 OpenClaw-removal
+   items are already shipped — they're just unchecked.
+4. Order of remaining work (rationale in PR description):
+   audit §3c → ship §11 → ship §2c+§9 as a unit → §6b Soul/Memory
+   editor → §2b audit drawer → stale-checkbox sweep last.
+
+**Audit findings this session (verified by source-read, not box-tick):**
+
+- §3c tool-call wiring: shipped via `buildNovaSendRequest`; both
+  `ConnectionManagerRequestService.sendRequest` and `generateRaw`
+  fallback paths exist and are tested.
+- §2c profile picker modal: shipped via `novaPickProfile` +
+  `cxPickList`. Reuses the cxConfirm modal shell.
+- §9 setup card + swap mutex + transcript feedback: shipped. The
+  empty-state already branches on `!nova.profileName` to show "Pick
+  a connection profile". `withNovaProfileMutex` serializes swaps;
+  "🔌 Restored profile to …" lines are appended on completion.
+
+**§11 preset install — what changed:**
+
+The handler at `index.js:8432` (`#cx_nova_install_preset` click)
+previously fetched the bundled `presets/openai/Command-X.json` and
+told the user to *open DevTools, copy the logged JSON, and paste it
+into ST's Preset Import dialog*. That's not really "installing".
+
+ST has no documented programmatic preset-save endpoint, so a "real"
+install would have to POST to an undocumented `/api/presets/save`
+that varies by version — too fragile. Instead the handler now:
+
+1. Triggers a Blob download of `Command-X.json` via a hidden anchor
+   (`URL.createObjectURL` + `a.click()` + `revokeObjectURL` on next
+   tick).
+2. Best-effort copies the JSON to the clipboard via
+   `navigator.clipboard.writeText`.
+3. Always logs the JSON to console as a final fallback.
+4. Shows a `cxAlert` summarising which of {downloaded, copied,
+   logged} actually succeeded, plus explicit instructions pointing
+   at ST's Preset Import button (the 📥 icon next to the preset
+   dropdown in API Connections → Chat Completion).
+
+Both the download and clipboard paths are wrapped in try/catch so a
+failure in either still leaves the user with the console fallback
+and a working alert.
+
+**§14 step that now passes:** step 4 — "Install preset via the
+Settings button → preset appears in ST". The user can now: click
+the button → file downloads → click Preset Import in ST → select
+the file. No DevTools needed.
+
+**Validation:** `node --test test/*.mjs` → **727/727 pass** (no test
+changes — this is a UI/UX-only change in a click handler that has no
+unit-test coverage and would be flaky to test via jsdom because of
+`URL.createObjectURL` and clipboard APIs).
+
+**Still deferred (unchanged from prior entry):**
+
+- §6b in-phone Soul/Memory editor pane. Backing tools and
+  `loadNovaSoulMemory`/`buildNovaSoulMemoryHandlers` exist and are
+  tested; only the in-phone Settings UI pane is missing. **Next
+  session's most logical target.**
+- §2b audit-log drawer.
+- §13 dedicated `nova-profile-swap.test.mjs` (existing coverage in
+  `nova-profile-mutex.test.mjs` already exercises the chain).
