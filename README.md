@@ -124,12 +124,26 @@ Refresh SillyTavern.
 
 Nova is a tool-calling assistant that lives inside the phone. It talks to your LLM through a dedicated chat-completion connection profile and dispatches **approval-gated tool calls** against the SillyTavern frontend, your install directory, and (optionally) a sandboxed shell — all without polluting your roleplay chat.
 
+### SillyTavern prerequisites
+
+Before configuring Nova in the phone, make sure your SillyTavern install has the following:
+
+1. **SillyTavern 1.12.6 or newer.** Nova relies on `ConnectionManagerRequestService`, `isToolCallingSupported()`, and the built-in Connection Profiles, all of which landed in 1.12.6. Older builds will load the extension but Nova will refuse to dispatch a turn and surface an explanatory alert.
+2. **A tool-calling-capable chat completion source.** OpenAI, Anthropic (Claude), Google (Gemini), and OpenRouter all qualify; pick the source on your connection profile and confirm the model you're using supports function/tool calls. Sources without tool-calling support fall back to a text-only mode (the transcript shows a yellow `⚠︎ Text-only mode` notice and tool calls are disabled for that turn).
+3. **Connection Profiles enabled.** This is a built-in ST extension and is on by default; verify under **Extensions** that it isn't disabled. Nova uses it to swap to a dedicated profile for each turn and restore your previous one afterwards.
+4. **(Optional, bridge plugin only) Server plugins enabled.** If you want filesystem/shell tools, add this line to the `config.yaml` at the root of your SillyTavern install **before** restarting:
+   ```yaml
+   enableServerPlugins: true
+   ```
+   Without this, ST will not load any server plugin (including `nova-agent-bridge`) and Nova will run with the ST-API-only tool subset. See [`server-plugin/nova-agent-bridge/README.md`](server-plugin/nova-agent-bridge/README.md) for the full bridge install walkthrough.
+5. **(Optional, Private Polling only) `generateQuietPrompt` available.** Shipped in ST 1.12.10+ — see the [Private Polling](#private-polling) section.
+
 ### Quick start
 
 1. **Install the chat-completion preset** — Open the ST extensions panel for Command-X Phone, scroll to **✴︎ Nova Agent**, and click **Install Command-X chat-completion preset**. This copies `presets/openai/Command-X.json` into your user presets so Nova has a known-good starting config (`temperature` 0.7, `tool_choice: 'auto'`, sane stop tokens, `wi_format` aligned with ST's defaults). Switch the model to whatever provider you use.
 2. **Pick a connection profile** — In ST, create a connection profile that points at a chat-completion source supporting tool calling (OpenAI, Claude, Gemini, OpenRouter, etc.) and apply the preset above. Then in the phone, tap **Settings → NOVA → Connection profile** and enter the profile name.
 3. **Pick a default tier** — `read` (safe, read-only), `write` (adds file/character/worldbook writes, approval-gated), or `full` (also enables shell). Start with `read`.
-4. **(Optional) Install the bridge plugin** — Drop `server-plugin/nova-agent-bridge/` into your SillyTavern `plugins/` directory and restart ST to enable filesystem and shell tools. Without it, Nova still works but only with ST-API tools (characters, worldbooks, slash commands, etc.).
+4. **(Optional) Install the bridge plugin** — Make sure `enableServerPlugins: true` is set in your ST `config.yaml` (see [SillyTavern prerequisites](#sillytavern-prerequisites) above), drop `server-plugin/nova-agent-bridge/` into your SillyTavern `plugins/` directory, and restart ST to enable filesystem and shell tools. Without it, Nova still works but only with ST-API tools (characters, worldbooks, slash commands, etc.).
 5. **Open the Nova app** in the phone, type a request, and hit send. Reads run silently; writes and shell calls open an approval modal with a diff preview before executing.
 
 ### How it works

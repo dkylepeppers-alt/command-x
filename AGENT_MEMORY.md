@@ -2095,3 +2095,35 @@ The genuinely deferred items remain deferred, by design:
 Nothing structural is left for the v0.13.0 critical path. The next
 sensible direction is whatever the user prioritises after a release
 tag.
+
+---
+
+## 2026-04-25 — README: SillyTavern prerequisites for Nova
+
+### Why
+
+`server-plugin/nova-agent-bridge/README.md` documents `enableServerPlugins: true` but the **main** `README.md` did not — a user could follow the Nova Quick Start, drop the plugin into `plugins/`, restart, and have it silently ignored. Also, the minimum ST version (1.12.6+) and the
+tool-calling-source requirement were only mentioned in passing in step 2 of the Quick Start, with no consolidated "what does my ST install need before I touch the phone" answer.
+
+### Change
+
+Added a `### SillyTavern prerequisites` subsection under `## ✴︎ Nova Agent` (just before the existing Quick Start). Five numbered items:
+
+1. ST 1.12.6+ (for `ConnectionManagerRequestService`, `isToolCallingSupported`, Connection Profiles).
+2. A tool-calling-capable chat completion source — OpenAI / Claude / Gemini / OpenRouter; describes the text-only-mode fallback when the source can't tool-call.
+3. Connection Profiles enabled (built-in ST extension, on by default; verify it isn't disabled).
+4. (Optional, bridge plugin only) `enableServerPlugins: true` in `config.yaml` — with the full code-fenced YAML snippet, and a cross-link to the bridge plugin README for the rest of the install walkthrough.
+5. (Optional, Private Polling only) `generateQuietPrompt` available (1.12.10+) — cross-links to the existing Private Polling section.
+
+Also tightened Quick Start step 4 ("Install the bridge plugin") to point back to the prereq for the `enableServerPlugins` requirement instead of just saying "drop in and restart."
+
+### Why this minimal shape
+
+- No duplication: `enableServerPlugins` install detail lives in `server-plugin/nova-agent-bridge/README.md`; the main README only states the requirement and links there.
+- Doesn't redefine the Private Polling requirement — just cross-links so the version number lives in one place.
+- Doesn't gate the rest of the README behind these prereqs; everything except Nova is unaffected by them.
+
+### Validation
+
+Doc-only change; no build/test impact. `node --test test/*.mjs` was not re-run because nothing under `index.js` / `test/` / `server-plugin/` was touched. The new anchor `#sillytavern-prerequisites` and the existing `#private-polling` anchor both use GitHub's standard kebab-case heading slug, so the in-page links resolve.
+
