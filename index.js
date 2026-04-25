@@ -3511,7 +3511,7 @@ function buildPhone() {
                     <div class="cx-chat-header-status" id="cx-chat-status"></div>
                 </div>
                 <div class="cx-neural-toggle" id="cx-neural-toggle" role="button" tabindex="0" aria-pressed="false" aria-label="Toggle neural commands" title="Toggle neural commands">⚡</div>
-                <div class="cx-batch-toggle ${settings.batchMode ? 'cx-batch-active' : ''}" id="cx-batch-toggle" role="button" tabindex="0" aria-pressed="${settings.batchMode}" aria-label="Toggle batch mode" title="Toggle batch mode (queue texts)">📋</div>
+                <div class="cx-batch-toggle ${settings.batchMode ? 'cx-batch-active' : ''}" id="cx-batch-toggle" role="button" tabindex="0" aria-pressed="${escAttr(String(!!settings.batchMode))}" aria-label="Toggle batch mode" title="Toggle batch mode (queue texts)">📋</div>
             </div>
             <div class="cx-messages" id="cx-msg-area"></div>
             <div class="cx-cmd-drawer cx-hidden" id="cx-cmd-drawer">
