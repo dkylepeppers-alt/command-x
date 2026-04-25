@@ -70,7 +70,7 @@ Messages flow through the RP naturally. The extension uses prompt injection so t
 - **Approval modal with diff preview** — Every write or shell call opens a modal showing the tool, the parsed arguments, and (for `fs_write`) a unified diff against the current file. Click Approve to execute, Cancel to deny
 - **Skills** — A skill pack (Character Creator, Worldbook Creator, Image Prompter, free-form helper, STscript & Regex) shapes Nova's system prompt for the task at hand
 - **Soul + memory** — Nova reads `nova/soul.md` (persona) and `nova/memory.md` (running notes) on every turn and can edit them through the same approval gate via the `nova_write_soul` / `nova_write_memory` tools
-- **Audit log** — Every dispatched tool call (approved, denied, errored) appends a JSONL line under `<root>/.nova-trash/audit/` (server side) and to the in-phone Settings → 📜 audit-log viewer (client side). Raw `content` / `data` / `payload` is **never** logged
+- **Audit log** — Every dispatched tool call (approved, denied, errored) appends a JSONL line to `<root>/data/_nova-audit.jsonl` (preferred) or `<root>/_nova-audit.jsonl` (fallback) on the server side, and to the in-phone Settings → 📜 audit-log viewer (client side). Raw `content` / `data` / `payload` is **never** logged
 - **Companion server plugin** — `server-plugin/nova-agent-bridge/` exposes scoped `/fs/*` and `/shell/run` routes. Without the plugin, only ST-API tools are available; a yellow banner in the transcript explains what's filtered.
 
 See the [Nova Agent](#-nova-agent) section below for setup.
@@ -204,7 +204,7 @@ Every state-changing route requires the `x-csrf-token` header (the extension pro
 
 - **Cancel** — The Nova view's cancel button calls `.abort()` on the live `AbortController`. The dispatcher checks the signal between every tool call and round, the LLM request is interrupted, and the connection profile is restored.
 - **Errors** — Tool handler exceptions surface as a `role:'tool'` message containing `{ error: <message> }` so the LLM can recover or apologise. The transcript shows a red card.
-- **Audit log** — In-phone: **Settings → NOVA → 📜 View audit log**. Server-side: `<root>/.nova-trash/audit/audit-YYYY-MM-DD.jsonl`.
+- **Audit log** — In-phone: **Settings → NOVA → 📜 View audit log**. Server-side: `<root>/data/_nova-audit.jsonl` (or `<root>/_nova-audit.jsonl` if no `data/` dir).
 
 For the full status / remaining-work list, see [`docs/nova-agent-plan.md`](docs/nova-agent-plan.md).
 

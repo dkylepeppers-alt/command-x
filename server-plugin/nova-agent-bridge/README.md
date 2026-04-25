@@ -6,19 +6,20 @@ SillyTavern **server plugin** companion for the Command-X Nova agent. Provides t
 
 ## Status
 
-**Filesystem-complete.** This sprint ships the write routes + audit log. Shell is still pending.
+**Feature-complete for v0.13.0.** Filesystem (read + write) and shell are all shipped.
 
 - `init` / `exit` / `info` exports matching the ST plugin contract.
 - `GET /api/plugins/nova-agent-bridge/manifest` — reports version, configured root, shell allow-list, audit log path, and per-capability implementation status.
 - `GET /api/plugins/nova-agent-bridge/health` — liveness probe.
 - **Implemented filesystem:**
-  - `GET /fs/list`, `GET /fs/read`, `GET /fs/stat`, `POST /fs/search` (read-only, shipped in the previous sprint).
-  - `POST /fs/write`, `POST /fs/delete`, `POST /fs/move` (new). Writes back existing files up to `.nova-trash/<ts>/<path>` before overwrite. Deletes never hard-unlink — they move to trash so an agent mistake is always recoverable. Moves refuse to clobber by default.
-- **Audit log:** every write / delete / move appends a newline-terminated JSON line to `SillyTavern/data/_nova-audit.jsonl` (or `<root>/_nova-audit.jsonl` if no `data/` dir). Schema: `{ ts, route, outcome, argsSummary, bytes?, backup?, error? }`. Raw content is NEVER logged — top-level and nested `content` / `data` / `payload` / `body` / `raw` keys are always stripped.
-- **Still pending (501 Not Implemented):** `POST /shell/run`. Needs spawn-without-shell + allow-list + hard-timeout; lands next sprint.
+  - `GET /fs/list`, `GET /fs/read`, `GET /fs/stat`, `POST /fs/search` — read-only.
+  - `POST /fs/write`, `POST /fs/delete`, `POST /fs/move` — destructive routes. Writes back existing files up to `.nova-trash/<ts>/<path>` before overwrite. Deletes never hard-unlink — they move to trash so an agent mistake is always recoverable. Moves refuse to clobber by default.
+- **Implemented shell:** `POST /shell/run` — single-shot, no-shell `child_process.spawn` against an allow-list resolved at startup (default: `node`, `npm`, `git`, `python`, `python3`, `grep`, `rg`, `ls`, `cat`, `head`, `tail`, `wc`, `find`). Hard timeout (default 60s, hard cap 5min), stdin closed, 1 MB per-stream output cap. The manifest reports `capabilities.shell_run: true` only when at least one allow-list binary resolves on `PATH`; otherwise the route refuses with `outcome: "refused-not-allowed"`.
+- **Audit log:** every write / delete / move / shell call appends a newline-terminated JSON line to `<root>/data/_nova-audit.jsonl` (preferred) or `<root>/_nova-audit.jsonl` (fallback when no `data/` dir exists). Schema: `{ ts, route, outcome, argsSummary, bytes?, backup?, error? }`. Raw content is NEVER logged — top-level and nested `content` / `data` / `payload` / `body` / `raw` keys are always stripped.
 - `paths.js` — pure path-safety helper (normalise + containment check + deny-list).
-- `routes-fs-read.js` — read-only handlers + shared `resolveRequestPath` (realpath-reverify).
+- `routes-fs-read.js` — read-only handlers + shared `resolveRequestPath` (realpath-reverify, including parent-realpath walk for non-existent write targets so symlink-escape attempts are caught before any fs call).
 - `routes-fs-write.js` — write/delete/move handlers + `moveToTrash` helper.
+- `routes-shell.js` — shell-run handler.
 - `audit.js` — append-only JSONL audit logger factory.
 
 ## Install
@@ -42,9 +43,9 @@ SillyTavern **server plugin** companion for the Command-X Nova agent. Provides t
 
 - Every request path is normalised via `paths.js::normalizeNovaPath` against the configured root. Escape attempts (`..`, absolute paths that land outside the root, null bytes) are rejected before any fs call.
 - Deny-list denies any path segment equal to `.git` or `node_modules`, and any `plugins/nova-agent-bridge/**` subtree.
-- Symlink-escape protection (via `fs.realpath`) is layered on top at request-time once the fs handlers land.
-- Shell invocations will use `spawn` without `shell: true`, resolve the binary against a static allow-list (`node`, `npm`, `git`, `python`, `python3`, `grep`, `rg`, `ls`, `cat`, `head`, `tail`, `wc`, `find` by default), and enforce a hard timeout (default 60 s).
-- All writes and shell invocations will be append-logged to `SillyTavern/data/_nova-audit.jsonl`. Raw file content is **never** logged — only `{ ts, user, route, argsSummary, outcome, bytes }`.
+- Symlink-escape protection (via `fs.realpath`) is layered on top at request time, including a parent-realpath walk for non-existent write targets so a symlink in an intermediate directory cannot redirect the write outside the root.
+- Shell invocations use `spawn` without `shell: true`, resolve the binary against a static allow-list (`node`, `npm`, `git`, `python`, `python3`, `grep`, `rg`, `ls`, `cat`, `head`, `tail`, `wc`, `find` by default) at init time and spawn the absolute path (so a later `PATH` change cannot redirect mid-session), and enforce a hard timeout (default 60s, hard cap 5min, hard min 100ms).
+- All writes and shell invocations are append-logged to `<root>/data/_nova-audit.jsonl` (or `<root>/_nova-audit.jsonl` if no `data/` dir). Raw file content and shell-arg values are **never** logged — only `{ ts, route, argsSummary, outcome, bytes? }`.
 
 ## License
 

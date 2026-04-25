@@ -2127,3 +2127,87 @@ Also tightened Quick Start step 4 ("Install the bridge plugin") to point back to
 
 Doc-only change; no build/test impact. `node --test test/*.mjs` was not re-run because nothing under `index.js` / `test/` / `server-plugin/` was touched. The new anchor `#sillytavern-prerequisites` and the existing `#private-polling` anchor both use GitHub's standard kebab-case heading slug, so the in-page links resolve.
 
+---
+
+## 2026-04-25 (later) — Manual-validation extracted to a standalone file + final docs housekeeping
+
+### Why
+
+The `docs/nova-agent-plan.md` §14 walk-through was sparse (12 bullets, mid-plan)
+and had two real bugs: step 6 said the Character-Creator turn would propose
+`fs_write`, but the canonical write path for that skill is `st_write_character`
+(`index.js:7763`); and step 10 quoted the audit-log path as
+`<root>/.nova-trash/audit/audit-YYYY-MM-DD.jsonl`, which never existed in
+the shipped code. The actual path (per `audit.js` + `index.js::resolveAuditLogPath`)
+is a single append-only file at `<root>/data/_nova-audit.jsonl` (preferred) or
+`<root>/_nova-audit.jsonl` (fallback when no `data/` dir exists). The same wrong
+path was duplicated in the root `README.md` and in `CLAUDE.md`.
+
+The user wants to load SillyTavern and walk through this checklist via a CLI,
+so it needs to be (a) standalone (no flipping between docs), (b) 100% accurate
+against the shipped UI labels and on-disk paths, and (c) complete (preconditions
++ every shipped tool path + bridge install/uninstall + audit + cancellation +
+RP-chat isolation + non-Nova phone-app smoke).
+
+### What shipped
+
+1. **`docs/MANUAL_VALIDATION.md` (new, standalone, canonical)** — 15 phases
+   (§0 Preconditions through §O Tagging the release). Every UI label, button
+   id, file path, console string, and tool name is quoted verbatim from the
+   v0.13.0 source. Designed to be readable top-to-bottom in `less` /
+   `glow` / `cat` without flipping between files.
+   - §0 Preconditions explicitly calls out `enableServerPlugins: true` so a
+     user does not silently get a no-op bridge install in §H.
+   - §D fixes the Character-Creator step to point at `st_write_character`
+     (canonical write path), with an *Optional bridge variant* note for the
+     `fs_write` + diff-preview path that some agents may pick instead.
+   - §I quotes the correct audit-log path and explicitly says it is a single
+     file, not a directory.
+   - §J adds an explicit shell-allow-list refusal step (`rm` not on the
+     allow-list → `outcome: "refused-not-allowed"`) so the deny path is
+     observed, not just the happy path.
+   - §K adds a graceful-degradation step (uninstall bridge → ST-API subset
+     still works + yellow banner shows) that the old §14 had as a one-liner.
+   - §N adds a non-Nova phone-app smoke (Command-X messages, neural toggle,
+     Profiles, Quests, Map, Private polling) so a v0.13.0 release does not
+     ship with a regression in the rest of the phone — the old §14 had
+     none of this.
+
+2. **`docs/nova-agent-plan.md` §14** — replaced the inline 12-bullet checklist
+   with a one-paragraph pointer at `MANUAL_VALIDATION.md` and a "do not
+   duplicate" note. Single source of truth.
+
+3. **Audit-log path corrected in three places** (the main user-facing locations
+   that previously had the bogus `.nova-trash/audit/audit-YYYY-MM-DD.jsonl`
+   path):
+   - `README.md` (root) — Nova-app feature bullet + Cancellation/errors/audit
+     section.
+   - `CLAUDE.md` — Nova Agent §Audit bullet.
+   - (`docs/MANUAL_VALIDATION.md` is correct on first write.)
+
+4. **`server-plugin/nova-agent-bridge/README.md` Status section refresh**
+   — shell route is no longer "501 / lands next sprint" (it shipped); the
+   Status block now describes the shell route's safety model (allow-list
+   resolved at init, absolute-path spawn, no-shell, stdin closed, 1 MB
+   per-stream cap, hard timeout) at the same level of detail as the fs
+   bullets. The Security model section's "once the fs handlers land" /
+   "shell invocations will" future-tense was rewritten to present tense
+   ("uses `spawn` without `shell: true`", "resolves the binary against a
+   static allow-list at init time and spawns the absolute path so a later
+   PATH change cannot redirect mid-session"). Audit-path on this README was
+   already mostly right but tightened for consistency.
+
+### What was NOT changed
+
+- The actual extraction code in `index.js` and the server plugin — doc-only
+  housekeeping.
+- The starter `nova/soul.md` / `nova/memory.md` files — out of scope for this
+  pass.
+- `docs/nova-agent-plan.md` outside §14 — also out of scope (the plan still
+  reads top-to-bottom, just with §14 now externalised).
+
+### Validation
+
+Doc-only changes; no `index.js`/`test/`/`server-plugin/*.js` files touched.
+`grep -r '\.nova-trash/audit\|YYYY-MM-DD\.jsonl' .` returns zero matches
+post-edit, confirming the stale path is gone everywhere.

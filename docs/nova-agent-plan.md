@@ -992,24 +992,16 @@ All under `test/` using Node `--test`.
 
 ## 14. Manual Validation
 
-- [ ] Reload ST → console logs `[command-x] v0.13.0 Loaded OK` without errors.
-- [ ] OpenClaw no longer on the home screen.
-- [ ] Nova tile opens to empty transcript + "Pick a connection profile" card.
-- [ ] Install preset via the Settings button → preset appears in ST; set as
-  active on a new profile named "Command-X".
-- [ ] Point Nova at that profile; Read-only turn ("list my characters") →
-  `st_list_characters` card renders; assistant summarises.
-- [ ] Elevate to Write + Character Creator → "Create Aria, a hacker" → Nova
-  proposes `fs_write` → approval modal with diff → approve → file written →
-  re-read.
-- [ ] Worldbook Creator: 3 entries → load in ST's Worldbook UI, schema valid.
-- [ ] Image Prompter mid-RP → structured positive/negative prompts.
-- [ ] Edit `soul.md` via in-phone editor → next turn reflects change.
-- [ ] Install `nova-agent-bridge` → `/fs/list` works → `shell_run` `git status`
-  works behind approval → audit log exists.
-- [ ] Uninstall bridge → Nova works with ST-API subset; yellow banner shows.
-- [ ] Cancel mid-turn → loop aborts; profile restored (verify via `/profile`).
-- [ ] Swipe underlying ST chat → Nova transcript untouched.
+The manual-validation walk-through has been extracted to its own standalone,
+CLI-walkthroughable file: **[`docs/MANUAL_VALIDATION.md`](MANUAL_VALIDATION.md)**.
+
+That file is the single source of truth — it covers preconditions, every
+shipped tool path (read / write / shell), bridge install + uninstall, audit
+log inspection, cancellation, RP-chat isolation, and a non-Nova phone-app
+smoke. Run through it before tagging a release.
+
+Do **not** duplicate the steps back into this plan. If something in
+`MANUAL_VALIDATION.md` becomes stale, fix it there.
 
 ---
 
