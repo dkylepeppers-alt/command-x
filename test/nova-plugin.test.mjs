@@ -134,10 +134,17 @@ describe('nova-agent-bridge init()', () => {
         assert.equal(typeof body.version, 'string');
         assert.equal(typeof body.root, 'string');
         assert.ok(path.isAbsolute(body.root), 'root should be absolute');
+        // shellAllowList is now the resolved subset of binaries actually
+        // present on the host's PATH (plan §8c). On CI/dev hosts this
+        // includes most of the defaults; we don't assert on a specific
+        // entry because Windows / minimal containers may legitimately
+        // be missing some.
         assert.ok(Array.isArray(body.shellAllowList));
-        assert.ok(body.shellAllowList.includes('git'));
+        for (const name of body.shellAllowList) {
+            assert.equal(typeof name, 'string');
+        }
         assert.equal(typeof body.capabilities, 'object');
-        // Every declared capability key must be a boolean (scaffold: all false).
+        // Every declared capability key must be a boolean.
         for (const [k, v] of Object.entries(body.capabilities)) {
             assert.equal(typeof v, 'boolean', `capabilities.${k} must be boolean`);
         }
@@ -154,17 +161,29 @@ describe('nova-agent-bridge init()', () => {
         assert.equal(res._state.body.id, 'nova-agent-bridge');
     });
 
-    it('shell_run stub still returns 501 not-implemented', async () => {
+    it('shell_run is wired (non-501; refuses unknown commands as command-not-allowed)', async () => {
         const r = mockRouter();
         await plugin.init(r);
-        // After the write sprint landed, shell_run is the only 501 left.
+        const route = r.routes.find(x => x.path === '/shell/run');
+        assert.ok(route, '/shell/run must be wired');
+        // Drive with a command that is guaranteed not to be on the
+        // allow-list (random nonsense). The handler must refuse with
+        // closed-enum 'command-not-allowed' rather than the legacy 501.
+        const res = mockRes();
+        await route.handler({ body: { cmd: 'absolutely-not-a-real-binary-xyz' } }, res);
+        assert.notEqual(res._state.statusCode, 501, '/shell/run must no longer return 501');
+        assert.equal(res._state.statusCode, 403);
+        assert.equal(res._state.body.error, 'command-not-allowed');
+    });
+
+    it('shell_run rejects an empty cmd with cmd-required', async () => {
+        const r = mockRouter();
+        await plugin.init(r);
         const route = r.routes.find(x => x.path === '/shell/run');
         const res = mockRes();
-        route.handler({}, res);
-        assert.equal(res._state.statusCode, 501);
-        assert.equal(res._state.body.error, 'not-implemented');
-        assert.equal(res._state.body.plugin, 'nova-agent-bridge');
-        assert.equal(res._state.body.route, '/shell/run');
+        await route.handler({ body: {} }, res);
+        assert.equal(res._state.statusCode, 400);
+        assert.equal(res._state.body.error, 'cmd-required');
     });
 
     it('read-only fs routes are wired (non-501; 400 on missing path)', async () => {
@@ -225,7 +244,7 @@ describe('nova-agent-bridge init()', () => {
         assert.equal(r3._state.body.error, 'invalid-path');
     });
 
-    it('/manifest capabilities report all fs routes true; shell_run false', async () => {
+    it('/manifest capabilities report all fs routes true; shell_run depends on PATH', async () => {
         const r = mockRouter();
         await plugin.init(r);
         const manifestRoute = r.routes.find(x => x.method === 'GET' && x.path === '/manifest');
@@ -239,7 +258,13 @@ describe('nova-agent-bridge init()', () => {
         assert.equal(caps.fs_write, true, 'fs_write capability should be true');
         assert.equal(caps.fs_delete, true, 'fs_delete capability should be true');
         assert.equal(caps.fs_move, true, 'fs_move capability should be true');
-        assert.equal(caps.shell_run, false, 'shell_run still pending');
+        // shell_run is `true` iff at least one allow-listed binary was
+        // resolved on PATH at init time. We don't assert a specific
+        // value here because CI hosts vary; we just assert the type
+        // and the relationship to the allow-list length.
+        assert.equal(typeof caps.shell_run, 'boolean');
+        assert.equal(caps.shell_run, res._state.body.shellAllowList.length > 0,
+            'shell_run capability must mirror "allow-list non-empty"');
         // /manifest now surfaces the resolved audit log path.
         assert.equal(typeof res._state.body.auditLogPath, 'string');
         assert.ok(path.isAbsolute(res._state.body.auditLogPath));

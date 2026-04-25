@@ -1,2 +1,4 @@
 node_modules/
 .DS_Store
+# Stray audit log written by test runs against the real on-disk logger.
+_nova-audit.jsonl

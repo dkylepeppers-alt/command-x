@@ -50,6 +50,9 @@ test('Nova UI wiring functions are declared', async () => {
         'function novaHandleCancel(',
         'function setNovaInFlight(',
         'function cxPickList(',
+        'function openNovaAuditLogViewer(',
+        'function buildNovaAuditLogModalBody(',
+        'function classifyNovaAuditOutcome(',
     ]) {
         assert.ok(js.includes(name), `Expected declaration: ${name}`);
     }

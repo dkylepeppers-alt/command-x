@@ -3490,6 +3490,9 @@ function buildPhone() {
                 <div class="cx-settings-row cx-settings-btn-row">
                     <button class="cx-settings-btn" id="cx-set-nova-edit-sm">📝 Edit Soul &amp; Memory</button>
                 </div>
+                <div class="cx-settings-row cx-settings-btn-row">
+                    <button class="cx-settings-btn" id="cx-set-nova-audit">📜 View audit log</button>
+                </div>
                 <div class="cx-settings-section">ABOUT</div>
                 <div class="cx-settings-row cx-settings-about">
                     <div>Command-X v${VERSION}</div>
@@ -4532,6 +4535,82 @@ async function openNovaSoulMemoryEditor() {
     await loadIntoTextareas();
 }
 
+/* ----------------------------------------------------------------------
+   openNovaAuditLogViewer (plan §2b / §7b — "📜 View audit log")
+
+   Read-only modal showing the per-chat in-memory audit log. The log is
+   populated by `runNovaToolDispatch` (and a handful of upstream sites)
+   via `appendNovaAuditLog`. Entries shape: { ts, tool, argsSummary,
+   outcome }. The log is capped at NOVA_AUDIT_CAP (500) so we don't
+   need to paginate; we just hand the array to the pure builder which
+   renders newest-first with severity colouring.
+
+   The DOM wrapper is intentionally thin — no fetch, no async, no
+   bridge call. This is the user's "what just happened?" surface, so
+   it must be cheap and instant. A Refresh button re-reads the in-
+   memory log so a user who leaves the modal open across a turn can
+   see new entries without closing/reopening.
+   ---------------------------------------------------------------------- */
+function openNovaAuditLogViewer() {
+    // Re-opening the viewer while one is already up: invoke the
+    // previous instance's close() through the shared cleanup hook
+    // so its keydown listener is removed alongside the DOM. Without
+    // this, each re-open would leave a stale `keydown` handler bound
+    // to `document` until the user happened to press Escape.
+    const existing = document.querySelector('.cx-modal-overlay.cx-nova-audit-overlay');
+    if (existing && typeof existing._cxClose === 'function') {
+        try { existing._cxClose(); } catch (_) { existing.remove(); }
+    } else if (existing) {
+        existing.remove();
+    }
+
+    const overlay = document.createElement('div');
+    overlay.className = 'cx-modal-overlay cx-nova-audit-overlay';
+    overlay.innerHTML = `
+        <div class="cx-modal-box cx-nova-audit-box" role="dialog" aria-modal="true" aria-labelledby="cx-nova-audit-title">
+            <div class="cx-modal-title" id="cx-nova-audit-title">Nova — Audit log</div>
+            <div class="cx-modal-body" id="cx-nova-audit-body" aria-live="polite"></div>
+            <div class="cx-modal-actions">
+                <button class="cx-modal-btn cx-modal-btn-secondary" id="cx-nova-audit-refresh">Refresh</button>
+                <button class="cx-modal-btn cx-modal-btn-primary" id="cx-nova-audit-close">Close</button>
+            </div>
+        </div>`;
+
+    const close = () => {
+        overlay.remove();
+        document.removeEventListener('keydown', onKey);
+    };
+    // Expose the cleanup hook on the DOM node so a second call to
+    // openNovaAuditLogViewer can invoke it before removing the node.
+    overlay._cxClose = close;
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector('#cx-nova-audit-close').addEventListener('click', close);
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(overlay);
+
+    const body = overlay.querySelector('#cx-nova-audit-body');
+    const render = () => {
+        let entries = [];
+        try {
+            const ctx = getContext();
+            // getNovaState lazily heals malformed blobs and guarantees
+            // `auditLog` is an array, so a missing `.nova` key is a
+            // 0-entry render rather than a crash.
+            const state = ctx ? getNovaState(ctx) : null;
+            entries = (state && Array.isArray(state.auditLog)) ? state.auditLog : [];
+        } catch (_) {
+            entries = [];
+        }
+        body.innerHTML = buildNovaAuditLogModalBody(entries);
+        // Auto-scroll to top so the newest entry is visible.
+        body.scrollTop = 0;
+    };
+    overlay.querySelector('#cx-nova-audit-refresh').addEventListener('click', render);
+    overlay.querySelector('#cx-nova-audit-close').focus();
+    render();
+}
+
 async function novaPickProfile() {
     const exec = await novaGetExecuteSlash();
     if (!exec) { await cxAlert('This SillyTavern build does not expose executeSlashCommandsWithOptions().', 'Nova'); return; }
@@ -4903,6 +4982,10 @@ function wirePhone() {
     phoneContainer.querySelector('#cx-set-nova-plugin-url')?.addEventListener('change', novaOnChange);
     phoneContainer.querySelector('#cx-set-nova-edit-sm')?.addEventListener('click', () => {
         openNovaSoulMemoryEditor().catch(err => cxAlert(String(err?.message || err), 'Nova'));
+    });
+    phoneContainer.querySelector('#cx-set-nova-audit')?.addEventListener('click', () => {
+        try { openNovaAuditLogViewer(); }
+        catch (err) { cxAlert(String(err?.message || err), 'Nova'); }
     });
     phoneContainer.querySelector('#cx-set-lock')?.addEventListener('change', (e) => {
         settings.showLockscreen = e.target.checked;
@@ -6893,6 +6976,125 @@ async function runNovaToolDispatch({
 
 function _novaJsonPretty(value) {
     try { return JSON.stringify(value, null, 2); } catch (_) { return String(value); }
+}
+
+/**
+ * Classify an audit-log `outcome` string into a severity bucket. Used by
+ * the audit viewer (plan §2b/§7b) to colour rows. Matches the closed-enum
+ * outcomes emitted by `runNovaToolDispatch`:
+ *   - 'ok'                              → 'ok'
+ *   - 'cap-hit'                         → 'warn'
+ *   - 'aborted', anything starting with 'denied:'  → 'warn'
+ *   - anything starting with 'error:'   → 'error'
+ *   - everything else                   → 'info'
+ *
+ * Pure helper, exported for the unit tests in nova-audit-viewer.test.mjs.
+ */
+function classifyNovaAuditOutcome(outcome) {
+    let s;
+    try { s = String(outcome ?? '').trim(); } catch (_) { return 'info'; }
+    if (!s) return 'info';
+    if (s === 'ok') return 'ok';
+    if (s === 'cap-hit') return 'warn';
+    if (s === 'aborted') return 'warn';
+    if (s.startsWith('denied:')) return 'warn';
+    if (s.startsWith('error:')) return 'error';
+    return 'info';
+}
+
+/**
+ * Format an audit-log timestamp (ms-since-epoch) as a short HH:MM:SS string
+ * in the local timezone. Falls back to the raw number on bad input. Pure.
+ */
+function _novaFormatAuditTimestamp(ts, { nowImpl } = {}) {
+    const n = Number(ts);
+    if (!Number.isFinite(n)) return String(ts ?? '');
+    try {
+        const d = new Date(n);
+        const pad = (v) => String(v).padStart(2, '0');
+        const hh = pad(d.getHours());
+        const mm = pad(d.getMinutes());
+        const ss = pad(d.getSeconds());
+        const now = (typeof nowImpl === 'function' ? nowImpl() : Date.now());
+        const today = new Date(now);
+        const sameDay = d.getFullYear() === today.getFullYear()
+            && d.getMonth() === today.getMonth()
+            && d.getDate() === today.getDate();
+        if (sameDay) return `${hh}:${mm}:${ss}`;
+        // Older entries: prefix month/day so the user can tell sessions apart.
+        return `${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${hh}:${mm}:${ss}`;
+    } catch (_) {
+        return String(ts);
+    }
+}
+
+/**
+ * Build the HTML body for the Nova audit-log modal (plan §2b/§7b). PURE.
+ *
+ * Renders the entries newest-first, capped at `limit` rows. Each row is
+ * a `.cx-nova-audit-row` with severity class derived from the outcome.
+ * Empty state shows a "No tool calls yet" placeholder.
+ *
+ * Every user-controlled string (tool name, argsSummary, outcome) is
+ * escaped via `escHtml` — `state.auditLog` entries originate from
+ * dispatcher / handler output and may contain anything the LLM hands in
+ * via `args`. Treat them as untrusted.
+ *
+ * @param {Array<{ts:number, tool:string, argsSummary:string, outcome:string}>} entries
+ * @param {{ now?: number, limit?: number }} [opts]
+ * @returns {string} HTML body.
+ */
+function buildNovaAuditLogModalBody(entries, { now, limit = 200 } = {}) {
+    const list = Array.isArray(entries) ? entries.slice() : [];
+    const total = list.length;
+    // Newest-first: dispatcher pushes in chronological order.
+    list.reverse();
+    // Sanitise limit: positive integer in [1, 500]. Anything else (0,
+    // negative, NaN, non-number) falls back to the 200 default rather
+    // than collapsing to 1, which would surprise callers that pass a
+    // misconfigured override.
+    let lim = Number(limit);
+    if (!Number.isFinite(lim) || lim <= 0) lim = 200;
+    const cap = Math.max(1, Math.min(Math.floor(lim), 500));
+    const shown = list.slice(0, cap);
+    const truncated = total > shown.length;
+    const nowImpl = Number.isFinite(now) ? () => now : undefined;
+
+    const header = `<div class="cx-nova-audit-summary">${
+        total === 0
+            ? 'No tool calls recorded yet for this chat.'
+            : `Showing ${shown.length} of ${total} tool call${total === 1 ? '' : 's'} (newest first).`
+    }</div>`;
+
+    if (total === 0) {
+        return [
+            header,
+            `<div class="cx-nova-audit-empty">When Nova dispatches a tool, an entry lands here with the outcome — including denials and errors. The log is capped at 500 entries per chat.</div>`,
+        ].join('\n');
+    }
+
+    const rows = shown.map((raw) => {
+        const e = raw && typeof raw === 'object' ? raw : {};
+        const sev = classifyNovaAuditOutcome(e.outcome);
+        const ts = _novaFormatAuditTimestamp(e.ts, { nowImpl });
+        const tool = String(e.tool || 'unknown');
+        const args = String(e.argsSummary ?? '');
+        const outcome = String(e.outcome ?? '');
+        return `<div class="cx-nova-audit-row" data-sev="${escAttr(sev)}">`
+            + `<div class="cx-nova-audit-row-head">`
+            + `<span class="cx-nova-audit-ts">${escHtml(ts)}</span>`
+            + `<span class="cx-nova-audit-tool">${escHtml(tool)}</span>`
+            + `<span class="cx-nova-audit-outcome">${escHtml(outcome)}</span>`
+            + `</div>`
+            + (args ? `<div class="cx-nova-audit-args">${escHtml(args)}</div>` : '')
+            + `</div>`;
+    }).join('\n');
+
+    const footer = truncated
+        ? `<div class="cx-nova-audit-truncated">…${total - shown.length} older entries hidden.</div>`
+        : '';
+
+    return [header, `<div class="cx-nova-audit-list">${rows}</div>`, footer].filter(Boolean).join('\n');
 }
 
 function buildNovaApprovalModalBody({ tool, args, diffText = '', permission } = {}) {

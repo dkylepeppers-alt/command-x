@@ -62,6 +62,12 @@ const ALLOWED_ARGS_SUMMARY_KEYS = Object.freeze(new Set([
     'recursive',
     'entries',      // count, not contents
     'type',         // 'file' | 'directory' literal
+    // Shell-route additions (plan §4b / §8b). None of these can carry
+    // raw shell input or output: `cmd` is the bare command name (allow-
+    // list-validated literal), `argsCount` is an integer count, `cwd` is
+    // the resolved relative path of the working directory, `timeoutMs`
+    // is a clamped integer.
+    'cmd', 'argsCount', 'cwd', 'timeoutMs',
 ]));
 
 /* ----------------------------------------------------------------------
@@ -74,6 +80,10 @@ const ALLOWED_ARGS_SUMMARY_KEYS = Object.freeze(new Set([
  * ---------------------------------------------------------------------- */
 const ALLOWED_ENTRY_KEYS = Object.freeze(new Set([
     'route', 'outcome', 'argsSummary', 'bytes', 'backup', 'error', 'ts',
+    // Shell-route additions (plan §4b / §8b). Numeric/boolean metadata
+    // about the executed process — none of these can carry raw stdout/
+    // stderr bytes or arg-string contents.
+    'exitCode', 'signal', 'stdoutBytes', 'stderrBytes', 'truncated', 'durationMs',
 ]));
 
 function mockRes() {
@@ -400,5 +410,82 @@ describe('audit redaction: end-to-end through real on-disk logger', () => {
         assert.ok(raw.includes('"path":"e2e.txt"'));
 
         await realLogger.close();
+    });
+});
+
+/* =====================================================================
+ * /shell/run — audit redaction (plan §4b / §8b).
+ *
+ * Shell calls have two distinct payload surfaces: the **arg vector**
+ * (which can contain any string the LLM passed, including secrets like
+ * `--token=...`) and the **child stdout/stderr** (which can contain
+ * anything the executed binary prints). Both must be excluded from
+ * the audit pipeline.
+ * ===================================================================== */
+
+describe('audit redaction: /shell/run never logs args or stdout/stderr bytes', () => {
+    const shell = require(path.resolve(__dirname, '../server-plugin/nova-agent-bridge/routes-shell.js'));
+    const { EventEmitter } = require('node:events');
+    const { Readable } = require('node:stream');
+
+    function makeFakeChild() {
+        const c = new EventEmitter();
+        c.stdout = new Readable({ read() {} });
+        c.stderr = new Readable({ read() {} });
+        c.kill = () => {};
+        return c;
+    }
+
+    for (const payload of RAW_PAYLOADS) {
+        it(`completed run with payload ${JSON.stringify(payload.slice(0, 24))}… does not leak`, async () => {
+            const child = makeFakeChild();
+            const handler = shell.createShellRunHandler({
+                root: ROOT,
+                normalizePath: normalizeNovaPath,
+                allowList: { node: '/abs/node' },
+                auditLogger: audit,
+                spawnImpl: () => child,
+            });
+            const res = mockRes();
+            const p = handler({
+                body: { cmd: 'node', args: ['-e', payload, '--secret=' + payload] },
+            }, res);
+            setImmediate(() => {
+                child.stdout.push(payload); // payload as stdout
+                child.stdout.push(null);
+                child.stderr.push(payload); // payload as stderr
+                child.stderr.push(null);
+                child.emit('exit', 0, null);
+            });
+            await p;
+            assert.equal(res._state.statusCode, 200);
+
+            for (const e of audit.entries) {
+                assertEntryShape(e, '/shell/run completed');
+                assertEntryNeverLeaksPayload(e, payload, '/shell/run completed');
+            }
+            const last = audit.entries.at(-1);
+            assert.equal(last.outcome, 'completed');
+            assert.equal(last.argsSummary.cmd, 'node');
+            assert.equal(last.argsSummary.argsCount, 3);
+        });
+    }
+
+    it('refused-not-allowed entry contains no arg values', async () => {
+        const handler = shell.createShellRunHandler({
+            root: ROOT,
+            normalizePath: normalizeNovaPath,
+            allowList: { node: '/abs/node' },
+            auditLogger: audit,
+            spawnImpl: () => { throw new Error('should not have been called'); },
+        });
+        const PAYLOAD = 'SECRET-ARG-VALUE-MUST-NOT-LEAK-12345';
+        const res = mockRes();
+        await handler({ body: { cmd: 'rm', args: ['-rf', PAYLOAD] } }, res);
+        assert.equal(res._state.statusCode, 403);
+        for (const e of audit.entries) {
+            assertEntryShape(e, '/shell/run refused-not-allowed');
+            assertEntryNeverLeaksPayload(e, PAYLOAD, '/shell/run refused-not-allowed');
+        }
     });
 });
