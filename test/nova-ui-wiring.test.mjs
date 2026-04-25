@@ -190,6 +190,29 @@ test('shell_run handler is declared and wired into the dispatcher (plan §4b)', 
         'novaHandleSend must compose buildNovaShellHandler into the toolHandlers map');
 });
 
+test('bridge requests carry ST auth headers (plan §8c)', async () => {
+    const { js } = await loadSources();
+    // getRequestHeaders must be imported from script.js so the module-level
+    // fallback in _novaBridgeRequest / _novaBridgeWrite has a live
+    // reference at runtime.
+    assert.match(js, /import\s*\{[^}]*\bgetRequestHeaders\b[^}]*\}\s*from\s*['"][^'"]*script\.js['"]/,
+        'getRequestHeaders must be imported from ST script.js');
+    // _novaBridgeRequest must accept headersProvider and merge it into init.headers.
+    const reqBody = js.match(/async function _novaBridgeRequest\([\s\S]*?\n\}/);
+    assert.ok(reqBody, '_novaBridgeRequest body not found');
+    assert.match(reqBody[0], /headersProvider/,
+        '_novaBridgeRequest must accept headersProvider');
+    assert.match(reqBody[0], /omitContentType:\s*true/,
+        '_novaBridgeRequest must call the headers provider with omitContentType: true');
+    // _novaBridgeWrite (soul/memory path) must also thread the auth header.
+    const writeBody = js.match(/async function _novaBridgeWrite\([\s\S]*?\n\}/);
+    assert.ok(writeBody, '_novaBridgeWrite body not found');
+    assert.match(writeBody[0], /headersProvider/,
+        '_novaBridgeWrite must accept headersProvider');
+    assert.match(writeBody[0], /omitContentType:\s*true/,
+        '_novaBridgeWrite must call the headers provider with omitContentType: true');
+});
+
 test('Profile-swap helpers are wired to the slash executor', async () => {
     const { js } = await loadSources();
     assert.match(js, /function listNovaProfiles\(/);

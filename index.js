@@ -15,6 +15,7 @@ import {
     setExtensionPrompt,
     extension_prompt_types,
     extension_prompt_roles,
+    getRequestHeaders,
 } from '../../../../script.js';
 
 const VERSION = '0.13.0';
@@ -7297,18 +7298,31 @@ const NOVA_SKILLS = [
  *
  * Returns `{ ok: true, path }` on 2xx, or `{ error: '<reason>' }` otherwise.
  */
-async function _novaBridgeWrite({ pluginBaseUrl, path, content, fetchImpl }) {
+async function _novaBridgeWrite({ pluginBaseUrl, path, content, fetchImpl, headersProvider }) {
     const doFetch = typeof fetchImpl === 'function'
         ? fetchImpl
         : (typeof fetch === 'function' ? fetch : null);
     if (!doFetch) return { error: 'no-fetch' };
     const base = String(pluginBaseUrl || NOVA_DEFAULTS.pluginBaseUrl).replace(/\/+$/, '');
     const url = `${base}/fs/write`;
+    // Plan §8c — merge ST's auth headers (X-CSRF-Token) so soul/memory
+    // writes pass ST's global csrf-sync middleware. Same pattern as
+    // `_novaBridgeRequest`.
+    const authHeaders = {};
+    const provider = (typeof headersProvider === 'function')
+        ? headersProvider
+        : (typeof getRequestHeaders === 'function' ? getRequestHeaders : null);
+    if (provider) {
+        try {
+            const h = provider({ omitContentType: true });
+            if (h && typeof h === 'object') Object.assign(authHeaders, h);
+        } catch (_) { /* noop */ }
+    }
     let resp;
     try {
         resp = await doFetch(url, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { ...authHeaders, 'Content-Type': 'application/json' },
             body: JSON.stringify({ path, content, overwrite: true, createParents: true }),
         });
     } catch (err) {
@@ -7605,7 +7619,7 @@ function buildNovaPhoneHandlers({
  * (the route's response body, with `ok` defaulted to `true` if absent)
  * or one of the closed-enum error shapes above.
  */
-async function _novaBridgeRequest({ pluginBaseUrl, method, route, query, body, fetchImpl }) {
+async function _novaBridgeRequest({ pluginBaseUrl, method, route, query, body, fetchImpl, headersProvider }) {
     const doFetch = typeof fetchImpl === 'function'
         ? fetchImpl
         : (typeof fetch === 'function' ? fetch : null);
@@ -7621,9 +7635,28 @@ async function _novaBridgeRequest({ pluginBaseUrl, method, route, query, body, f
         const qsStr = qs.toString();
         if (qsStr) url += `?${qsStr}`;
     }
-    const init = { method: method || 'GET' };
+    // Plan §8c — merge ST's auth headers (specifically `X-CSRF-Token`)
+    // into every bridge call so state-changing requests pass ST's
+    // global `csrf-sync` middleware. Same-origin cookies (the session)
+    // flow automatically; no `credentials` override needed.
+    // `headersProvider` is injectable so unit tests can stub it;
+    // in production we fall back to ST's exported `getRequestHeaders`.
+    // Any failure from the provider is swallowed — we'd rather send
+    // the request without auth and let the server reject it than
+    // block a legit call because the provider threw.
+    const authHeaders = {};
+    const provider = (typeof headersProvider === 'function')
+        ? headersProvider
+        : (typeof getRequestHeaders === 'function' ? getRequestHeaders : null);
+    if (provider) {
+        try {
+            const h = provider({ omitContentType: true });
+            if (h && typeof h === 'object') Object.assign(authHeaders, h);
+        } catch (_) { /* noop — fail open, let server decide */ }
+    }
+    const init = { method: method || 'GET', headers: { ...authHeaders } };
     if (body !== undefined) {
-        init.headers = { 'Content-Type': 'application/json' };
+        init.headers['Content-Type'] = 'application/json';
         init.body = JSON.stringify(body);
     }
     let resp;

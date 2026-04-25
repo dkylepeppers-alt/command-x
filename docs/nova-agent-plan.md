@@ -289,8 +289,28 @@ own plugin folder by default.
 - [x] `shell_run({ cmd, args, cwd?, timeoutMs? })` — schema shipped. Allow-list: `node`, `npm`,
   `git`, `python`, `python3`, `grep`, `rg`, `ls`, `cat`, `head`, `tail`, `wc`,
   `find`. User-extensible. Hard timeout default 60 s.
+- [x] **Handler factory shipped** — `buildNovaShellHandler({ pluginBaseUrl?,
+  fetchImpl?, headersProvider? })` in `index.js` NOVA AGENT section (right
+  after `buildNovaFsHandlers`). Thin wrapper over `_novaBridgeRequest`:
+  validates args shape (required `cmd`, optional `args[]` filtered to
+  strings, `cwd`, `timeoutMs` clamped to `[100 ms, 5 min]` and only
+  accepted from numeric primitives), POSTs to `/shell/run`. Never
+  throws; closed-enum errors. The plugin's current 501 naturally
+  surfaces as `{ error: 'not-implemented', plugin, version, route,
+  status: 501 }` through `_novaBridgeRequest` — no special-casing, so
+  the same code path lights up when the plugin ships a real
+  implementation. Composed into `novaHandleSend`'s `toolHandlers` map
+  alongside the other four factories. Covered by
+  `test/nova-shell-handler.test.mjs` (41 assertions across 8 suites:
+  factory shape, args validation, POST body shape, timeoutMs clamping,
+  response passthrough, base URL handling, auth-header propagation,
+  never-throws fuzz) + source-contract assertion in
+  `test/nova-ui-wiring.test.mjs`.
 - [ ] Full tier only; per-call approval unless
-  "Remember approvals this session" is on — enforced in Phase 3c.
+  "Remember approvals this session" is on — upstream gate is already
+  enforced by `novaToolGate` + `runNovaToolDispatch` +
+  `cxNovaApprovalModal`; UI toggle for "Remember approvals this session"
+  is still pending the Phase 7 settings work.
 
 ### 4c. Diff preview helper
 - [x] For every `fs_write` approval: fetch current file, render unified diff
@@ -574,8 +594,41 @@ Always concatenated into the Nova system prompt regardless of skill.
   `FS_WRITE_HARD_CAP_BYTES` (decoded buffer length, so base64 inputs
   are clamped to the same on-disk size).
 - [ ] Shell: no `shell: true`; binaries resolved via allow-list at startup.
-- [ ] CSRF protection mirroring ST's header check.
-- [ ] Require ST session cookie on every route.
+- [x] CSRF protection mirroring ST's header check.
+  - **Shipped (plugin side):** `server-plugin/nova-agent-bridge/middleware.js`
+    exports `buildNovaSecurityMiddleware({ csrfRequired?, sessionRequired?,
+    skip? })`. Mounted as the first `router.use(...)` in plugin `init()`.
+    Rejects state-changing methods (POST/PUT/PATCH/DELETE) with 403 +
+    closed-enum `{ error: 'nova-csrf-missing' | 'nova-csrf-stale-session'
+    | 'nova-csrf-mismatch' }` when the `x-csrf-token` header is absent,
+    empty, or doesn't match `req.session.csrfToken` (constant-time
+    compare). GETs, HEAD, OPTIONS, and the read-only `/health` +
+    `/manifest` routes bypass the check so the extension's capability
+    probe keeps working before a user session is fully wired.
+    ST's global `csrf-sync` middleware still fires first; this layer
+    is belt-and-suspenders for `--disableCsrf` and non-ST embedding.
+  - **Shipped (extension side):** `import { getRequestHeaders } from
+    '../../../../script.js'`. `_novaBridgeRequest` and `_novaBridgeWrite`
+    accept an injectable `headersProvider` (default: the imported
+    `getRequestHeaders`) and merge its output into `init.headers` so
+    every bridge call carries `X-CSRF-Token`. Provider is called with
+    `{ omitContentType: true }` so the bridge can own the Content-Type
+    for JSON bodies. Provider exceptions fail open (request goes out
+    without auth; server rejects as before) rather than blocking the
+    user.
+  - Covered by `test/nova-plugin-middleware.test.mjs` (41 assertions
+    across 6 suites: exports, skip-list, session check, CSRF matrix,
+    defensive/never-throws, internal constant-time compare) and new
+    CSRF-propagation suites in `test/nova-shell-handler.test.mjs` +
+    plugin-wiring assertion in `test/nova-plugin.test.mjs` + source-
+    contract assertion in `test/nova-ui-wiring.test.mjs`.
+- [x] Require ST session cookie on every route. **Shipped** as part of
+  the same middleware above (`sessionRequired` default `true`): the
+  middleware requires `req.session` to carry either a `handle` (ST's
+  per-user slot populated by `setUserDataMiddleware`) or a
+  `csrfToken`. Missing/empty session → 401 `nova-unauthorized`.
+  `/health` and `/manifest` remain exempt so unauthenticated capability
+  probes succeed.
 - [x] Audit log: append to `SillyTavern/data/_nova-audit.jsonl` with
   `{ ts, user?, route, argsSummary, outcome, bytes?, backup?, error? }`.
   **Shipped** as `server-plugin/nova-agent-bridge/audit.js` —

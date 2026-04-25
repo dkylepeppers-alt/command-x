@@ -20,12 +20,21 @@ const plugin = require(path.resolve(__dirname, '../server-plugin/nova-agent-brid
 
 function mockRouter() {
     const routes = [];
+    const middlewares = [];
     const handler = (method) => (routePath, h) => {
         assert.equal(typeof h, 'function', `handler for ${method} ${routePath} must be a function`);
         routes.push({ method, path: routePath, handler: h });
     };
     return {
         routes,
+        middlewares,
+        // `use` captures middleware so we can introspect it but doesn't
+        // run it — the integration tests invoke route handlers directly.
+        // The middleware itself has its own dedicated unit-test file.
+        use(mw) {
+            assert.equal(typeof mw, 'function', 'router.use() arg must be a middleware function');
+            middlewares.push(mw);
+        },
         get: handler('GET'),
         post: handler('POST'),
         put: handler('PUT'),
@@ -77,6 +86,28 @@ describe('nova-agent-bridge init()', () => {
         ]) {
             assert.ok(pairs.includes(expected), `missing route: ${expected}\nwired: ${pairs.join(', ')}`);
         }
+    });
+
+    it('mounts the Nova security middleware (plan §8c)', async () => {
+        const r = mockRouter();
+        await plugin.init(r);
+        assert.ok(r.middlewares.length >= 1, 'plugin must register at least one router-level middleware');
+        // The first middleware must be the security gate so it runs
+        // before any route handler. Check both its name (exported as
+        // `novaSecurityMiddleware`) and a behavioural probe: sending a
+        // POST without an x-csrf-token must be rejected.
+        const [mw] = r.middlewares;
+        assert.equal(mw.name, 'novaSecurityMiddleware', 'first router.use() must be novaSecurityMiddleware');
+        let statusOut = 0; let bodyOut = null;
+        const fakeRes = {
+            status(c) { statusOut = c; return this; },
+            json(b) { bodyOut = b; return this; },
+        };
+        let nextCalled = false;
+        mw({ method: 'POST', path: '/fs/write', headers: {}, session: { handle: 'u' } }, fakeRes, () => { nextCalled = true; });
+        assert.equal(nextCalled, false, 'middleware must not pass-through a POST without CSRF');
+        assert.equal(statusOut, 403);
+        assert.equal(bodyOut?.error, 'nova-csrf-missing');
     });
 
     it('/manifest version matches the version in package.json (single source of truth)', async () => {

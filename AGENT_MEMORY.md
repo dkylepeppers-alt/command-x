@@ -77,6 +77,46 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-25 (shell + csrf) — shell_run handler (§4b) + CSRF/session enforcement (§8c)
+
+**Context:** Continued the Nova plan audit. Two items were clearly scoped and safe to ship together: `buildNovaShellHandler` for §4b (the schema and plugin route already exist; the factory was the obvious missing piece) and §8c CSRF+session enforcement (both extension and plugin sides).
+
+**What shipped — shell_run factory (§4b):**
+- **`buildNovaShellHandler({ pluginBaseUrl?, fetchImpl?, headersProvider? })`** in `index.js` NOVA AGENT section (right after `buildNovaFsHandlers`). Mirrors the contract of the other four Nova factories — never throws, closed-enum errors, all deps DI'd. Validates `cmd` (required non-empty string), `args` (filtered to strings; non-array → `[]`), `cwd` (non-empty string or drop), `timeoutMs` (numeric primitive only, clamped to `[100ms, 5min]`). Only numeric primitives accepted because `Number([])` → `0` (finite) would otherwise sneak an empty-array timeout through as the minimum — caught by the never-throws fuzz test, tightened before commit.
+- **Wired into `novaHandleSend`** alongside the other four factories.
+- The plugin's current `501 Not Implemented` on `/shell/run` naturally surfaces as `{ error: 'not-implemented', plugin, version, route, status: 501 }` through `_novaBridgeRequest`. No special-casing — when the plugin ships the real implementation, the same code path lights up with no extension change.
+
+**What shipped — CSRF + session (§8c):**
+Investigation found ST uses **`csrf-sync`** globally via `app.use(csrfSynchronisedProtection)` *before* plugins mount (see upstream `src/server-main.js`). Token lives in `req.session.csrfToken`, read from `x-csrf-token` header. That means:
+
+1. **The extension's pre-PR `_novaBridgeRequest` was broken on any ST install with CSRF enabled** — it never sent `X-CSRF-Token`, so ST returned 403 before the plugin ever saw the request. This was latent until this PR; the probe worked (GET, no CSRF needed) but any POST (fs_write, fs_delete, fs_move, fs_search, shell_run, nova_write_*) would have failed in production.
+2. **The plugin inherits ST's global check** but we want belt-and-suspenders for `--disableCsrf` runs and non-ST embedding.
+
+**Extension side** (`index.js`):
+- `import { getRequestHeaders } from '../../../../script.js'` added next to the existing script.js imports.
+- `_novaBridgeRequest` and `_novaBridgeWrite` now accept an injectable `headersProvider` (default: the module-imported `getRequestHeaders`) and merge its output into `init.headers`. Called with `{ omitContentType: true }` so the bridge owns Content-Type for JSON bodies. Provider exceptions fail open (request sent without auth; server rejects as before).
+
+**Plugin side** (`server-plugin/nova-agent-bridge/`):
+- New `middleware.js` exports `buildNovaSecurityMiddleware({ csrfRequired?, sessionRequired?, skip? })`. Returns a named Express middleware (`novaSecurityMiddleware`) so stack inspection works. Defaults: CSRF + session both required; `/health` and `/manifest` skip-listed (capability probe must work pre-auth).
+- Closed-enum errors: `nova-unauthorized` (401), `nova-csrf-missing` / `nova-csrf-stale-session` / `nova-csrf-mismatch` (all 403). Constant-time token compare via an internal helper.
+- Reads `req.session.csrfToken` — **exactly the slot ST's `csrfSync` writes to via `storeTokenInState`**. Same slot means tokens minted by ST are accepted without any handshake change.
+- Wired as the first `router.use(...)` in plugin `init()`.
+
+**Tests (+41 assertions, total 693/693):**
+- `test/nova-shell-handler.test.mjs` — 41 assertions across 8 suites.
+- `test/nova-plugin-middleware.test.mjs` (new) — 41 assertions across 6 suites: exports, skip-list, session check, CSRF matrix across methods, defensive/never-throws, internal constant-time compare.
+- `test/nova-plugin.test.mjs` — added a wiring assertion that `router.use()` is called with a function named `novaSecurityMiddleware` that rejects unauth'd POSTs. Also extended the mock router with a `use()` capture (noop) — previously it had no `use` and my `router.use(...)` call would have thrown.
+- `test/nova-ui-wiring.test.mjs` — source-contract assertions: `getRequestHeaders` is imported from script.js; `_novaBridgeRequest` and `_novaBridgeWrite` both accept `headersProvider` and call it with `omitContentType: true`; `buildNovaShellHandler` declared, POSTs to `/shell/run`, wired into `novaHandleSend`.
+
+**Pitfalls for future agents:**
+- **Never use `Number(x)` on LLM-provided args without first type-checking** — `Number([])` → `0` (finite) and `Number([42])` → `42` (finite). Both would sneak through `Number.isFinite` checks. Always gate on `typeof x === 'number' || typeof x === 'string'` first.
+- **ST's CSRF token slot is `req.session.csrfToken`, not `req.csrfToken` or `res.locals.csrfToken`**. Upstream uses `csrf-sync` (not `csurf`); the `storeTokenInState` callback writes to the session. If you build any future middleware that validates the token, read from the same slot.
+- **Plugins mount AFTER ST's global middleware stack**. `helmet → compression → cors → hostWhitelist → cookieSession → setUserDataMiddleware → csrfSynchronisedProtection → static → requireLoginMiddleware → redirectDeprecated → setupPrivateEndpoints → preSetupTasks (which calls loadPlugins)`. This means by the time any plugin route handler fires, `req.session`, `req.user`/`req.handle`, and CSRF have already been validated. Plugin-level checks are defense-in-depth only.
+- **Extension fetch calls are same-origin**; cookies flow by default. Don't set `credentials: 'include'` or CORS headers on bridge calls — that would actually break things when ST runs behind a reverse proxy that tightens CORS.
+- **Mock routers in plugin tests** — if you add any new `router.use(...)` to the plugin, update the `mockRouter` in `test/nova-plugin.test.mjs` to capture it. It was previously missing that method; the fix is already in place but the lesson is to grep `test/nova-plugin.test.mjs` for `mockRouter` whenever you touch the plugin's wiring.
+
+**Validation:** `node --check index.js` ✓, `node -c server-plugin/nova-agent-bridge/{index,middleware}.js` ✓, `node --test test/*.mjs` → 693/693 pass (+41).
+
 ### 2026-04-25 (diff preview) — fs_write approval diff preview wired (plan §4c)
 
 **Context:** Previous PR's handover listed four small independent slices remaining after `buildNovaStTools` shipped. This picks the smallest and cleanest: §4c explicitly said "all three pieces now exist — wiring is just an `if (tool === 'fs_write') { ... }` branch in the composer before calling `confirmApproval`. Don't teach the dispatcher to read the filesystem itself." So the pure composer-level wiring, done as a pure helper for testability.

@@ -24,7 +24,7 @@ const NOVA_DEFAULTS = { pluginBaseUrl: '/api/plugins/nova-agent-bridge' };
 const SHELL_TIMEOUT_MIN_MS = 100;
 const SHELL_TIMEOUT_MAX_MS = 300000;
 
-async function _novaBridgeRequest({ pluginBaseUrl, method, route, query, body, fetchImpl }) {
+async function _novaBridgeRequest({ pluginBaseUrl, method, route, query, body, fetchImpl, headersProvider }) {
     const doFetch = typeof fetchImpl === 'function' ? fetchImpl : null;
     if (!doFetch) return { error: 'no-fetch' };
     const base = String(pluginBaseUrl || NOVA_DEFAULTS.pluginBaseUrl).replace(/\/+$/, '');
@@ -38,9 +38,16 @@ async function _novaBridgeRequest({ pluginBaseUrl, method, route, query, body, f
         const qsStr = qs.toString();
         if (qsStr) url += `?${qsStr}`;
     }
-    const init = { method: method || 'GET' };
+    const authHeaders = {};
+    if (typeof headersProvider === 'function') {
+        try {
+            const h = headersProvider({ omitContentType: true });
+            if (h && typeof h === 'object') Object.assign(authHeaders, h);
+        } catch (_) { /* noop */ }
+    }
+    const init = { method: method || 'GET', headers: { ...authHeaders } };
     if (body !== undefined) {
-        init.headers = { 'Content-Type': 'application/json' };
+        init.headers['Content-Type'] = 'application/json';
         init.body = JSON.stringify(body);
     }
     let resp;
@@ -65,12 +72,12 @@ async function _novaBridgeRequest({ pluginBaseUrl, method, route, query, body, f
     return { ok: true, body: String(rawText).slice(0, 400) };
 }
 
-function buildNovaShellHandler({ pluginBaseUrl, fetchImpl } = {}) {
+function buildNovaShellHandler({ pluginBaseUrl, fetchImpl, headersProvider } = {}) {
     const base = pluginBaseUrl || NOVA_DEFAULTS.pluginBaseUrl;
     const isObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
     const safeArgs = (v) => (isObject(v) ? v : {});
     const req = (method, route, opts) => _novaBridgeRequest({
-        pluginBaseUrl: base, method, route, fetchImpl, ...opts,
+        pluginBaseUrl: base, method, route, fetchImpl, headersProvider, ...opts,
     });
 
     return {
@@ -375,6 +382,66 @@ describe('buildNovaShellHandler — base URL handling', () => {
         });
         await h.shell_run({ cmd: 'ls' });
         assert.equal(calls[0].url, 'http://localhost:8000/api/plugins/nova-agent-bridge/shell/run');
+    });
+});
+
+// -------- Tests: CSRF / auth header propagation (plan §8c) --------
+
+describe('buildNovaShellHandler — auth header propagation (plan §8c)', () => {
+    it('headersProvider output is merged into request init.headers', async () => {
+        const { fn, calls } = makeFetchStub({ json: { ok: true } });
+        const h = buildNovaShellHandler({
+            fetchImpl: fn,
+            headersProvider: () => ({ 'X-CSRF-Token': 'tok-abc' }),
+        });
+        await h.shell_run({ cmd: 'ls' });
+        assert.equal(calls[0].headers['X-CSRF-Token'], 'tok-abc',
+            'CSRF token must reach the fetch init.headers');
+        assert.equal(calls[0].headers['Content-Type'], 'application/json',
+            'Content-Type must still be set for JSON body');
+    });
+
+    it('headersProvider is called with { omitContentType: true } (mirrors ST getRequestHeaders contract)', async () => {
+        const providerArgs = [];
+        const { fn } = makeFetchStub({ json: { ok: true } });
+        const h = buildNovaShellHandler({
+            fetchImpl: fn,
+            headersProvider: (opts) => { providerArgs.push(opts); return { 'X-CSRF-Token': 't' }; },
+        });
+        await h.shell_run({ cmd: 'ls' });
+        assert.deepEqual(providerArgs[0], { omitContentType: true });
+    });
+
+    it('headersProvider that throws → request still sent with no auth (fail-open)', async () => {
+        const { fn, calls } = makeFetchStub({ json: { ok: true } });
+        const h = buildNovaShellHandler({
+            fetchImpl: fn,
+            headersProvider: () => { throw new Error('no token yet'); },
+        });
+        const r = await h.shell_run({ cmd: 'ls' });
+        assert.equal(r.ok, true, 'provider exception must not block the request');
+        assert.equal(calls[0].headers['X-CSRF-Token'], undefined);
+    });
+
+    it('headersProvider returning non-object → no auth merged, no crash', async () => {
+        const { fn, calls } = makeFetchStub({ json: { ok: true } });
+        for (const bad of [null, undefined, 42, 'str', true]) {
+            const h = buildNovaShellHandler({
+                fetchImpl: fn,
+                headersProvider: () => bad,
+            });
+            calls.length = 0;
+            await h.shell_run({ cmd: 'ls' });
+            assert.deepEqual(Object.keys(calls[0].headers).sort(), ['Content-Type'],
+                `non-object provider output (${JSON.stringify(bad)}) must not add headers`);
+        }
+    });
+
+    it('no headersProvider → request sent with only Content-Type (test isolation; prod has module-level fallback)', async () => {
+        const { fn, calls } = makeFetchStub({ json: { ok: true } });
+        const h = buildNovaShellHandler({ fetchImpl: fn });
+        await h.shell_run({ cmd: 'ls' });
+        assert.equal(calls[0].headers['X-CSRF-Token'], undefined);
     });
 });
 
