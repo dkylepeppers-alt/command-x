@@ -1817,3 +1817,125 @@ the plan's *implementation* surface is fully covered and the
 remaining work is documentation hygiene (stale-checkbox sweep,
 §12 docs alignment) and the deferred preset-installer / shell
 sandbox sprints.
+
+---
+
+## 2026-04-25 (final) — Stale-checkbox sweep on `docs/nova-agent-plan.md`
+
+**Goal of this PR:** docs-only hygiene. The plan markdown is the
+orientation document for every future session, but it had ~50 items
+ticked `[ ]` that were *demonstrably* shipped per source-read. The
+prior session's hand-off explicitly flagged this as the next
+sensible slice and warned **"do not blanket-tick"** — some unchecked
+items are genuinely deferred.
+
+**Method:** for each unchecked item, source-read to verify
+implementation + tests, then tick only when both are present. Items
+that are *partially* shipped use the `[~]` notation with a note
+explaining what's done vs deferred.
+
+**Ticked (verified shipped, with confirming source citations):**
+
+- **§0 Naming & Layout** (5 items) — Nova everywhere (label, CSS
+  prefix, code section, storage keys, settings keys); companion
+  plugin `nova-agent-bridge` shipped under `server-plugin/`; phone
+  tile renamed to "Nova" with ✴︎ icon; `/* === NOVA AGENT === */`
+  section header present.
+- **§1a–§1d OpenClaw removal** (13 items) — `OPENCLAW_API_BASE`
+  gone; `openclawMode` migrated out via `LEGACY_KEYS`; all 21 named
+  OpenClaw functions removed (only `migrateLegacyOpenClawMetadata`
+  remains by design); home-screen tile / view block / nav footer /
+  switchView branches / wirePhone wireups / sync calls / docstring
+  references all clean. Verified: `grep -cn openclaw` finds only
+  legitimate migration code + style.css's restored shared-class
+  comment + README's historical note.
+- **§1e README OpenClaw removal** ticked; the §1e *replacement* with
+  a new "Nova Agent" section marked `[~]` (brief callout shipped,
+  full rewrite is part of §12 which stays deferred).
+- **§2c picker modals** (2 items) — `novaPickProfile` + `novaPickSkill`
+  shipped via `cxPickList`.
+- **§2d** `cxAlert`/`cxConfirm` rule — verified zero native callsites.
+- **§3c tool registration** — embedded path + single `NOVA_TOOLS`
+  array shipped; **registered path fallback** (`ctx.registerFunctionTool`
+  with `shouldRegister: () => false`) genuinely deferred (covered by
+  ST 1.12.6+ minimum).
+- **§6b self-edit tools** — five `nova_*` schemas + handler factory
+  shipped; **`/api/files/*` fallback** marked `[~]` (the `fs_write`
+  path is wired; the no-bridge fallback isn't).
+- **§7a/b/c settings surfaces** (12 items) — both ST-side and in-phone
+  Settings → NOVA sections shipped with all the planned fields, plus
+  the new 📜 audit-log button from the previous PR. `nova: {...}`
+  is in `DEFAULTS`; `LEGACY_KEYS` strips `openclawMode`.
+- **§9 connection-profile handling** (6 items) — probe / validate /
+  swap / restore / mutex / transcript-feedback all shipped, covered
+  by the existing `nova-profile-swap.test.mjs` + `nova-turn.test.mjs`.
+- **§10 migration** (2 of 3 items) — manifest 0.13.0; minimum-ST-version
+  documented in CLAUDE.md / probe at runtime; **starter-file
+  auto-creation** in user data dir genuinely deferred.
+- **§11 preset** (entire section minus §11b) — file shipped
+  (`presets/openai/Command-X.json` + `README.md`); schema validated by
+  `nova-preset.test.mjs`. **§11b install flow** marked `[~]` because
+  the implementation is the **best-effort fallback path** (Blob
+  download + clipboard + cxAlert with import instructions) rather
+  than the planned `executeSlashCommandsWithOptions('/preset-import')`
+  — see the 2026-04-25 entry above for the rationale.
+- **§12 docs** (3 of 4 items) — plan markdown / CLAUDE.md /
+  copilot-instructions.md / AGENT_MEMORY append-convention all
+  shipped; **README.md rewrite** stays deferred.
+- **§13 tests** — `nova-profile-swap.test.mjs` exists with full
+  parser + executor + mutex coverage (5 suites, 18 tests). The
+  prior session's hand-off recommended this as the next slice but
+  the file already existed; ticking it now removes the misleading
+  bullet.
+
+**Genuinely deferred (left unticked, by design):**
+
+- §3c registered-path fallback (older-ST compatibility, not on the
+  v0.13.0 critical path).
+- §4b "Remember approvals this session" UI toggle (gate logic ships
+  via `novaToolGate`'s `rememberedApprovals` Set parameter, but the
+  *user-facing toggle* is unimplemented).
+- §8 `POST /shell/run` route + the "no `shell: true`" / allow-list
+  bullet — only the 501 stub exists; the shell-sandbox sprint is
+  its own PR.
+- §10 starter-file auto-creation in the user's data dir (depends
+  on the `/api/files/*` fallback path).
+- §12 README full rewrite (Features → Install → Nova Agent → Preset
+  → Tag Reference → Advanced order). The brief callout works for
+  v0.13.0 stabilisation; full rewrite is its own PR.
+- All §14 manual-validation walk-through steps — these are *user*
+  steps, never to be agent-ticked. They stay `[ ]` permanently as a
+  reload-time checklist.
+
+**Validation:** docs-only change. `node --test test/*.mjs` →
+**747/747 pass** (no regressions; no production code touched).
+
+**Hand-off notes for next session:**
+
+The plan file is now an honest orientation doc — every `[ ]` reflects
+real work, every `[x]` reflects shipped code. The remaining gaps in
+priority order:
+
+1. **§12 README rewrite** — biggest remaining doc gap. Promote the
+   Nova section from a `> **Note:**` callout to a top-level section
+   between Install and Tag Reference. Most of the content already
+   exists in CLAUDE.md and `docs/nova-agent-plan.md`; this is mostly
+   a re-shape + cross-linking job.
+2. **§4b "Remember approvals this session" toggle** — small UI
+   slice. Add a checkbox to phone Settings → NOVA, persist on
+   `settings.nova.rememberApprovalsSession`, thread the resulting
+   `Set<toolName>` through `runNovaToolDispatch` to populate the
+   gate's `rememberedApprovals` parameter. Already-shipped pure
+   helpers + tests cover the gate-side contract.
+3. **§3c registered-path fallback** — only matters for ST builds
+   missing `ConnectionManagerRequestService` (pre-1.12.6). Low
+   priority; current behavior is to `cxAlert` and bail.
+4. **§10 starter-file auto-creation** — depends on the
+   `/api/files/*` fallback path, which itself depends on whether
+   we want to support no-bridge writes at all. Open question.
+5. **§8 `/shell/run` route** — biggest deferred *implementation*
+   item. Sandbox + allow-list + audit + NDJSON streaming. This is a
+   sprint, not a PR.
+
+The §14 manual-validation list is the right user-facing acceptance
+gate for a v0.13.0 release tag; an agent should never tick those.
