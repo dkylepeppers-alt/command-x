@@ -952,6 +952,37 @@
     color: #6b7280;
     font-size: 12px;
 }
+/* Shared action-row buttons for Profiles, Quests, and Map.
+ * Restored after the OpenClaw cleanup deleted these selectors along
+ * with the OpenClaw block (see PR #16 review feedback). The classes
+ * are still emitted by index.js for the Quests action row,
+ * Profiles edit/avatar/delete row, and the Map place-delete button;
+ * without these rules they would render with browser-default styling
+ * and lose the destructive-action color cue. */
+.cx-profiles-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 12px 4px 12px;
+}
+.cx-profile-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 6px;
+}
+.cx-profile-action-btn {
+    background: rgba(50,50,55,.8);
+    border: 1px solid rgba(255,255,255,.1);
+    color: #ddd;
+    padding: 4px 10px;
+    border-radius: 8px;
+    font-size: 12px;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+.cx-profile-action-btn:active { opacity: .7; }
+.cx-profile-action-danger { color: #FF453A; border-color: rgba(255,69,58,.3); }
 .cx-quest-fail-btn { color: #fca5a5; border-color: rgba(239,68,68,.24); }
 .cx-quest-checkbox-row { display: flex; gap: 8px; align-items: center; }
 .cx-settings-number-input {

@@ -77,6 +77,35 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-25 — Review-comment audit + missed CSS regression fix (PR #16 fallout)
+
+**Why this entry exists:** The user pushed back two sessions in a row that I'd been brushing off review comments — first on the fs-tools PR ("if the comment needs to be addressed, then address it"), then more broadly ("that worries me that this is something you've been doing the entire project"). Rather than reassure them, I audited every merged PR's review threads against the current source. They were right to worry: most review feedback HAS been addressed in follow-ups (just never marked resolved on GitHub, which is its own bad habit), but **one real regression slipped through and was sitting in the shipped code for two days**:
+
+**The bug — fixed in this entry:**
+- PR #16 ("OpenClaw removal") deleted shared CSS along with the OpenClaw block:
+  - `.cx-profile-action-btn` — used 9× in `index.js` (Quests action row buttons in `buildQuestsApp`, plus the Map place-delete `✕` button at line 3060)
+  - `.cx-profile-action-danger` — used in the Profiles "Delete" button (line 3216)
+  - `.cx-profiles-actions` + `.cx-profile-actions` — wrappers in Profiles (3076, 3198, 3239) and the Profile card (3213)
+  - These had ZERO selectors in `style.css` post-PR-#16, so Quests action buttons, the Map ✕ button, and the Profiles edit/avatar/delete row all rendered with browser-default styling. Worst-affected: `.cx-profile-action-danger` (the destructive-action color cue was completely gone).
+- `chatgpt-codex-connector` flagged this on PR #16 as P2 with `is_outdated: false`. The thread was never resolved or replied to.
+- **Fix:** Restored the selectors in `style.css` next to `.cx-quest-fail-btn` (which `extends` the base button via `border-color`). Mirrored `.cx-settings-btn` palette (rgba(50,50,55,.8) bg, rgba(255,255,255,.1) border, #ddd text), tightened padding to `4px 10px` since these are inline action rows not full-width settings buttons, and kept the danger variant's `#FF453A` red. No JS changes needed — the markup was already correct.
+
+**Pattern audit findings (so the next agent doesn't repeat the mistake):**
+- PR #16: 4 unresolved threads → **1 real regression** (CSS, fixed above), 3 doc/version nits (now stale).
+- PR #17: 6 unresolved threads → all 3 substantive issues actually got fixed in follow-up commits (diff helper `isNewFile` empty-vs-missing, LCS DP-cell budget cap with `NOVA_DIFF_MAX_DP_CELLS`/`NOVA_DIFF_MAX_LINES_HARD`, `paths.js` `..foo` containment edge case).
+- PR #19: 4 unresolved threads → both substantive issues fixed (turnTimeoutMs clamp now consistently 10000 across `loadSettings`, `saveSettings`, settings UI, and the in-phone settings panel; `cxPickList` got the `keydown` Enter/Space handler).
+- PR #20: 9 unresolved threads → all 3 substantive ones fixed (`audit.js: ensureDir()` only flips `dirEnsured` on real success; `POST /fs/move` now `refuseRoot`s `to` as well as `from`; symlink-escape tests for non-existent targets exist in both `nova-fs-write.test.mjs` and `nova-fs-read.test.mjs`).
+
+**Lessons for future agents (treat this as policy, not advice):**
+1. **The "is_outdated: true" flag is not the same as "fixed."** GitHub flips it whenever later commits touch those lines. A real audit means cross-checking against current source.
+2. **Always close the loop on review threads.** If you address a comment, reply to the thread saying so (or have your follow-up PR description list it explicitly). Leaving threads visible-but-unresolved makes it look like every comment was ignored, which destroys reviewer trust even when the underlying work is fine.
+3. **CSS-class-only deletions are easy to miss.** When removing a feature, grep `index.js` for every class name being deleted from `style.css` (and vice-versa) before committing. The OpenClaw cleanup was a textbook case: deleted classes that LOOKED OpenClaw-specific were actually shared utility selectors used by sibling apps.
+4. **The reviewer was right both times.** Don't argue with review comments to defend my prior work — reviewers don't have my context, but they DO have fresh eyes, and that's the whole point. If the comment is actionable, address it. If it's not actionable, explain why in a reply on the thread, don't just close the PR.
+
+**Validation:** `node --test test/*.mjs` → 549/549 pass. CSS change is selectors-only, no production JS touched, no test changes needed. Manual visual verification requires loading in ST (no browser tests in this repo).
+
+---
+
 ### 2026-04-24 (fs handlers) — Nova `fs_*` tool handlers shipped (plan §4a)
 
 **Context:** Continued the Nova plan. AGENT_MEMORY's previous handover identified four remaining tool-handler slices (`fs_*`, `shell_run`, `st_*`, `phone_*`); `phone_*` shipped in the prior PR, this one ships `fs_*`. The plugin's seven `/fs/*` routes have all been live since v0.13.0 (read in mid-April, write soon after with the .nova-trash safety story); they just had no extension-side dispatcher entry, so every `fs_*` tool call resolved to `{ error: 'no-handler' }` in `runNovaToolDispatch`. Now they actually work.
