@@ -77,6 +77,32 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-25 — Code-review sweep (excluding server plugin) (commit pending)
+
+**Context:** Acted on the recent code review's findings except the server-plugin specifics (those will be handled in a separate sweep). Worked in priority order: P0 security/correctness → P1 perf → P2 maintainability → P3 docs.
+
+**Changes applied:**
+- **`chatKey()` (`index.js:78`)** — single canonical helper for every per-chat localStorage prefix. Eliminates the historical divergence where `cx-msgs-*`/`cx-npcs-*`/`cx-quests-*`/`cx-unread-*` fell back to `'default'` while `cx-places-*`/`cx-map-*`/`cx-loctrail-*` (and `historyContactNames` via `currentChatId`) fell back to `'no-chat'`. Standardised on `'default'` to preserve the higher-value message/NPC/quest data; the old `'no-chat'`-prefixed keys (places/maps/trails when no chat loaded) were never useful.
+- **`hideSmsTagsInDom` escaping (`index.js:271+`)** — `attrs.from` now passes through `escHtml`; the truncated preview goes through `escAttr` for `title=…` and `escHtml` for `<em>`. HTML tags in the captured `inner` are stripped before truncation so the preview shows clean text.
+- **Event-listener lifecycle (`index.js`, near `destroyPanel`)** — added `wireEventListeners` / `unwireEventListeners`. Handlers are tracked in `_eventListenerHandlers` and removed via `eventSource.removeListener` on `destroyPanel`. Idempotent so `createPanel` (rebuild path) and the enable-toggle can call freely. Closes the leak ST docs (`Writing-Extensions.md §Performance`) explicitly warn about. The init block now calls `wireEventListeners()` once when enabled rather than running 7 inline `eventSource.on(...)` registrations.
+- **`CX_PROMPT_DEPTHS` (`index.js:48`)** — frozen object exposes the depth ordering for the five `setExtensionPrompt` keys (sms:1, contacts:2, privatePhone:3, map:3, quests:4). Replaces five magic-number callsites scattered across the file. Documented rationale (lower depth = closer to the most recent message; sms must be closest, quests furthest).
+- **Settings binding tables (`index.js`, around `loadSettings`)** — `PHONE_SETTING_BINDINGS` + `NOVA_SETTING_BINDINGS` declare every setting key alongside its DOM ids, type, default, and clamps. New helpers `_readSettingFromDom`, `_writeSettingToDom`, `_coerceSettingValue` drive both `loadSettings` and `saveSettings`. Adding a new setting becomes a single-table edit.
+- **`getTotalUnread()` perf** — direct `localStorage` prefix scan over `cx-unread-${chatKey}-` instead of building the full contact list. Called from every `incrementUnread`/`markRead`/`rebuildPhone`, so the win is non-trivial for users with long histories.
+- **`loadNpcs`/`loadQuests` boundary validation** — filter non-object localStorage entries so a corrupt/foreign write can't crash the renderer.
+- **Defensive escaping** — `escHtml` on `last.time`; comment on `CONTACT_GRADIENTS` warning that values are interpolated raw into `style="background:…"` so entries must remain compile-time CSS values (`escAttr` does not validate CSS expressions).
+- **Documented `escHtml` / `escAttr` / `escapeHtml`** — JSDoc explains why all three exist (body / attribute / textarea-PCDATA contexts). `escapeHtml` is the textarea-only variant; converting `\n` to `<br>` like `escHtml` would corrupt the textarea editor.
+- **`parseSmsAttrs` contract** — documented that the regex only accepts plain `"`-delimited attributes. The LLM is the sole producer; widening the grammar requires updating both `parseSmsAttrs` and `SMS_ATTR_RE` together.
+- **Stale doc cleanup** — `index.js` header no longer claims v0.11.0; refers to `manifest.json` as version source of truth. `CLAUDE.md` updated for v0.13.0 (Nova replaces OpenClaw, all five injection keys + depths listed, `chatKey()` storage prefix described, settings binding tables noted, all six storage families enumerated). `nova/soul.md` and `nova/memory.md` carry a "runtime-mutable, repo copy is install-time default only" note.
+
+**Validation:** `node --test test/helpers.test.mjs test/nova-*.test.mjs` → 446/446 pass at every checkpoint.
+
+**Notes for future agents:**
+- **The review-pass changes preserved every existing semantic.** The settings refactor in particular is byte-for-byte equivalent to the inline code where DOM inputs are present (i.e. always, in practice). The only theoretical difference is that when *no* DOM input is wired, the new code preserves the existing `settings[key]` value where the old code sometimes hard-reset to the type default — which is the correct behaviour and a bug fix in the boundary case.
+- **`hideSmsTagsInDom` previously interpolated raw `inner` HTML inside `<em>`.** ST's renderer had already sanitised it once, so the practical risk was bounded to that pipeline. With the new escaping, even a future change to ST's renderer can't regress us.
+- **Deferred items** documented in the PR description: `localforage` migration for avatars + map images (substrate change, deserves its own PR), Nova subsystem extraction into a module tree (architectural; CLAUDE.md's "single-file" guidance is from when the file was 1k lines), and all server-plugin findings (per the problem statement).
+- **`pollPrivateMessages`'s known-contact filter (review finding (n)) was already implemented** — `parsePrivatePhoneGeneration` (line ~2460) drops events whose `from` doesn't match `getKnownContactsForPrivateMessaging()`. Verified before assuming it needed work.
+- **`AWAIT_TIMEOUT_MS` / `CLOCK_INTERVAL_MS` etc. are at module scope before `CX_PROMPT_DEPTHS`.** When adding more named constants, follow the existing grouping (caps near other caps; depth/timing/limit clusters are deliberate).
+
 ### 2026-04-24 (latest) — Phase 8b write routes + audit log shipped (review pass 2)
 
 **Context:** Initial write-routes PR landed with 9 review comments. This update addresses all of them.

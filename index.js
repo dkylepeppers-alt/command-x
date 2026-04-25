@@ -343,10 +343,17 @@ function hideSmsTagsInDom(mesId) {
             const attrs = parseSmsAttrs(attrStr);
             // `inner` is HTML-rendered text from `el.innerHTML`; treat it as
             // untrusted and re-escape for both the title attribute and the
-            // `<em>` body. A best-effort textification (strip tags) keeps the
-            // title preview from showing literal `<strong>` markup back to the
-            // user — the inline element only needs the plain text.
-            const previewText = String(inner).replace(/<[^>]*>/g, '').trim();
+            // `<em>` body. We use the browser's HTML parser via a detached
+            // `<div>` to extract `textContent` rather than a regex strip:
+            // a regex like `replace(/<[^>]*>/g, '')` is incomplete (CodeQL
+            // js/incomplete-multi-character-sanitization) and could leave
+            // `<scr<script>ipt>`-style nesting partially intact. The
+            // downstream `escAttr` / `escHtml` calls would still neutralise
+            // any leftover markup, but parser-based extraction is the
+            // canonical fix that satisfies the lint rule.
+            const _tmp = document.createElement('div');
+            _tmp.innerHTML = String(inner);
+            const previewText = (_tmp.textContent || '').trim();
             const fromLabel = attrs.from ? `📱 ${escHtml(attrs.from)}: ` : '📱 ';
             const truncated = previewText.length > 50
                 ? previewText.slice(0, 50) + '…'
@@ -7655,6 +7662,106 @@ function buildNovaSoulMemoryHandlers({
     };
 }
 
+/* ----------------------------------------------------------------------
+   Settings panel <-> module state plumbing.
+
+   Two surfaces bind to the same settings: the global ST settings panel
+   (`cx_*` / `cx_ext_*` ids defined in `settings.html`) and the in-phone
+   Settings app (`cx-set-*` ids built dynamically by the phone view).
+   Historically `loadSettings`/`saveSettings` enumerated every id pair
+   inline, which made adding a third surface or a new option a
+   three-place edit and easy to miss. The declarative tables below put
+   every binding in one place; the read/write helpers iterate them.
+
+   A single binding entry is `{ key, type, ids[], default, min?, max?,
+   options? }`. The first non-empty id wins on read; every id is
+   refreshed on write-to-DOM. The code intentionally falls back to the
+   prior `settings[key]` value when no DOM input is present, so editing
+   one surface does not blank settings the other surface owns.
+   ---------------------------------------------------------------------- */
+
+const PHONE_SETTING_BINDINGS = [
+    { key: 'enabled',                  type: 'bool', default: true,  ids: ['cx_enabled'] },
+    { key: 'styleCommands',            type: 'bool', default: true,  ids: ['cx_style_commands'] },
+    { key: 'showLockscreen',           type: 'bool', default: false, ids: ['cx_show_lockscreen'] },
+    { key: 'batchMode',                type: 'bool', default: false, ids: ['cx_ext_batch_mode'] },
+    { key: 'autoDetectNpcs',           type: 'bool', default: true,  ids: ['cx_ext_auto_detect_npcs'] },
+    { key: 'manualHybridPrivateTexts', type: 'bool', default: true,  ids: ['cx_set_private_hybrid', 'cx-set-private-hybrid'] },
+    { key: 'trackLocations',           type: 'bool', default: true,  ids: ['cx_ext_track_locations', 'cx-set-track-locations'] },
+    { key: 'autoRegisterPlaces',       type: 'bool', default: true,  ids: ['cx_ext_auto_register_places', 'cx-set-auto-places'] },
+    { key: 'showLocationTrails',       type: 'bool', default: true,  ids: ['cx_ext_show_trails', 'cx-set-trails'] },
+    { key: 'contactsInjectEveryN',     type: 'int',  default: 1, min: 1, ids: ['cx_ext_contacts_every_n'] },
+    { key: 'questsInjectEveryN',       type: 'int',  default: 1, min: 1, ids: ['cx_ext_quests_every_n'] },
+    { key: 'mapInjectEveryN',          type: 'int',  default: 3, min: 1, ids: ['cx_ext_map_every_n', 'cx-set-map-every-n'] },
+    { key: 'autoPrivatePollEveryN',    type: 'int',  default: 0, min: 0, ids: ['cx_ext_auto_private_poll_n', 'cx-set-auto-poll-n'] },
+];
+
+const NOVA_SETTING_BINDINGS = [
+    { key: 'profileName',  type: 'string', default: '', ids: ['cx_nova_profile', 'cx-set-nova-profile'] },
+    { key: 'defaultTier',  type: 'enum',   options: ['read', 'write', 'full'], default: 'read', ids: ['cx_nova_default_tier', 'cx-set-nova-tier'] },
+    { key: 'maxToolCalls', type: 'int',    default: NOVA_DEFAULTS.maxToolCalls, min: 1, max: 100, ids: ['cx_nova_max_tool_calls', 'cx-set-nova-max-tools'] },
+    { key: 'turnTimeoutMs', type: 'int',   default: NOVA_DEFAULTS.turnTimeoutMs, min: 10000, max: 3600000, ids: ['cx_nova_turn_timeout_ms', 'cx-set-nova-timeout'] },
+    // pluginBaseUrl uses the default when the user clears the field —
+    // an empty plugin URL is never useful and the bridge needs *some*
+    // path to probe.
+    { key: 'pluginBaseUrl', type: 'string', default: NOVA_DEFAULTS.pluginBaseUrl, defaultOnEmpty: true, ids: ['cx_nova_plugin_base_url', 'cx-set-nova-plugin-url'] },
+];
+
+/** Read a DOM input value for a binding; return `undefined` if no id is wired. */
+function _readSettingFromDom(b) {
+    for (const id of b.ids) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        if (b.type === 'bool') return !!el.checked;
+        // For text/number fields, treat an empty string the same as
+        // "not present" so the next id in the chain (or the existing
+        // settings value) wins. This matches the legacy
+        // `?? document.getElementById(...)?.value` behaviour.
+        const raw = el.value;
+        if (raw === undefined || raw === null || raw === '') continue;
+        return raw;
+    }
+    return undefined;
+}
+
+/** Write a settings value out to every DOM id wired to this binding. */
+function _writeSettingToDom(b, value) {
+    for (const id of b.ids) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        if (b.type === 'bool') el.checked = !!value;
+        else el.value = String(value ?? '');
+    }
+}
+
+/** Coerce a raw DOM string into the binding's typed value, applying clamps. */
+function _coerceSettingValue(b, raw, current) {
+    switch (b.type) {
+        case 'bool':
+            return raw === undefined ? (current ?? b.default) : !!raw;
+        case 'int': {
+            const n = Number(raw);
+            if (!Number.isFinite(n)) return current ?? b.default;
+            let v = Math.floor(n);
+            if (typeof b.min === 'number' && v < b.min) return current ?? b.default;
+            if (typeof b.max === 'number') v = Math.min(b.max, v);
+            return v;
+        }
+        case 'enum': {
+            const v = String(raw ?? '');
+            if (Array.isArray(b.options) && b.options.includes(v)) return v;
+            return current ?? b.default;
+        }
+        case 'string':
+        default: {
+            if (raw === undefined) return current ?? b.default;
+            const trimmed = String(raw || '').trim();
+            if (!trimmed && b.defaultOnEmpty) return b.default;
+            return trimmed;
+        }
+    }
+}
+
 function loadSettings() {
     const ctx = getContext();
     if (ctx.extensionSettings[EXT]) Object.assign(settings, ctx.extensionSettings[EXT]);
@@ -7675,80 +7782,43 @@ function loadSettings() {
     // NOVA_DEFAULTS in a newer release. Re-merge NOVA_DEFAULTS under whatever is
     // stored so every key in the documented shape is always readable.
     settings.nova = { ...NOVA_DEFAULTS, ...(settings.nova || {}) };
-    const cb = (id, key, fallback = false) => {
-        const el = document.getElementById(id);
-        if (el) el.checked = settings[key] ?? fallback;
-    };
-    cb('cx_enabled', 'enabled', true);
-    cb('cx_style_commands', 'styleCommands', true);
-    cb('cx_show_lockscreen', 'showLockscreen', false);
-    cb('cx_ext_batch_mode', 'batchMode', false);
-    cb('cx_ext_auto_detect_npcs', 'autoDetectNpcs', true);
-    cb('cx_set_private_hybrid', 'manualHybridPrivateTexts', true);
-    cb('cx_ext_track_locations', 'trackLocations', true);
-    cb('cx_ext_auto_register_places', 'autoRegisterPlaces', true);
-    cb('cx_ext_show_trails', 'showLocationTrails', true);
-    const contactsN = document.getElementById('cx_ext_contacts_every_n');
-    if (contactsN) contactsN.value = Math.max(1, Number(settings.contactsInjectEveryN) || 1);
-    const questsN = document.getElementById('cx_ext_quests_every_n');
-    if (questsN) questsN.value = Math.max(1, Number(settings.questsInjectEveryN) || 1);
-    const mapN = document.getElementById('cx_ext_map_every_n');
-    if (mapN) mapN.value = Math.max(1, Number(settings.mapInjectEveryN) || 3);
-    const autoPollN = document.getElementById('cx_ext_auto_private_poll_n');
-    if (autoPollN) autoPollN.value = Math.max(0, Number(settings.autoPrivatePollEveryN) || 0);
-    // --- Nova settings (v0.13.0) ---
+
+    // Push every phone setting out to its DOM id(s).
+    for (const b of PHONE_SETTING_BINDINGS) {
+        const value = settings[b.key] ?? b.default;
+        if (b.type === 'int') {
+            const min = typeof b.min === 'number' ? b.min : 0;
+            _writeSettingToDom(b, Math.max(min, Number(value) || b.default));
+        } else {
+            _writeSettingToDom(b, value);
+        }
+    }
+    // Same for Nova settings (read out of the nested `settings.nova`).
     const nova = settings.nova || NOVA_DEFAULTS;
-    const novaProfile = document.getElementById('cx_nova_profile');
-    if (novaProfile) novaProfile.value = String(nova.profileName || '');
-    const novaTier = document.getElementById('cx_nova_default_tier');
-    if (novaTier) novaTier.value = String(nova.defaultTier || 'read');
-    const novaMax = document.getElementById('cx_nova_max_tool_calls');
-    if (novaMax) novaMax.value = Math.max(1, Number(nova.maxToolCalls) || NOVA_DEFAULTS.maxToolCalls);
-    const novaTimeout = document.getElementById('cx_nova_turn_timeout_ms');
-    if (novaTimeout) novaTimeout.value = Math.max(10000, Number(nova.turnTimeoutMs) || NOVA_DEFAULTS.turnTimeoutMs);
-    const novaBase = document.getElementById('cx_nova_plugin_base_url');
-    if (novaBase) novaBase.value = String(nova.pluginBaseUrl || NOVA_DEFAULTS.pluginBaseUrl);
+    for (const b of NOVA_SETTING_BINDINGS) {
+        const value = nova[b.key] ?? b.default;
+        if (b.type === 'int') {
+            const min = typeof b.min === 'number' ? b.min : 0;
+            _writeSettingToDom(b, Math.max(min, Number(value) || b.default));
+        } else {
+            _writeSettingToDom(b, value);
+        }
+    }
 }
 
 function saveSettings() {
-    settings.enabled = document.getElementById('cx_enabled')?.checked ?? true;
-    settings.styleCommands = document.getElementById('cx_style_commands')?.checked ?? true;
-    settings.showLockscreen = document.getElementById('cx_show_lockscreen')?.checked ?? false;
-    settings.batchMode = document.getElementById('cx_ext_batch_mode')?.checked ?? settings.batchMode ?? false;
-    settings.autoDetectNpcs = document.getElementById('cx_ext_auto_detect_npcs')?.checked ?? settings.autoDetectNpcs ?? true;
-    settings.manualHybridPrivateTexts = document.getElementById('cx_set_private_hybrid')?.checked ?? document.getElementById('cx-set-private-hybrid')?.checked ?? settings.manualHybridPrivateTexts ?? true;
-    settings.trackLocations = document.getElementById('cx_ext_track_locations')?.checked ?? document.getElementById('cx-set-track-locations')?.checked ?? settings.trackLocations ?? true;
-    settings.autoRegisterPlaces = document.getElementById('cx_ext_auto_register_places')?.checked ?? document.getElementById('cx-set-auto-places')?.checked ?? settings.autoRegisterPlaces ?? true;
-    settings.showLocationTrails = document.getElementById('cx_ext_show_trails')?.checked ?? document.getElementById('cx-set-trails')?.checked ?? settings.showLocationTrails ?? true;
-    const contactsNRaw = Number(document.getElementById('cx_ext_contacts_every_n')?.value);
-    settings.contactsInjectEveryN = Number.isFinite(contactsNRaw) && contactsNRaw >= 1 ? Math.floor(contactsNRaw) : (settings.contactsInjectEveryN || 1);
-    const questsNRaw = Number(document.getElementById('cx_ext_quests_every_n')?.value);
-    settings.questsInjectEveryN = Number.isFinite(questsNRaw) && questsNRaw >= 1 ? Math.floor(questsNRaw) : (settings.questsInjectEveryN || 1);
-    const mapNRaw = Number(document.getElementById('cx_ext_map_every_n')?.value ?? document.getElementById('cx-set-map-every-n')?.value);
-    settings.mapInjectEveryN = Number.isFinite(mapNRaw) && mapNRaw >= 1 ? Math.floor(mapNRaw) : (settings.mapInjectEveryN || 3);
-    // cx_ext_auto_private_poll_n = ST settings panel; cx-set-auto-poll-n = in-phone settings view
-    const autoPollNRaw = Number(document.getElementById('cx_ext_auto_private_poll_n')?.value ?? document.getElementById('cx-set-auto-poll-n')?.value);
-    settings.autoPrivatePollEveryN = Number.isFinite(autoPollNRaw) && autoPollNRaw >= 0 ? Math.floor(autoPollNRaw) : (settings.autoPrivatePollEveryN || 0);
-    // --- Nova settings (v0.13.0) ---
+    // Pull each phone setting from the DOM (first wired id wins),
+    // coerce to its typed value, and write back to `settings`. The
+    // current value is passed in so missing-DOM fields preserve state.
+    for (const b of PHONE_SETTING_BINDINGS) {
+        const raw = _readSettingFromDom(b);
+        settings[b.key] = _coerceSettingValue(b, raw, settings[b.key]);
+    }
+    // Nova settings live under settings.nova.
     settings.nova = settings.nova || { ...NOVA_DEFAULTS };
-    const novaProfileRaw = document.getElementById('cx_nova_profile')?.value ?? document.getElementById('cx-set-nova-profile')?.value;
-    if (novaProfileRaw !== undefined) settings.nova.profileName = String(novaProfileRaw || '').trim();
-    const novaTierRaw = document.getElementById('cx_nova_default_tier')?.value ?? document.getElementById('cx-set-nova-tier')?.value;
-    if (novaTierRaw !== undefined && ['read', 'write', 'full'].includes(String(novaTierRaw))) {
-        settings.nova.defaultTier = String(novaTierRaw);
-    }
-    const novaMaxRaw = Number(document.getElementById('cx_nova_max_tool_calls')?.value ?? document.getElementById('cx-set-nova-max-tools')?.value);
-    if (Number.isFinite(novaMaxRaw) && novaMaxRaw >= 1) {
-        settings.nova.maxToolCalls = Math.min(100, Math.floor(novaMaxRaw));
-    }
-    const novaTimeoutRaw = Number(document.getElementById('cx_nova_turn_timeout_ms')?.value ?? document.getElementById('cx-set-nova-timeout')?.value);
-    if (Number.isFinite(novaTimeoutRaw) && novaTimeoutRaw >= 10000) {
-        settings.nova.turnTimeoutMs = Math.min(3600000, Math.floor(novaTimeoutRaw));
-    }
-    const novaBaseRaw = document.getElementById('cx_nova_plugin_base_url')?.value ?? document.getElementById('cx-set-nova-plugin-url')?.value;
-    if (novaBaseRaw !== undefined) {
-        const trimmed = String(novaBaseRaw || '').trim();
-        settings.nova.pluginBaseUrl = trimmed || NOVA_DEFAULTS.pluginBaseUrl;
+    for (const b of NOVA_SETTING_BINDINGS) {
+        const raw = _readSettingFromDom(b);
+        settings.nova[b.key] = _coerceSettingValue(b, raw, settings.nova[b.key]);
     }
     const ctx = getContext();
     ctx.extensionSettings[EXT] = { ...settings };

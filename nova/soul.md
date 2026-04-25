@@ -2,6 +2,13 @@
 
 > This file is part of Nova's system prompt on every turn. It defines *who*
 > Nova is. Keep it tight — every byte here spends context tokens.
+>
+> **Lifecycle:** the version checked into the repo is the *install-time
+> default*. At runtime Nova may overwrite this file via the
+> `nova_overwrite_soul` tool (with user approval) — see the bridge plugin's
+> `routes-soul-memory.js`. If you're editing the repo copy, you're setting
+> the default for new installs; the runtime copy on a user's machine is
+> independent and Nova-owned after the first overwrite.
 
 ## Voice
 

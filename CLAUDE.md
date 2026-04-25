@@ -4,28 +4,33 @@
 
 ## What This Is
 
-A SillyTavern third-party extension (v0.10.0) that adds a smartphone UI overlay to RP chats. Five apps: **Command-X** (neural commands + unified messaging), **Profiles** (NPC intel cards), **Quests** (persistent story tracker), **OpenClaw** (bridge console), and **Settings**. Messages flow through the RP — the extension injects system prompts so the LLM wraps phone replies in `[sms]` tags, which get extracted for the phone UI.
+A SillyTavern third-party extension (v0.13.0) that adds a smartphone UI overlay to RP chats. Apps: **Command-X** (neural commands + unified messaging), **Profiles** (NPC intel cards), **Quests** (persistent story tracker), **Map** (places + contact pins), **Nova** (in-phone agent backed by the `nova-agent-bridge` server plugin), and **Settings**. Messages flow through the RP — the extension injects system prompts so the LLM wraps phone replies in `[sms]` tags, which get extracted for the phone UI.
+
+> The previous "OpenClaw" app was renamed to **Nova** in v0.13.0 along with the migration from `openclaw-bridge` → `nova-agent-bridge`. References to OpenClaw in any older notes or branches are stale.
 
 ## File Layout
 
 ```
 command-x/
-├── index.js          # All extension logic (~3.8k lines)
-├── style.css         # All styling (~750 lines)
-├── manifest.json     # ST extension manifest (v0.10.0)
+├── index.js          # All extension logic (~7.7k lines)
+├── style.css         # All styling (~1.4k lines)
+├── manifest.json     # ST extension manifest — single source of truth for VERSION
 ├── settings.html     # ST settings panel (checkboxes + number inputs)
 ├── README.md         # User-facing docs
+├── AGENT_MEMORY.md   # Append-only shared memory across agent sessions
+├── CLAUDE.md         # (this file) Architecture and conventions reference
 ├── LICENSE           # MIT
 ├── .gitignore
-├── docs/             # In-repo docs
-│   └── code-review-plan.md
-├── test/             # Node --test unit tests
-│   └── helpers.test.mjs  # 63 assertions for pure helpers
-├── .github/          # GitHub config
+├── docs/             # In-repo docs (review plans, etc.)
+├── nova/             # Default install-time soul.md + memory.md (Nova-owned at runtime)
+├── presets/          # Bundled Nova preset JSON
+├── server-plugin/    # nova-agent-bridge: filesystem + audit + soul/memory routes
+├── test/             # Node --test unit tests (helpers + nova-* suites, 446 cases)
+├── .github/          # GitHub config + copilot-instructions.md
 └── st-docs/          # Local copy of SillyTavern docs (reference only)
 ```
 
-This is a **single-file JS architecture**. All logic lives in `index.js`. Don't split it — ST loads one JS entry point per extension.
+This was originally a single-file JS architecture and remains so today. The single-file constraint dates from when the file was ~1k lines; at ~7.7k lines (most of which is the Nova subsystem) the question of extracting `nova/*.js` modules is open and tracked as a deferred refactor in the code-review history. For now, all logic still lives in `index.js`.
 
 ## Core Architecture
 
@@ -37,10 +42,13 @@ The extension does NOT parse unstructured LLM output. Instead:
 2. LLM generates with those tags in its output
 3. Extension extracts tagged content via regex
 
-Three injection keys:
+Five injection keys, each with a fixed depth — see `CX_PROMPT_DEPTHS` in `index.js` for the canonical table:
+
 - **`command-x-sms`** (depth 1) — Injected when user sends a phone message. Tells LLM to wrap reply in `[sms from="Name" to="user"]...[/sms]`. Cleared after reply received.
 - **`command-x-contacts`** (depth 2) — Persistent injection (throttled by `contactsInjectEveryN`). Asks LLM to include `[status][...JSON...][/status]` NPC state at end of each response.
-- **`command-x-quests`** (depth 2) — Persistent injection (throttled by `questsInjectEveryN`). Asks LLM to include `[quests][...JSON...][/quests]` quest state updates.
+- **`command-x-private-phone`** (depth 3) — Private phone events context for out-of-band private messaging awareness.
+- **`command-x-map`** (depth 3) — Known places list. Adds an optional `place` field to each `[status]` entry.
+- **`command-x-quests`** (depth 4) — Persistent injection (throttled by `questsInjectEveryN`). Asks LLM to include `[quests][...JSON...][/quests]` quest state updates.
 
 ### Event Flow
 
@@ -74,8 +82,11 @@ LLM RESPONDS:
 ```javascript
 // --- Module-level ---
 settings            // {enabled, styleCommands, showLockscreen, panelOpen, batchMode,
-                    //  autoDetectNpcs, manualHybridPrivateTexts, openclawMode,
-                    //  contactsInjectEveryN, questsInjectEveryN}
+                    //  autoDetectNpcs, manualHybridPrivateTexts, trackLocations,
+                    //  autoRegisterPlaces, showLocationTrails, contactsInjectEveryN,
+                    //  questsInjectEveryN, mapInjectEveryN, autoPrivatePollEveryN,
+                    //  nova: { profileName, defaultTier, maxToolCalls, turnTimeoutMs,
+                    //          pluginBaseUrl, activeSkill }}
 phoneContainer      // HTMLElement | null — wrapper div injected into body
 clockIntervalId     // setInterval ID — cleared in destroyPanel() + wirePhone()
 commandMode         // null | 'COMMAND' | 'BELIEVE' | 'FORGET' | 'COMPEL'
@@ -88,9 +99,12 @@ composeQueue        // [{contactName, text, displayText, isNeural, cmdType}]
 _turnCounter        // increments on MESSAGE_RECEIVED; drives throttle
 _historyContactNamesCache // { chatId, names } — invalidated on write
 _lastMsgTsCache     // Map<`${chatId}::${name}` → timestamp>
+_eventListenerHandlers // {eventSource, event_types, handlers} | null —
+                       // canonical refs for symmetric removeListener on
+                       // destroyPanel (see ST docs §Performance)
 
 // --- Interaction-level (set in wirePhone / event handlers) ---
-currentApp          // 'cmdx' | 'profiles' | 'quests' | 'openclaw' | 'phone-settings' | null
+currentApp          // 'cmdx' | 'profiles' | 'quests' | 'map' | 'nova' | 'phone-settings' | null
 currentContactName  // Name of the contact whose chat is open
 awaitingReply       // true after sending, false when [sms] received or timeout
 typingTimeout       // setTimeout ID for the 30s awaitingReply cleanup
@@ -99,7 +113,8 @@ typingTimeout       // setTimeout ID for the 30s awaitingReply cleanup
 ### Named Constants
 
 ```javascript
-VERSION              // '0.10.0' — single-sourced
+VERSION              // single-sourced; mirror of manifest.json#version
+CX_PROMPT_DEPTHS     // {sms:1, contacts:2, privatePhone:3, map:3, quests:4}
 AWAIT_TIMEOUT_MS     // 30_000 — awaitingReply auto-clear timeout
 CLOCK_INTERVAL_MS    // 30_000 — clock display refresh interval
 MESSAGE_HISTORY_CAP  // 200 — max messages stored per contact
@@ -112,11 +127,16 @@ CONTACT_EMOJIS       // string[] — default avatar emoji pool
 
 ### Storage (localStorage)
 
-All keyed per SillyTavern chat ID:
-- **`cx-msgs-{chatId}-{contactName}`** — Message history array (capped at `MESSAGE_HISTORY_CAP`)
-- **`cx-npcs-{chatId}`** — NPC store array (capped at 50)
-- **`cx-unread-{chatId}-{contactName}`** — Unread count integer
-- **`cx-quests-{chatId}`** — Quest store array (capped at `QUEST_HISTORY_CAP`)
+All keyed per SillyTavern chat ID via the canonical `chatKey()` helper (which falls back to `'default'` when no chat is loaded — every storage prefix uses this same helper to avoid silent data divergence):
+
+- **`cx-msgs-{chatKey}-{contactName}`** — Message history array (capped at `MESSAGE_HISTORY_CAP`)
+- **`cx-npcs-{chatKey}`** — NPC store array (capped at 50)
+- **`cx-unread-{chatKey}-{contactName}`** — Unread count integer
+- **`cx-quests-{chatKey}`** — Quest store array (capped at `QUEST_HISTORY_CAP`)
+- **`cx-places-{chatKey}`** — Map place store (capped at `PLACES_CAP`)
+- **`cx-map-{chatKey}`** — Map metadata + uploaded background image
+- **`cx-loctrail-{chatKey}-{contactName}`** — Per-contact location trail (capped at `LOCATION_TRAIL_CAP`)
+- **`cx-global-avatars`** — Cross-chat avatar data-URL store (capped at 50 entries × 100 KB each)
 
 Messages store `mesId` (the ST message index) so they can be cleaned up on swipe/regen.
 
@@ -140,20 +160,22 @@ Flow:
 
 Requires ST build that exposes `generateQuietPrompt`. Gated by `settings.manualHybridPrivateTexts`.
 
-## OpenClaw Operate Mode
+## Nova Agent (replaces OpenClaw)
 
-OpenClaw is a bridge to a local `openclaw-bridge` ST server plugin. Three modes:
-- **observe** — Read-only context inspection
-- **assist** — Advice / planning over the current chat
-- **operate** — OpenClaw proposes `slash.run` actions; the user approves/rejects each before local execution
+Nova is the in-phone tool-using agent. It replaces the legacy OpenClaw app and ships with a companion server plugin under `server-plugin/nova-agent-bridge/`. The architecture is a strict "tier × tool registry × user-approval" pipeline:
 
-Operate flow (`settings.openclawMode === 'operate'`):
-1. User sends context to OpenClaw via the OpenClaw app
-2. `sendToOpenClaw()` POSTs to `/api/plugins/openclaw-bridge/operate`
-3. Response contains an `actions[]` array of proposed slash commands
-4. `applyOpenClawResponse()` renders each action as an approval card
-5. On approve: card calls `executeApprovedAction()` which runs the slash via ST `/run`
-6. On reject: action is discarded, no side effects
+- **Tiers** (`read` / `write` / `full`) come from `settings.nova.defaultTier`. Each tool declares the tier it requires; `novaToolGate` denies any tool whose required tier exceeds the active tier.
+- **Tool registry** (`NOVA_TOOLS`) lists every callable tool — fs reads/writes/move/delete, audit log access, soul/memory append/overwrite, and the in-progress `shell.run`. Each entry is a small JSON schema for its arguments.
+- **Approval flow:** every tool call surfaces an in-phone modal showing the proposed arguments (with a unified diff for fs writes via `buildNovaUnifiedDiff`). The user approves or rejects per-call. There is no auto-approve setting.
+- **Bridge plugin** (`/api/plugins/nova-agent-bridge/...`): hosts the actual fs / audit / soul-memory routes. Every fs write runs through `normalizeNovaPath` → `fs.realpath` → re-deny-list, with a parent-walk fallback so non-existent leaves still get verified (closes the symlink-escape on first-write).
+- **Audit:** every dispatched tool — approved or denied — appends a JSONL line to `<root>/.nova-trash/audit/audit-YYYY-MM-DD.jsonl` via `audit.js`, with content/data/payload/body/raw stripped at top-level and via a JSON.stringify replacer for nested occurrences.
+
+`settings.nova` shape (see `NOVA_DEFAULTS`):
+```
+{ profileName, defaultTier, maxToolCalls, turnTimeoutMs, pluginBaseUrl, activeSkill }
+```
+
+The full set of bindings is declared in `NOVA_SETTING_BINDINGS` alongside `PHONE_SETTING_BINDINGS` — both are consumed by the table-driven `loadSettings` / `saveSettings` so adding a new option is a single-table edit.
 
 ## SillyTavern APIs Used
 
@@ -246,4 +268,9 @@ Manual integration testing (no automated browser tests):
 - **v0.7** — NPC contacts via `[contacts]` tags, command mode drawer
 - **v0.8** — Unified Messages + Command-X, subliminal neural commands, user persona filter, neural toggle, `[sms from/to]` routing, swipe/regen handling
 - **v0.9** — Compose queue (batch mode), notification badges, `[status]` tag (replaces `[contacts]`), Profiles app, Settings app, toast notifications, recency sort, ST character avatars, dead app cleanup
-- **v0.10.0** — Quests app, OpenClaw app, `[quests]` tag, private polling, quest enrichment via `generateQuietPrompt`, per-chat metadata persistence, comprehensive code review (security escaping, CSP-safe avatar fallback, clock-leak fix, event-gate on `settings.enabled`, `MESSAGE_DELETED` mesId fix, `[sms]` routing tightened, caches, upload size cap, throttled injections, unit tests, accessibility, `cxAlert`/`cxConfirm`, toast improvements, send-button guard)
+- **v0.10.0** — Quests app, OpenClaw app, `[quests]` tag, private polling, quest enrichment via `generateQuietPrompt`, per-chat metadata persistence
+- **v0.11.x** — Map app + `[place]` tag, contact pin tracking, location trails, defensive escaping pass, throttled status/quest injections, unit-test suite expanded
+- **v0.12.x** — Map upload + schematic mode, place editor, persistent map metadata, polling cadence, more cache invalidation hooks
+- **v0.13.0** — OpenClaw → **Nova** rename and architecture rewrite. New `nova-agent-bridge` server plugin replaces `openclaw-bridge`. Tier × tool registry × user-approval pipeline; fs read/write/move/delete + audit JSONL + soul/memory append/overwrite tools. Symlink-escape hardening (parent-realpath walk for non-existent write targets), strict base64 validation, `.nova-trash/` deny-list, audit log content redaction.
+- **v0.13.x review sweep (this work)** — Code-review-driven hygiene pass: unified `chatKey()` storage prefix helper (eliminates `'no-chat'`/`'default'` divergence), event-listener `wireEventListeners`/`unwireEventListeners` lifecycle (closes ST-docs leak), tightened `hideSmsTagsInDom` escaping, `CX_PROMPT_DEPTHS` constants, declarative `PHONE_SETTING_BINDINGS`/`NOVA_SETTING_BINDINGS` tables for `loadSettings`/`saveSettings`, `getTotalUnread` direct-key scan, `loadNpcs`/`loadQuests` boundary validation, `parseSmsAttrs` regex contract documented, `escHtml`/`escAttr`/`escapeHtml` JSDoc'd, `CONTACT_GRADIENTS` invariant comment, defense-in-depth `escHtml` on `last.time`, `nova/soul.md` + `nova/memory.md` runtime-mutation note. Server-plugin specifics deferred to a separate sweep.
+
