@@ -81,11 +81,21 @@ _Newest entries first. Append a new entry here at the end of every PR._
 
 **Context:** Continued the Nova plan. AGENT_MEMORY's previous handover identified four remaining tool-handler slices (`fs_*`, `shell_run`, `st_*`, `phone_*`); `phone_*` shipped in the prior PR, this one ships `fs_*`. The plugin's seven `/fs/*` routes have all been live since v0.13.0 (read in mid-April, write soon after with the .nova-trash safety story); they just had no extension-side dispatcher entry, so every `fs_*` tool call resolved to `{ error: 'no-handler' }` in `runNovaToolDispatch`. Now they actually work.
 
+**Pushback addressed in this PR:** Code Review on the unit-test-only first cut said "you're proving the transport contract via mock fetch but no end-to-end coverage against the real plugin." That's a fair callout — the unit tests prove URL/body composition + error-shape forwarding, but they don't prove that the URL we build is the URL the plugin actually parses, or that the safety story (overwrite-backs-up, delete-trashes, root-refusal, deny-list, audit-no-raw-content) is observable from the LLM's tool contract. So a second test file ships in the same PR to fill that gap, see "Integration coverage" below.
+
 **What shipped:**
 - `_novaBridgeRequest({ pluginBaseUrl, method, route, query, body, fetchImpl })` — generic, defensive HTTP transport in `index.js` immediately before `buildNovaFsHandlers`. Closed-enum failure surface: `no-fetch`, `nova-bridge-unreachable`, `nova-bridge-error`. Surfaces server `sendError({ error })` payloads verbatim with a `status` field attached. **NOTE:** This is intentionally separate from the existing `_novaBridgeWrite` (which is hard-coded to POST `/fs/write` with a fixed body shape and is still used by `buildNovaSoulMemoryHandlers`). The two helpers do not share code today; if you ever consolidate, audit the soul/memory tests to keep their mock surface stable.
 - `buildNovaFsHandlers({ pluginBaseUrl?, fetchImpl? })` factory in the NOVA AGENT section right after `buildNovaPhoneHandlers`. Returns the 7 `fs_*` handlers (`fs_list`, `fs_read`, `fs_stat`, `fs_search`, `fs_write`, `fs_delete`, `fs_move`).
 - `novaHandleSend` now composes three handler maps: `{ ...buildNovaSoulMemoryHandlers({}), ...buildNovaPhoneHandlers({}), ...buildNovaFsHandlers({}) }`.
 - `test/nova-fs-tools.test.mjs` — 43 assertions across 10 suites. Inline-copies the helper + transport per the AGENT_MEMORY convention.
+- **`test/nova-fs-integration.test.mjs`** — **NEW.** 19 assertions across 7 suites. Wires the **real** plugin route handlers from `routes-fs-{read,write}.js` against a real OS tempdir, then dispatches the **real** `buildNovaFsHandlers` through a fake `fetch` that maps URL+method onto those handlers. Proves end-to-end:
+  - **Round-trip:** `fs_write` → `fs_read` returns same content; `fs_read` `maxBytes` truncates server-side; `fs_stat` 404 on missing.
+  - **Safety contract:** `fs_write` without `overwrite:true` returns canonical `409 exists`; `fs_write` with `overwrite:true` writes a `.nova-trash/<bucket>/<path>` backup before clobbering (asserted by reading the backup off disk); `fs_delete` always trashes (canary file readable from `.nova-trash`); `fs_delete({path:'.'})` is `refused-root`.
+  - **Move:** rename works, default refuses to clobber (`destination-exists`), `overwrite:true` backs up the destination.
+  - **List + search:** files written via the tool show up in `fs_list`; recursive descent works; `fs_search` finds substring hits across files; glob filtering is honoured.
+  - **Path safety:** `../escape.txt` → `invalid-path`; `.git/HEAD` deny-list rejection observable from the tool surface.
+  - **Audit trail:** four ops produce four entries; raw write content NEVER appears in the audit-log JSON (asserted with a literal substring scan).
+  - **Transport surface:** thrown fetch → `nova-bridge-unreachable`.
 - `test/nova-ui-wiring.test.mjs` gained a source-contract assertion that `novaHandleSend` calls `buildNovaFsHandlers(`, `_novaBridgeRequest` is defined, and all 7 fs tool names appear in the source.
 
 **Contract locked by tests:**
@@ -99,8 +109,10 @@ _Newest entries first. Append a new entry here at the end of every PR._
 - **Error bodies (non-2xx with non-JSON or JSON-without-`error`) are truncated to 400 chars.** A 500 returning a 2KB HTML stack trace doesn't blow up the transcript.
 
 **Inline-copy convention follow-through:**
-- When you edit `_novaBridgeRequest` or `buildNovaFsHandlers` in `index.js`, mirror the edit into `test/nova-fs-tools.test.mjs`. The inline copy is the Node-testable twin; there's still no JSDOM/ST harness.
-- The fuzz suite at the bottom of the test file walks every handler against `[undefined, null, 0, 1, '', 'a', true, false, NaN, [], ['a','b'], {}, { path: null }, { path: 0 }]` and asserts no throws + a known result shape (`error` string OR one of `ok | entries | content | results | type | path | from`). When you add a new handler, either match one of these shapes or extend the assertion list.
+- When you edit `_novaBridgeRequest` or `buildNovaFsHandlers` in `index.js`, mirror the edit into BOTH `test/nova-fs-tools.test.mjs` AND `test/nova-fs-integration.test.mjs` — the integration file inline-copies the same helpers so it doesn't depend on a Node-importable `index.js`.
+- **Forced divergence between the two inline copies:** the integration file imports `node:path` at the top, so its inline copy uses `path: pathArg` in destructuring to avoid shadowing the module binding. Production source + the unit-test file both use `path` directly. The integration file's header comment documents this. Don't try to "normalise" — making the unit-test file use `pathArg` would break ITS mirror with production.
+- The fuzz suite at the bottom of the unit test file walks every handler against `[undefined, null, 0, 1, '', 'a', true, false, NaN, [], ['a','b'], {}, { path: null }, { path: 0 }]` and asserts no throws + a known result shape (`error` string OR one of `ok | entries | content | results | type | path | from`). When you add a new handler, either match one of these shapes or extend the assertion list.
+- The integration file's fake-fetch dispatch table only knows the 7 `/fs/*` routes. If you add a new route (e.g. `/shell/run`), extend `makePluginFetch` so future handler integration tests can reuse the harness.
 
 **What's still outstanding on the plan (copy-forward):**
 1. **`buildNovaStTools` factory** for the 10 ST-API tools (`st_list_characters`, `st_read_character`, `st_write_character`, `st_list_worldbooks`, `st_read_worldbook`, `st_write_worldbook`, `st_run_slash`, `st_get_context`, `st_list_profiles`, `st_get_profile`). ST-API only, no plugin dependency. Currently every `st_*` call returns `{ error: 'no-handler' }`. The natural next slice. The dispatch path through `getContext()` lives entirely in `index.js`; would inline-copy a tiny `getContext` mock for tests.
@@ -110,7 +122,7 @@ _Newest entries first. Append a new entry here at the end of every PR._
 5. Plugin CSRF + session-cookie check on every route (plan §8c).
 6. Plan checkbox refresh pass (cosmetic).
 
-**Validation:** `node --check index.js` clean; `node --test test/*.mjs` → **530/530 pass** (+45 net since prior baseline at 485: 43 new fs-tools tests + 1 new ui-wiring source-contract assertion + 1 reused assertion that grew its handler list). CodeQL + Code Review pending.
+**Validation:** `node --check index.js` clean; `node --test test/*.mjs` → **549/549 pass** (+64 net since prior baseline at 485: 43 new fs-tools unit tests + 19 new fs-integration tests + 2 new ui-wiring source-contract assertions).
 
 ### 2026-04-24 — Docs housekeeping pass (v0.13.0 alignment)
 
