@@ -438,6 +438,30 @@
 .cx-modal-btn-secondary { background: rgba(255,255,255,.1); color: #e5e7eb; }
 .cx-modal-btn-danger { background: rgba(239,68,68,.2); color: #fca5a5; border: 1px solid rgba(239,68,68,.3); }
 
+/* ---- Nova Soul & Memory editor (plan §6b). Reuses .cx-modal-overlay + .cx-modal-box. ---- */
+.cx-modal-box.cx-nova-sm-box { max-width: 560px; max-height: 88vh; overflow-y: auto; }
+.cx-nova-sm-status {
+    font-size: 12px; color: #9ca3af;
+    background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.06);
+    border-radius: 8px; padding: 6px 10px; min-height: 14px;
+}
+.cx-nova-sm-status[data-kind="ok"]    { color: #86efac; border-color: rgba(34,197,94,.25); background: rgba(34,197,94,.08); }
+.cx-nova-sm-status[data-kind="warn"]  { color: #fcd34d; border-color: rgba(245,158,11,.25); background: rgba(245,158,11,.08); }
+.cx-nova-sm-status[data-kind="error"] { color: #fca5a5; border-color: rgba(239,68,68,.3);   background: rgba(239,68,68,.1); }
+.cx-nova-sm-pane { display: flex; flex-direction: column; gap: 6px; }
+.cx-nova-sm-label { font-size: 12px; font-weight: 600; color: #d1d5db; }
+.cx-nova-sm-textarea {
+    width: 100%; min-height: 140px; max-height: 320px; resize: vertical;
+    background: #0f0f1a; color: #e5e7eb;
+    border: 1px solid rgba(255,255,255,.1); border-radius: 10px;
+    padding: 10px 12px; font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    line-height: 1.5; box-sizing: border-box;
+}
+.cx-nova-sm-textarea:focus { outline: 2px solid #818cf8; outline-offset: 1px; border-color: #818cf8; }
+.cx-nova-sm-textarea:disabled { opacity: .6; cursor: progress; }
+.cx-nova-sm-pane-actions { display: flex; justify-content: flex-end; }
+
 /* ---- Unread badges ---- */
 .cx-unread-badge {
     background: #FF3B30; color: #fff; font-size: 10px; font-weight: 700;

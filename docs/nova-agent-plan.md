@@ -504,7 +504,15 @@ Always concatenated into the Nova system prompt regardless of skill.
     `nova_overwrite_memory({ content })` (Write).
 - [ ] Route through `fs_write` when plugin installed; fall back to
   `POST /api/files/*` into `SillyTavern/data/<user>/user/files/nova/`.
-- [ ] In-phone Settings: "Soul & Memory" pane with textareas + Save + Reset.
+- [x] In-phone Settings: "Soul & Memory" pane with textareas + Save + Reset.
+  - **Shipped:** `openNovaSoulMemoryEditor()` modal in `index.js` (NOVA AGENT
+    section), triggered by the `📝 Edit Soul & Memory` button in the phone
+    Settings → NOVA section. Loads via `loadNovaSoulMemory({ force: true })`,
+    writes via `_novaBridgeWrite` (POST `/fs/write`), invalidates cache on
+    successful save. Reload-from-disk button covers the "Reset" case
+    (re-fetches whatever's on disk, discarding unsaved edits). Inline
+    aria-live status banner reports load/save outcome (and tells the user to
+    install the bridge plugin if the write fails).
 
 ### 6c. Prompt composition order
 ```

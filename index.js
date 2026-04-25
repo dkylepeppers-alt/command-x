@@ -3370,6 +3370,9 @@ function buildPhone() {
                     <span class="cx-settings-label">Bridge plugin URL</span>
                     <input type="text" id="cx-set-nova-plugin-url" class="cx-settings-text-input" value="${escAttr(settings.nova?.pluginBaseUrl || NOVA_DEFAULTS.pluginBaseUrl)}" />
                 </div>
+                <div class="cx-settings-row cx-settings-btn-row">
+                    <button class="cx-settings-btn" id="cx-set-nova-edit-sm">📝 Edit Soul &amp; Memory</button>
+                </div>
                 <div class="cx-settings-section">ABOUT</div>
                 <div class="cx-settings-row cx-settings-about">
                     <div>Command-X v${VERSION}</div>
@@ -4280,6 +4283,138 @@ async function novaGetExecuteSlash() {
     return async (cmd) => ctx.executeSlashCommandsWithOptions(cmd, { handleParserErrors: false, handleExecutionErrors: true });
 }
 
+/**
+ * Open the in-phone Soul & Memory editor (plan §6b).
+ *
+ * Renders a modal with two textareas (soul + memory), a Reload button
+ * that re-fetches the on-disk content, and per-pane Save buttons that
+ * POST through `_novaBridgeWrite` to the `nova-agent-bridge` server
+ * plugin. Falls back to a clear error message when the bridge is
+ * unreachable, since soul/memory writes are the one Nova surface that
+ * cannot work without the plugin.
+ *
+ * Reuses `cx-modal-overlay` / `cx-modal-box` for visual consistency
+ * with `cxAlert` / `cxConfirm` / `cxPickList` and the approval modal.
+ */
+async function openNovaSoulMemoryEditor() {
+    // Tear down any prior instance defensively. Multiple opens shouldn't
+    // ever happen (the trigger is in Settings, which is single-instance),
+    // but be safe.
+    document.querySelector('.cx-modal-overlay.cx-nova-sm-overlay')?.remove();
+
+    const overlay = document.createElement('div');
+    overlay.className = 'cx-modal-overlay cx-nova-sm-overlay';
+    overlay.innerHTML = `
+        <div class="cx-modal-box cx-nova-sm-box" role="dialog" aria-modal="true" aria-labelledby="cx-nova-sm-title">
+            <div class="cx-modal-title" id="cx-nova-sm-title">Nova — Soul &amp; Memory</div>
+            <div class="cx-nova-sm-status" id="cx-nova-sm-status" role="status" aria-live="polite" aria-atomic="true">Loading…</div>
+            <div class="cx-nova-sm-pane">
+                <label class="cx-nova-sm-label" for="cx-nova-sm-soul">Soul (persona, voice, do/don't)</label>
+                <textarea id="cx-nova-sm-soul" class="cx-nova-sm-textarea" spellcheck="false" placeholder="Loading soul.md…"></textarea>
+                <div class="cx-nova-sm-pane-actions">
+                    <button class="cx-modal-btn cx-modal-btn-primary" id="cx-nova-sm-save-soul" disabled>Save Soul</button>
+                </div>
+            </div>
+            <div class="cx-nova-sm-pane">
+                <label class="cx-nova-sm-label" for="cx-nova-sm-memory">Memory (chat-specific notes)</label>
+                <textarea id="cx-nova-sm-memory" class="cx-nova-sm-textarea" spellcheck="false" placeholder="Loading memory.md…"></textarea>
+                <div class="cx-nova-sm-pane-actions">
+                    <button class="cx-modal-btn cx-modal-btn-primary" id="cx-nova-sm-save-memory" disabled>Save Memory</button>
+                </div>
+            </div>
+            <div class="cx-modal-actions">
+                <button class="cx-modal-btn cx-modal-btn-secondary" id="cx-nova-sm-reload">Reload from disk</button>
+                <button class="cx-modal-btn cx-modal-btn-secondary" id="cx-nova-sm-close">Close</button>
+            </div>
+        </div>`;
+
+    const close = () => {
+        overlay.remove();
+        document.removeEventListener('keydown', onKey);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    overlay.querySelector('#cx-nova-sm-close').addEventListener('click', close);
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(overlay);
+
+    const statusEl = overlay.querySelector('#cx-nova-sm-status');
+    const soulTa = overlay.querySelector('#cx-nova-sm-soul');
+    const memoryTa = overlay.querySelector('#cx-nova-sm-memory');
+    const saveSoulBtn = overlay.querySelector('#cx-nova-sm-save-soul');
+    const saveMemoryBtn = overlay.querySelector('#cx-nova-sm-save-memory');
+    const reloadBtn = overlay.querySelector('#cx-nova-sm-reload');
+
+    const setStatus = (text, kind = 'info') => {
+        if (!statusEl) return;
+        statusEl.textContent = text;
+        statusEl.dataset.kind = kind;
+    };
+
+    const loadIntoTextareas = async () => {
+        setStatus('Loading…');
+        soulTa.disabled = true; memoryTa.disabled = true;
+        saveSoulBtn.disabled = true; saveMemoryBtn.disabled = true;
+        reloadBtn.disabled = true;
+        try {
+            const { soul, memory } = await loadNovaSoulMemory({ force: true });
+            soulTa.value = String(soul || '');
+            memoryTa.value = String(memory || '');
+            setStatus(
+                (soul || memory) ? 'Loaded.' : 'Loaded (both files were empty or unreachable).',
+                (soul || memory) ? 'ok' : 'warn',
+            );
+        } catch (err) {
+            setStatus(`Load failed: ${err?.message || err}`, 'error');
+        } finally {
+            soulTa.disabled = false; memoryTa.disabled = false;
+            saveSoulBtn.disabled = false; saveMemoryBtn.disabled = false;
+            reloadBtn.disabled = false;
+            // Focus the first editable area so keyboard users can edit immediately.
+            soulTa.focus();
+        }
+    };
+
+    const saveOne = async ({ path, content, label, button }) => {
+        button.disabled = true;
+        const originalLabel = button.textContent;
+        button.textContent = 'Saving…';
+        setStatus(`Saving ${label}…`);
+        try {
+            const base = settings?.nova?.pluginBaseUrl || NOVA_DEFAULTS.pluginBaseUrl;
+            const res = await _novaBridgeWrite({ pluginBaseUrl: base, path, content });
+            if (res && res.ok) {
+                try { invalidateNovaSoulMemoryCache(); } catch (_) { /* noop */ }
+                setStatus(`${label} saved (${content.length} bytes).`, 'ok');
+            } else {
+                const reason = res?.error || 'unknown error';
+                setStatus(`${label} save failed: ${reason}. Install/start the nova-agent-bridge plugin to enable writes.`, 'error');
+            }
+        } catch (err) {
+            setStatus(`${label} save failed: ${err?.message || err}`, 'error');
+        } finally {
+            button.disabled = false;
+            button.textContent = originalLabel;
+        }
+    };
+
+    saveSoulBtn.addEventListener('click', () => saveOne({
+        path: `nova/${NOVA_SOUL_FILENAME}`,
+        content: String(soulTa.value || ''),
+        label: 'Soul',
+        button: saveSoulBtn,
+    }));
+    saveMemoryBtn.addEventListener('click', () => saveOne({
+        path: `nova/${NOVA_MEMORY_FILENAME}`,
+        content: String(memoryTa.value || ''),
+        label: 'Memory',
+        button: saveMemoryBtn,
+    }));
+    reloadBtn.addEventListener('click', () => { loadIntoTextareas().catch(() => {}); });
+
+    await loadIntoTextareas();
+}
+
 async function novaPickProfile() {
     const exec = await novaGetExecuteSlash();
     if (!exec) { await cxAlert('This SillyTavern build does not expose executeSlashCommandsWithOptions().', 'Nova'); return; }
@@ -4649,6 +4784,9 @@ function wirePhone() {
     phoneContainer.querySelector('#cx-set-nova-max-tools')?.addEventListener('change', novaOnChange);
     phoneContainer.querySelector('#cx-set-nova-timeout')?.addEventListener('change', novaOnChange);
     phoneContainer.querySelector('#cx-set-nova-plugin-url')?.addEventListener('change', novaOnChange);
+    phoneContainer.querySelector('#cx-set-nova-edit-sm')?.addEventListener('click', () => {
+        openNovaSoulMemoryEditor().catch(err => cxAlert(String(err?.message || err), 'Nova'));
+    });
     phoneContainer.querySelector('#cx-set-lock')?.addEventListener('change', (e) => {
         settings.showLockscreen = e.target.checked;
         saveSettings();

@@ -1515,3 +1515,82 @@ unit-test coverage and would be flaky to test via jsdom because of
 - §2b audit-log drawer.
 - §13 dedicated `nova-profile-swap.test.mjs` (existing coverage in
   `nova-profile-mutex.test.mjs` already exercises the chain).
+
+---
+
+## 2026-04-25 (later) — §6b in-phone Soul & Memory editor
+
+**Goal of this PR:** continue the Nova rollout by shipping the next
+unblocking §14 step — "Edit `soul.md` via in-phone editor → next turn
+reflects change" (§14 step from the plan's manual-validation list).
+This was the previously-queued next target ("§6b in-phone editor").
+
+**What shipped:**
+
+- `openNovaSoulMemoryEditor()` (in `index.js`, near the other Nova
+  picker functions) — a modal built from `.cx-modal-overlay` +
+  `.cx-modal-box.cx-nova-sm-box` with two textareas (soul + memory),
+  per-pane Save buttons, a Reload-from-disk button, and an aria-live
+  status banner with `data-kind` of `info` / `ok` / `warn` / `error`.
+- New phone Settings row in the NOVA section:
+  `<button id="cx-set-nova-edit-sm">📝 Edit Soul & Memory</button>`,
+  wired in `wirePhone()` to call `openNovaSoulMemoryEditor()`.
+- New CSS block in `style.css` for the editor's textareas and status
+  banner. Reuses existing modal classes for everything else.
+
+**Implementation choices:**
+
+- **Loads via `loadNovaSoulMemory({ force: true })`.** Reuses the
+  existing pure helper that's already covered by
+  `test/nova-soul-memory.test.mjs`. Force-true skips the 5-min cache
+  so what the user sees is what's on disk *now*.
+- **Writes via `_novaBridgeWrite` directly**, not via the
+  `nova_write_soul` / `nova_overwrite_memory` tool handlers from
+  `buildNovaSoulMemoryHandlers`. The handlers add a layer (caller
+  args validation, return-shape normalisation) that's only needed
+  for the LLM tool-call path. The UI knows its inputs are strings,
+  so it short-circuits to the underlying writer to keep error
+  messages terse and direct.
+- **Cache invalidation on success** via
+  `invalidateNovaSoulMemoryCache()` — matches what
+  `buildNovaSoulMemoryHandlers` does. Without this, the next Nova
+  turn would compose a system prompt from the stale 5-min cache.
+- **"Reset" doubles as "Reload from disk".** §6b's spec asks for
+  "Save + Reset" — the Reload button discards any unsaved edits in
+  the textareas by re-fetching the on-disk content, which is
+  semantically the same thing and only one button.
+- **Errors stay inline.** When the bridge isn't installed,
+  `_novaBridgeWrite` returns `{ error: 'nova-bridge-unreachable' }`
+  — surfaced in the status banner with explicit "install the
+  nova-agent-bridge plugin" guidance, not as a `cxAlert`. The user
+  shouldn't have to dismiss a modal-on-modal to retry.
+
+**Why no new test file:** the underlying primitives are already
+covered (`loadNovaSoulMemory`: 16 assertions; `_novaBridgeWrite`:
+covered by the bridge tests; `invalidateNovaSoulMemoryCache`:
+covered). The new code is glue that wires DOM events to those
+primitives — jsdom-mocking textarea + click + button states would
+add brittleness for negligible signal. If a regression happens
+later, the right test target is one of the underlying helpers, not
+the DOM glue.
+
+**Validation:** `node --test test/*.mjs` → 727/727 pass; syntax
+check via `node -e "import('./index.js')"` clean.
+
+**§14 step that now passes:** step 8 (top of the manual-validation
+list at line 839 of the plan: "Edit `soul.md` via in-phone editor →
+next turn reflects change"). Caveat: the *plugin* still has to be
+installed for writes to actually persist, but that's the plan's
+intent — soul/memory writes are the one Nova surface that legitimately
+requires the bridge.
+
+**Still deferred (now the only top-level UI gaps):**
+
+- §2b audit-log drawer / "View audit log" link (plan §7b last
+  sub-bullet).
+- §13 dedicated `nova-profile-swap.test.mjs` (existing
+  `nova-profile-mutex.test.mjs` already exercises the chain — kept
+  open because the plan calls out the file by name).
+- §7a/§7c unchecked items are mostly already shipped (they are the
+  same items that were stale-checked in §6b before this PR). A
+  future cleanup-only PR could tick those after a careful audit.
