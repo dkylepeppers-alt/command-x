@@ -4456,14 +4456,16 @@ async function novaHandleSend() {
     // Build the tool handler set. Shipped today: soul/memory self-edit
     // (§6b) + phone-internal stores (§4e) + plugin-backed filesystem
     // (§4a) + ST-API tools (§4d, with `st_write_character` and
-    // `st_write_worldbook` deferred — see `buildNovaStTools` header).
-    // Bridge-backed `shell_run` still dispatches to `no-handler` until
-    // its factory + plugin route land.
+    // `st_write_worldbook` deferred — see `buildNovaStTools` header) +
+    // plugin-backed shell (§4b, forwards to the plugin's `/shell/run`
+    // route — currently returns `{ error: 'not-implemented' }` until the
+    // route lands).
     const toolHandlers = {
         ...buildNovaSoulMemoryHandlers({}),
         ...buildNovaPhoneHandlers({}),
         ...buildNovaFsHandlers({}),
         ...buildNovaStTools({}),
+        ...buildNovaShellHandler({}),
     };
 
     setNovaInFlight(true);
@@ -7736,6 +7738,96 @@ function buildNovaFsHandlers({ pluginBaseUrl, fetchImpl } = {}) {
             const body = { from: f, to: t };
             if (overwrite !== undefined) body.overwrite = Boolean(overwrite);
             return req('POST', '/fs/move', { body });
+        },
+    };
+}
+
+/* ----------------------------------------------------------------------
+   NOVA AGENT — shell_run handler factory (plan §4b).
+
+   Thin wrapper over `_novaBridgeRequest` that forwards `shell_run` tool
+   calls to the plugin's `/shell/run` route. Mirrors the contract of
+   `buildNovaFsHandlers`: never throws, closed-enum errors, all deps DI'd.
+
+   Today the route returns `501 Not Implemented` — that naturally flows
+   through `_novaBridgeRequest` as `{ error: 'not-implemented', plugin,
+   version, route, status: 501 }`, which is a perfectly good LLM-readable
+   answer ("this capability isn't available right now, try something
+   else"). We deliberately do NOT special-case the 501 here: when the
+   plugin ships the real implementation the same call path works without
+   any extension change.
+
+   Client-side validation is intentionally minimal. The server owns the
+   allow-list (`DEFAULT_SHELL_ALLOW` — node / npm / git / python / grep /
+   rg / ls / cat / head / tail / wc / find), timeout enforcement, and
+   `shell: false` spawn safety. The only pre-checks here are shape
+   sanity so the LLM gets a fast readable error for malformed calls
+   instead of a 400 from the plugin:
+
+     - `cmd`       required, non-empty string
+     - `args`      optional, coerced to an array of strings (non-arrays
+                   → `[]`; non-string entries filtered out)
+     - `cwd`       optional, non-empty string (omitted otherwise)
+     - `timeoutMs` optional, finite integer clamped to
+                   [SHELL_TIMEOUT_MIN_MS .. SHELL_TIMEOUT_MAX_MS]
+                   (100 ms .. 5 min) to match the schema's bounds
+
+   Approval gating (Full tier only, per-call prompt unless
+   "Remember approvals this session" is on) is handled upstream by
+   `novaToolGate` + `runNovaToolDispatch` + `cxNovaApprovalModal`. This
+   factory just forwards the HTTP call.
+   ---------------------------------------------------------------------- */
+
+const SHELL_TIMEOUT_MIN_MS = 100;
+const SHELL_TIMEOUT_MAX_MS = 300000;
+
+function buildNovaShellHandler({ pluginBaseUrl, fetchImpl } = {}) {
+    const base = pluginBaseUrl || (typeof settings !== 'undefined' && settings?.nova?.pluginBaseUrl) || NOVA_DEFAULTS.pluginBaseUrl;
+
+    const isObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
+    const safeArgs = (v) => (isObject(v) ? v : {});
+    const req = (method, route, opts) => _novaBridgeRequest({
+        pluginBaseUrl: base, method, route, fetchImpl, ...opts,
+    });
+
+    return {
+        shell_run: async (rawArgs) => {
+            const { cmd, args, cwd, timeoutMs } = safeArgs(rawArgs);
+            if (typeof cmd !== 'string' || cmd.length === 0) {
+                return { error: 'cmd must be a non-empty string' };
+            }
+            // Normalise args → string[]. The tool schema says `array<string>`
+            // with default `[]`, so anything the LLM sends that isn't an
+            // array becomes the empty array; anything inside that isn't a
+            // string is dropped. This is permissive on purpose — the LLM
+            // sometimes emits a single string instead of an array, and we'd
+            // rather run `cmd` with no args than refuse with a confusing
+            // error.
+            const cleanArgs = Array.isArray(args)
+                ? args.filter((x) => typeof x === 'string')
+                : [];
+            const body = { cmd, args: cleanArgs };
+            if (typeof cwd === 'string' && cwd.length > 0) body.cwd = cwd;
+            if (timeoutMs !== undefined && timeoutMs !== null) {
+                // Only accept numeric primitives (or strings we can coerce).
+                // `Number([])` is 0 and `Number([42])` is 42 — those would
+                // sneak through as a finite timeout if we blind-coerced.
+                // Explicit type check keeps the "non-finite → server
+                // default" contract honest.
+                const n = (typeof timeoutMs === 'number' || typeof timeoutMs === 'string')
+                    ? Number(timeoutMs)
+                    : NaN;
+                if (Number.isFinite(n)) {
+                    // Clamp, then floor — Number.isInteger(0.5) is false
+                    // but we still want to accept it.
+                    const clamped = Math.floor(
+                        Math.min(SHELL_TIMEOUT_MAX_MS, Math.max(SHELL_TIMEOUT_MIN_MS, n)),
+                    );
+                    body.timeoutMs = clamped;
+                }
+                // Non-finite → drop the field, let the server use its default.
+            }
+            return req('POST', '/shell/run', { body });
         },
     };
 }

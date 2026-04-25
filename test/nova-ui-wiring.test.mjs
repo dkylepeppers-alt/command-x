@@ -166,6 +166,30 @@ test('fs_write diff preview is composed into the approval modal (plan §4c)', as
         'buildFsWriteDiffPreview call must pass toolHandlers.fs_read as fsRead');
 });
 
+test('shell_run handler is declared and wired into the dispatcher (plan §4b)', async () => {
+    const { js } = await loadSources();
+    // Factory must exist under NOVA AGENT.
+    assert.match(js, /function buildNovaShellHandler\(/,
+        'buildNovaShellHandler factory not declared in index.js');
+    // Timeout bounds surfaced as named constants (matches the schema).
+    assert.match(js, /const\s+SHELL_TIMEOUT_MIN_MS\s*=\s*100\b/,
+        'SHELL_TIMEOUT_MIN_MS must be declared');
+    assert.match(js, /const\s+SHELL_TIMEOUT_MAX_MS\s*=\s*300000\b/,
+        'SHELL_TIMEOUT_MAX_MS must be declared');
+    // The factory must ship a shell_run key.
+    const factoryBody = js.match(/function buildNovaShellHandler\([\s\S]*?\n\}\s*\n/);
+    assert.ok(factoryBody, 'buildNovaShellHandler body not found');
+    assert.match(factoryBody[0], /shell_run:\s*async/,
+        'buildNovaShellHandler must export a shell_run handler');
+    assert.match(factoryBody[0], /['"]\/shell\/run['"]/,
+        'shell_run must POST to /shell/run');
+    // novaHandleSend must merge the shell handler into the dispatch map.
+    const novaHandleSend = js.match(/async function novaHandleSend\([\s\S]*?\n\}/);
+    assert.ok(novaHandleSend, 'novaHandleSend body not found');
+    assert.match(novaHandleSend[0], /buildNovaShellHandler\(/,
+        'novaHandleSend must compose buildNovaShellHandler into the toolHandlers map');
+});
+
 test('Profile-swap helpers are wired to the slash executor', async () => {
     const { js } = await loadSources();
     assert.match(js, /function listNovaProfiles\(/);
