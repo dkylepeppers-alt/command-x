@@ -225,6 +225,31 @@ test('Profile-swap helpers are wired to the slash executor', async () => {
         'novaHandleSend must serialise through withNovaProfileMutex');
 });
 
+test('Tool capability filter gates the NOVA_TOOLS registry per turn (plan §4f)', async () => {
+    const { js } = await loadSources();
+    // The pure helper must exist alongside the probe.
+    assert.match(js, /function filterNovaToolsByCapabilities\(/,
+        'filterNovaToolsByCapabilities helper not declared in index.js');
+    // Bridge-prefix allow list declared as a constant so the contract
+    // is visible at a glance.
+    assert.match(js, /const\s+NOVA_BRIDGE_TOOL_PREFIXES\s*=\s*Object\.freeze\(\[/,
+        'NOVA_BRIDGE_TOOL_PREFIXES must be declared as a frozen array');
+    // novaHandleSend must await the probe and feed it into the filter
+    // BEFORE calling sendNovaTurn.
+    const novaHandleSend = js.match(/async function novaHandleSend\([\s\S]*?\n\}/);
+    assert.ok(novaHandleSend, 'novaHandleSend body not found');
+    assert.match(novaHandleSend[0], /await\s+probeNovaBridge\(/,
+        'novaHandleSend must await probeNovaBridge before the turn starts');
+    assert.match(novaHandleSend[0], /filterNovaToolsByCapabilities\(\s*\{/,
+        'novaHandleSend must call filterNovaToolsByCapabilities');
+    // The filtered output must be what gets passed as `tools:`.
+    assert.match(novaHandleSend[0], /tools:\s*effectiveTools/,
+        'sendNovaTurn must receive the filtered tool list (effectiveTools)');
+    // A transcript notice must be emitted when bridge is absent.
+    assert.match(novaHandleSend[0], /Nova bridge plugin not detected/,
+        'novaHandleSend must warn the user when the bridge is missing');
+});
+
 test('Nova settings appear in settings.html', async () => {
     const html = await readFile(resolve(repoRoot, 'settings.html'), 'utf8');
     for (const id of [

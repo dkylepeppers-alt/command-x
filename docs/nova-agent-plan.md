@@ -364,8 +364,34 @@ own plugin folder by default.
   and source-shape key parity).
 
 ### 4f. Tool capability discovery
-- [ ] Probe `GET /api/plugins/nova-agent-bridge/manifest`. If present,
+- [x] Probe `GET /api/plugins/nova-agent-bridge/manifest`. If present,
   register 4a/4b. If 404, register only 4d/4e and show a yellow banner.
+  **Shipped.** Pure helper `filterNovaToolsByCapabilities({ tools, probe })`
+  in `index.js` NOVA AGENT section (right after `_coerceNovaCapabilities`).
+  Contract:
+  - `probe.present === false` → drop every bridge-backed tool
+    (prefix `fs_` or `shell_` per `NOVA_BRIDGE_TOOL_PREFIXES`). Non-
+    bridge tools (`nova_*`, `phone_*`, `st_*`) kept.
+  - `probe.present` truthy with a `capabilities` map → drop any tool
+    whose capability key is **explicitly `false`**. Unlisted tools
+    pass through (forward-compat: capabilities-light plugin builds
+    stay usable when the extension lists a newer tool than the plugin
+    knows about).
+  - Missing / malformed `probe` or missing `capabilities` map → fail
+    open (return input). Matters for in-flight probe races.
+  - Never throws; returns a fresh array.
+  `novaHandleSend` awaits `probeNovaBridge({ baseUrl: nova.pluginBaseUrl })`
+  before `sendNovaTurn`, pipes the result through the filter, and passes
+  the result as `tools:` (`effectiveTools` local). When the bridge is
+  absent and something was actually filtered, emits a single transcript
+  notice: **"⚠︎ Nova bridge plugin not detected — filesystem and shell
+  tools are disabled this turn. Install `nova-agent-bridge` to enable
+  them."** — that's the plan's "yellow banner" rendered in-transcript,
+  since the transcript is Nova's primary surface. Covered by
+  `test/nova-capability-filter.test.mjs` (45 assertions across 5 suites:
+  fail-open matrix, present:false drop rules, present:true capability
+  gating, forward-compat for unknown tools, never-throws fuzz) +
+  source-contract assertion in `test/nova-ui-wiring.test.mjs`.
 
 ---
 

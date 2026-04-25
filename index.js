@@ -4474,6 +4474,32 @@ async function novaHandleSend() {
         appendNovaTranscriptLine('⚠︎ Text-only mode — ConnectionManagerRequestService unavailable; tool calls are disabled this turn.', 'notice');
     }
 
+    // Plan §4f — probe the `nova-agent-bridge` server plugin and filter
+    // the tool registry to match what's actually installed. If the
+    // plugin is absent, the LLM must not see `fs_*` / `shell_*`
+    // (those would round-trip as `nova-bridge-unreachable` errors and
+    // burn tool-call slots). The probe result is cached per
+    // `NOVA_PROBE_TTL_MS` so this is cheap on subsequent turns.
+    let effectiveTools = textOnlyFallback ? [] : NOVA_TOOLS;
+    if (!textOnlyFallback) {
+        let probe;
+        try {
+            probe = await probeNovaBridge({ baseUrl: nova.pluginBaseUrl });
+        } catch (_) { probe = null; }
+        effectiveTools = filterNovaToolsByCapabilities({ tools: NOVA_TOOLS, probe });
+        // Emit the plan's "yellow banner" as a single-turn transcript
+        // notice so the user can see why `fs_read`, `shell_run`, etc.
+        // aren't available. Only shown when something was actually
+        // filtered — avoids noise on healthy installs and on older
+        // plugin builds that don't advertise capabilities yet.
+        if (probe && probe.present === false && effectiveTools.length !== NOVA_TOOLS.length) {
+            appendNovaTranscriptLine(
+                '⚠︎ Nova bridge plugin not detected — filesystem and shell tools are disabled this turn. Install `nova-agent-bridge` to enable them.',
+                'notice',
+            );
+        }
+    }
+
     const run = () => sendNovaTurn({
         ctx,
         userText: text,
@@ -4483,7 +4509,7 @@ async function novaHandleSend() {
         memory,
         maxToolCalls: Math.max(1, Number(nova.maxToolCalls) || NOVA_DEFAULTS.maxToolCalls),
         turnTimeoutMs: Math.max(10000, Number(nova.turnTimeoutMs) || NOVA_DEFAULTS.turnTimeoutMs),
-        tools: textOnlyFallback ? [] : NOVA_TOOLS,
+        tools: effectiveTools,
         sendRequest,
         executeSlash: exec,
         isToolCallingSupported: typeof ctx?.isToolCallingSupported === 'function' ? ctx.isToolCallingSupported : undefined,
@@ -5221,6 +5247,79 @@ function _coerceNovaCapabilities(raw) {
     const out = {};
     for (const k of Object.keys(raw)) out[k] = !!raw[k];
     return out;
+}
+
+/**
+ * Prefixes of tool names that depend on the `nova-agent-bridge` server
+ * plugin. When the plugin is absent, every tool starting with one of
+ * these prefixes is dropped from the per-turn tool list so the LLM
+ * never advertises something that will reliably return
+ * `{ error: 'nova-bridge-unreachable' }`. Everything else (`nova_*`,
+ * `phone_*`, `st_*`) runs in-process and stays regardless.
+ */
+const NOVA_BRIDGE_TOOL_PREFIXES = Object.freeze(['fs_', 'shell_']);
+
+function _isBridgeBackedToolName(name) {
+    if (typeof name !== 'string') return false;
+    for (const p of NOVA_BRIDGE_TOOL_PREFIXES) {
+        if (name.startsWith(p)) return true;
+    }
+    return false;
+}
+
+/**
+ * Filter the Nova tool registry against a bridge-probe result so the
+ * LLM only ever sees tools that have a live handler.
+ *
+ * Contract:
+ *   - `probe.present === false` → drop every bridge-backed tool
+ *     (`fs_*`, `shell_*`). Keep the rest.
+ *   - `probe.present === true` with a `capabilities` map → drop any
+ *     tool whose capability key is **explicitly `false`**. Tools not
+ *     mentioned in the map pass through (forward-compat: a new tool
+ *     added to the extension should light up as soon as a newer
+ *     plugin advertises it, not when the extension is updated to
+ *     list it explicitly here).
+ *   - `probe` missing, malformed, or `probe.present === true` with no
+ *     `capabilities` map → return `tools` unchanged (fail open). This
+ *     matters for in-flight probe races and for older bridge versions
+ *     that pre-date the capabilities contract.
+ *   - Non-array / null / undefined `tools` → `[]` (defensive).
+ *   - Never throws. Returns a fresh array; the input is never mutated.
+ */
+function filterNovaToolsByCapabilities({ tools, probe } = {}) {
+    if (!Array.isArray(tools)) return [];
+    // Fail open when we have no usable probe. A stale "present: true"
+    // is much safer than a false "present: false" that would strip
+    // every filesystem tool mid-turn.
+    if (!probe || typeof probe !== 'object' || Array.isArray(probe)) {
+        return tools.slice();
+    }
+
+    if (probe.present === false) {
+        return tools.filter((t) => !_isBridgeBackedToolName(t && t.name));
+    }
+
+    // `present === true` (or any truthy non-false — be liberal in what
+    // we accept). If the plugin advertised a capabilities map, use it
+    // as a precise allow-list for bridge-backed tools. If not, trust
+    // everything — the plugin is there, it just didn't tell us what
+    // routes it implements.
+    const caps = (probe.capabilities && typeof probe.capabilities === 'object' && !Array.isArray(probe.capabilities))
+        ? probe.capabilities
+        : null;
+    if (!caps) return tools.slice();
+
+    return tools.filter((t) => {
+        const name = t && t.name;
+        if (typeof name !== 'string') return false;
+        // Non-bridge tools are never gated by capabilities.
+        if (!_isBridgeBackedToolName(name)) return true;
+        // Bridge-backed tool: include only if the capability key is
+        // not explicitly `false`. Missing keys pass through (forward-
+        // compat with capabilities-light plugin builds).
+        return caps[name] !== false;
+    });
 }
 
 async function probeNovaBridge({

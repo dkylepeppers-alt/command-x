@@ -77,6 +77,34 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-25 (§4f) — Tool capability discovery ships
+
+**Context:** Follow-up to the shell-handler + CSRF work. `probeNovaBridge` + `_coerceNovaCapabilities` already existed to discover the plugin + per-tool map, but `novaHandleSend` was still passing `NOVA_TOOLS` unconditionally — when the plugin was absent, the LLM saw `fs_*` and `shell_run` in its tool list, called one, and got `{ error: 'nova-bridge-unreachable' }` back, burning a tool-call slot.
+
+**What shipped:**
+- `filterNovaToolsByCapabilities({ tools, probe })` pure helper in `index.js` NOVA AGENT section (right after `_coerceNovaCapabilities`). Returns a fresh filtered array; never throws.
+- `NOVA_BRIDGE_TOOL_PREFIXES = Object.freeze(['fs_', 'shell_'])` as a frozen module constant so the "what counts as bridge-backed" contract is visible at a glance.
+- `_isBridgeBackedToolName(name)` tiny internal predicate used by both the `present: false` drop and the capability-map filter.
+- `novaHandleSend` now: (1) awaits `probeNovaBridge({ baseUrl: nova.pluginBaseUrl })` before the turn (cached per `NOVA_PROBE_TTL_MS`); (2) pipes the result through the helper; (3) passes the filtered list as `tools:` via a new local `effectiveTools`; (4) emits a single transcript notice "⚠︎ Nova bridge plugin not detected …" when bridge is absent **and** something was actually filtered (silent on healthy installs).
+- 45 new assertions in `test/nova-capability-filter.test.mjs` + source-contract assertion in `test/nova-ui-wiring.test.mjs`.
+
+**Contract locked by tests:**
+- `probe.present === false` → drop every `fs_*` / `shell_*`; keep `nova_*` / `phone_*` / `st_*`. A lingering capabilities map is ignored (present:false is authoritative).
+- `probe.present === true` with capabilities → drop only tools where `caps[name] === false`. Missing keys pass through. This is the **forward-compat contract**: an older plugin that doesn't list a newer tool shouldn't prevent the LLM from trying it — let the route answer 404/501 if it really isn't implemented.
+- Missing / malformed probe → fail open (return unchanged). In-flight probe races, transient network blips, and probe bugs must not nuke the tool list. A stale "present: true" is much safer than a false "present: false".
+- Capability strip is **only on explicit `false`** — truthy non-true values (`0`, `''`, `null`, etc.) are treated as "present". This matches the fail-open stance and avoids surprises with odd plugin responses.
+- Non-bridge tools are **never** gated by the capability map. Even if a plugin declares `nova_write_soul: false`, the helper ignores it — the plugin has no jurisdiction over in-process tools.
+- Non-array `tools` → `[]` (defensive). Malformed tool entries (null, non-string name, etc.) pass through the `present:false` filter because `typeof name !== 'string'` short-circuits `_isBridgeBackedToolName` to false, leaving them in the list — the downstream LLM tool-schema validator will reject them, not this helper. (Covered by the "tolerates malformed entries" fuzz test; the test was tightened after the first pass over-specified the pass-through pattern.)
+
+**Where the banner lives:** Plan §4f says "yellow banner". Rather than adding a new DOM slot above the transcript, we emit it as a `'notice'`-class transcript line (same rendering path as "⚠︎ Text-only mode …"). The transcript is Nova's primary surface, it auto-scrolls, and the message is per-turn (regenerates each send). A CSS/layout sprint can promote it to a proper top-of-view banner later; this ships the user-visible behaviour today.
+
+**Pitfalls for future agents:**
+- **Don't skip the probe for cached runs.** `probeNovaBridge` has its own TTL cache (`NOVA_PROBE_TTL_MS`), so calling it every turn is cheap. If you add any short-circuit logic (e.g. "skip probe if tools list unchanged") make sure a plugin hot-install still lights up within one TTL window — today that's automatic.
+- **The notice is gated on `effectiveTools.length !== NOVA_TOOLS.length`** because a registry with zero bridge-backed tools shouldn't show the banner. If you ever extend `NOVA_TOOLS` with tools whose prefixes aren't in `NOVA_BRIDGE_TOOL_PREFIXES`, add the new prefix to the constant **and** review this length-delta gate.
+- **`probe.present` is liberally accepted.** `_coerceNovaCapabilities` happens to return booleans but the filter uses `=== false` / truthy checks, so a future probe revision that returns `1` / `'yes'` for present still works. Don't tighten to strict equality without a reason.
+
+**Validation:** `node --check index.js` ✓, `node --test test/*.mjs` → 714/714 pass (+21).
+
 ### 2026-04-25 (shell + csrf) — shell_run handler (§4b) + CSRF/session enforcement (§8c)
 
 **Context:** Continued the Nova plan audit. Two items were clearly scoped and safe to ship together: `buildNovaShellHandler` for §4b (the schema and plugin route already exist; the factory was the obvious missing piece) and §8c CSRF+session enforcement (both extension and plugin sides).
