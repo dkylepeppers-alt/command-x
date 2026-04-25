@@ -77,6 +77,45 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-25 (diff preview) — fs_write approval diff preview wired (plan §4c)
+
+**Context:** Previous PR's handover listed four small independent slices remaining after `buildNovaStTools` shipped. This picks the smallest and cleanest: §4c explicitly said "all three pieces now exist — wiring is just an `if (tool === 'fs_write') { ... }` branch in the composer before calling `confirmApproval`. Don't teach the dispatcher to read the filesystem itself." So the pure composer-level wiring, done as a pure helper for testability.
+
+**What shipped:**
+- **`buildFsWriteDiffPreview({ tool, args, fsRead, buildDiff })`** — pure async helper in `index.js` NOVA AGENT section, immediately after `buildNovaUnifiedDiff`. Resolves to a unified-diff string for `fs_write` with valid args, empty string otherwise. Never throws. Fully DI'd.
+- **`novaHandleSend`'s `confirmApproval` arrow** — now awaits `buildFsWriteDiffPreview({ tool, args, fsRead: toolHandlers.fs_read })` before opening the modal, and passes the result as `diffText` into `cxNovaApprovalModal`. Zero impact on non-`fs_write` approvals (the helper short-circuits to `''` for them).
+- **`test/nova-diff-preview.test.mjs`** — 26 assertions across 5 suites. Inline-copies the helper per AGENT_MEMORY convention.
+- **`test/nova-ui-wiring.test.mjs`** — adds a source-contract block covering: `buildFsWriteDiffPreview` is declared, `novaHandleSend` calls it, `cxNovaApprovalModal(…diffText…)` pattern is present, and `fsRead: toolHandlers.fs_read` is the injection point.
+
+**Contract locked by tests:**
+- **Non-`fs_write` tool → `''`.** Every other approval (nova_write_soul, nova_append_memory, fs_delete, shell_run, st_write_*, phone_write_*) skips the diff path. The approval modal still opens; it just doesn't get a diff block.
+- **Missing / non-string `args.path` or non-string `args.content` → `''`.** Empty-string `content` IS valid (legitimate empty-file write) — tested explicitly.
+- **No `fsRead` provided → treat as new file (`oldContent = null`).** The LLM sees the `--- /dev/null` header via `buildNovaUnifiedDiff`. This is the "fs tools unavailable" fallback; it's exercised by a dedicated test.
+- **`fsRead` throws → `''`.** `buildDiff` is NEVER called in this branch (asserted). Modal still opens so the user can make the call manually.
+- **`fsRead` returns `{ error: 'not-found' }` → new-file diff with `oldContent = null`.** This is the semantic "create" path and lines up with the plugin's `/fs/read` 404 response.
+- **`fsRead` returns any OTHER error (`nova-bridge-unreachable`, `nova-bridge-error`, `forbidden`, `content-too-large`, …) → `''`.** These are "can't render a trustworthy diff" states; blanking the preview is safer than showing a misleading one. `buildDiff` is NEVER called (asserted).
+- **`fsRead` returns an unexpected shape (no `content`, no `error`; wrong types) → `''`.** Defensive: don't render garbage.
+- **`buildDiff` throws / returns non-string → `''` or coerced string.** `null`/`undefined` both coerce to `''` via the `|| ''` fallback; numbers coerce via `String()`. Covered.
+- **Fuzz: 11 different garbage input shapes including `null`, primitives, non-object args, non-function callbacks → always returns a string, never throws.**
+
+**Defensive tweak caught by fuzz testing:** My first cut used `{ tool, args, fsRead, buildDiff } = {}` as the signature. The JS default only fires for `undefined`, NOT `null`, so `buildFsWriteDiffPreview(null)` threw `TypeError: Cannot destructure property 'tool' of ... as it is null`. Rewrote as `(opts) => { const {...} = (opts && typeof opts === 'object') ? opts : {}; }`. Lesson: when you promise "never throws", test `null` as well as `undefined` in the fuzz suite — `=== {}` default syntax doesn't protect you from it.
+
+**Why composer-level (not dispatcher-level):**
+The dispatcher (`runNovaToolDispatch`) is a pure handler-loop and must not reach into the filesystem to render UI chrome. The composer (in `novaHandleSend`) already owns the approval UX — it constructs the `confirmApproval` arrow and passes it down — so it's the natural place to fetch the old content and compose the preview. This split keeps `runNovaToolDispatch` testable without a DOM / filesystem mock. AGENT_MEMORY from the fs-tools entry made this policy explicit; this PR just follows it.
+
+**Inline-copy convention follow-through:**
+- `test/nova-diff-preview.test.mjs` inline-copies the production helper. The only divergence is that the inline copy's `buildDiff` fallback inside the helper uses `null` instead of falling back to a global `buildNovaUnifiedDiff` (which doesn't exist in a Node `--test` context). Callers pass `buildDiff` explicitly in every test, so this isn't observable. Production source does the lazy global lookup.
+- When you edit `buildFsWriteDiffPreview` in `index.js`, mirror the change into `test/nova-diff-preview.test.mjs`. When you edit the production source to add a new failure-mode short-circuit, add a case to the fs_read-failure-paths suite.
+
+**Validation:** `node --check index.js` clean; `node --test test/*.mjs` → **624/624 pass** (+26 net: 25 new diff-preview assertions + 1 new ui-wiring source-contract block). CodeQL: clean (no new string-building from user input; the new code paths only await a handler and hand a string to a pure diff function). Code Review: clean.
+
+**What's still outstanding on the plan (copy-forward):**
+1. **`st_write_character` + `st_write_worldbook` real implementations** — see prior "st handlers" entry for the 4-step follow-up path.
+2. **`/shell/run` plugin route** (still 501) + `buildNovaShellHandler` factory.
+3. **Rich per-turn tool-card transcript rendering** (plan §2b/§3c). This is the larger remaining UX work — replacing the current line-oriented transcript with per-tool cards that show name, args summary, result preview, and approval state. Not yet scoped.
+4. **Plugin CSRF + session-cookie check on every route** (plan §8c).
+5. Plan checkbox refresh pass (cosmetic).
+
 ### 2026-04-25 (st handlers) — Nova `st_*` tool handlers shipped (plan §4d, partial)
 
 **Context:** Continuing the plan after the review-comment audit. The prior PR's handover identified `buildNovaStTools` as the natural next slice — ST-API only, no plugin dependency. Currently every `st_*` call resolves to `{ error: 'no-handler' }` in the dispatcher; this PR ships handlers for 8 of the 10 schemas and a clearly-documented closed-enum `{ error: 'not-implemented' }` surface for the other 2.

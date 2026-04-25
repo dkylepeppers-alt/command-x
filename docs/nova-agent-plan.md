@@ -300,7 +300,20 @@ own plugin folder by default.
     { path, maxLines })` in `index.js` NOVA AGENT section. LCS-based line
     diff, `--- /dev/null` header for new files, bounded output with
     "N more lines" truncation sentinel. Covered by `test/nova-diff.test.mjs`
-    (17 assertions). Modal wiring lands with Phase 3c.
+    (17 assertions).
+  - **Shipped (composer wiring):** `buildFsWriteDiffPreview({ tool, args,
+    fsRead, buildDiff })` in `index.js` NOVA AGENT section (right after
+    `buildNovaUnifiedDiff`). Called from `novaHandleSend`'s
+    `confirmApproval` arrow *before* the modal opens, with the in-scope
+    `toolHandlers.fs_read` as `fsRead`. Resolves to a unified diff string
+    for `fs_write` with valid args, empty string otherwise. Never throws.
+    Short-circuits on any non-`fs_write` tool, bad args, missing
+    `fs_read`, or any `fs_read` failure that isn't a semantic "not-found"
+    (which is treated as a create). Covered by
+    `test/nova-diff-preview.test.mjs` (26 assertions across 5 suites:
+    short-circuits, happy paths, fs_read failure paths, robustness
+    fuzzing, integration with a realish diff stub) plus a source-contract
+    assertion in `test/nova-ui-wiring.test.mjs`.
 
 ### 4d. SillyTavern API tools (no plugin)
 - [x] `st_list_characters`, `st_read_character` — schemas + handlers shipped (read `ctx.characters`).

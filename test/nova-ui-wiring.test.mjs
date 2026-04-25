@@ -148,6 +148,24 @@ test('Nova ST-API tool handlers factory is exported and wired', async () => {
         'novaHandleSend must compose buildNovaStTools into the toolHandlers map');
 });
 
+test('fs_write diff preview is composed into the approval modal (plan §4c)', async () => {
+    const { js } = await loadSources();
+    // The pure composer helper must exist.
+    assert.match(js, /async function buildFsWriteDiffPreview\(/,
+        'buildFsWriteDiffPreview helper not declared in index.js');
+    // Must be invoked from novaHandleSend's confirmApproval arrow.
+    const novaHandleSend = js.match(/async function novaHandleSend\([\s\S]*?\n\}/);
+    assert.ok(novaHandleSend, 'novaHandleSend body not found');
+    assert.match(novaHandleSend[0], /buildFsWriteDiffPreview\(/,
+        'novaHandleSend.confirmApproval must call buildFsWriteDiffPreview');
+    // diffText must flow into cxNovaApprovalModal.
+    assert.match(novaHandleSend[0], /cxNovaApprovalModal\([\s\S]*?diffText[\s\S]*?\)/,
+        'cxNovaApprovalModal must receive diffText from confirmApproval');
+    // The composer must get the fs_read handler from the in-scope toolHandlers.
+    assert.match(novaHandleSend[0], /fsRead:\s*toolHandlers\.fs_read/,
+        'buildFsWriteDiffPreview call must pass toolHandlers.fs_read as fsRead');
+});
+
 test('Profile-swap helpers are wired to the slash executor', async () => {
     const { js } = await loadSources();
     assert.match(js, /function listNovaProfiles\(/);

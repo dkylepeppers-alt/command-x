@@ -4487,7 +4487,20 @@ async function novaHandleSend() {
         tier: nova.defaultTier || 'read',
         toolHandlers,
         confirmApproval: async ({ tool, args }) => {
-            return cxNovaApprovalModal({ tool, args, permission: tool?.permission });
+            // Phase 4c: for fs_write, fetch the current file and compose a
+            // unified diff so the user sees exactly what will change before
+            // clicking the red button. All three helpers (`fs_read` in
+            // `toolHandlers`, `buildNovaUnifiedDiff`, `cxNovaApprovalModal`'s
+            // `diffText` arg) already exist — this is pure composition.
+            // `buildFsWriteDiffPreview` never throws and returns '' for any
+            // non-fs_write tool, bad args, or fs_read failure, so non-write
+            // approvals are unaffected.
+            const diffText = await buildFsWriteDiffPreview({
+                tool,
+                args,
+                fsRead: toolHandlers.fs_read,
+            });
+            return cxNovaApprovalModal({ tool, args, diffText, permission: tool?.permission });
         },
     });
 
@@ -5612,6 +5625,92 @@ function buildNovaUnifiedDiff(oldContent, newContent, { path = '', maxLines = NO
     }
 
     return [fromHeader, toHeader, ...bodyOut].join('\n');
+}
+
+/* ----------------------------------------------------------------------
+   NOVA AGENT — fs_write approval diff preview composer (plan §4c).
+
+   Pure, testable glue between the three existing pieces:
+     1. `fs_read` handler (from `buildNovaFsHandlers`)
+     2. `buildNovaUnifiedDiff` (LCS line-diff)
+     3. `cxNovaApprovalModal({ diffText })`
+
+   Called from `novaHandleSend`'s `confirmApproval` composer *before*
+   the modal opens, so the user sees a diff preview of what the LLM is
+   about to write before clicking the red button.
+
+   Contract:
+     - Returns `Promise<string>`. Empty string means "no preview" — the
+       modal still shows tool name + args JSON, just without the diff.
+     - NEVER throws. An `fs_read` that explodes, a bogus tool name, a
+       missing arg — all short-circuit to `''`.
+     - Fires only for `fs_write`. Every other tool short-circuits with
+       an empty string.
+
+   Deliberately at composer-level (not dispatcher-level) per AGENT_MEMORY
+   policy: the dispatcher must stay a pure handler-loop and not reach
+   back into the filesystem to render UI chrome. The composer owns the
+   approval UX, so it owns this call too.
+
+   Inputs (all optional but required for a non-empty return):
+     - `tool`      : the tool-registry entry whose approval is pending.
+     - `args`      : raw args the LLM sent (`{ path, content, ... }`).
+     - `fsRead`    : the `fs_read` handler from `buildNovaFsHandlers`.
+     - `buildDiff` : defaults to `buildNovaUnifiedDiff` in production.
+   ---------------------------------------------------------------------- */
+
+async function buildFsWriteDiffPreview(opts) {
+    const { tool, args, fsRead, buildDiff } = (opts && typeof opts === 'object') ? opts : {};
+    if (!tool || tool.name !== 'fs_write') return '';
+    const a = (args && typeof args === 'object') ? args : {};
+    if (typeof a.path !== 'string' || !a.path) return '';
+    if (typeof a.content !== 'string') return '';
+    const diffFn = typeof buildDiff === 'function'
+        ? buildDiff
+        : (typeof buildNovaUnifiedDiff === 'function' ? buildNovaUnifiedDiff : null);
+    if (!diffFn) return '';
+    const readFn = typeof fsRead === 'function' ? fsRead : null;
+
+    // Fetch the current file. We ONLY request path — no encoding/maxBytes
+    // overrides — so the server gives us its default utf8 read with the
+    // standard 1 MiB cap. If the file is larger, `truncated: true` comes
+    // back and the diff will include a best-effort preview up to that cap.
+    let oldContent = null; // null → treat as new file in buildNovaUnifiedDiff
+    if (readFn) {
+        let readRes;
+        try {
+            readRes = await readFn({ path: a.path });
+        } catch (_) {
+            return ''; // fs_read threw → no diff, modal still shows args
+        }
+        if (readRes && typeof readRes === 'object') {
+            // "Not-found" is semantic: the plugin returns `error: 'not-found'`
+            // + 404 status. That's a create, not a failure — leave oldContent
+            // null so buildNovaUnifiedDiff renders the `--- /dev/null` header.
+            if (readRes.error === 'not-found') {
+                oldContent = null;
+            } else if (typeof readRes.error === 'string') {
+                // Any OTHER error (bridge-unreachable, server-error, deny-list,
+                // content-too-large, etc.) → skip the diff. Modal still opens.
+                return '';
+            } else if (typeof readRes.content === 'string') {
+                oldContent = readRes.content;
+            } else {
+                // Unexpected shape → skip diff rather than render garbage.
+                return '';
+            }
+        } else {
+            return '';
+        }
+    }
+    // Defensive: diffFn is the only thing left that could throw. The
+    // production implementation is pure, but an injected test double
+    // might not be.
+    try {
+        return String(diffFn(oldContent, a.content, { path: a.path }) || '');
+    } catch (_) {
+        return '';
+    }
 }
 
 /* ----------------------------------------------------------------------
