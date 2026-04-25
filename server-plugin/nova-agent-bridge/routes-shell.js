@@ -56,7 +56,6 @@
 
 const childProcess = require('node:child_process');
 const fsPromises = require('node:fs/promises');
-const path = require('node:path');
 const { resolveRequestPath, sendError } = require('./routes-fs-read.js');
 
 // Plan §4b — shell timeouts. Min/max mirror the schema bounds enforced
@@ -113,11 +112,17 @@ function coerceArgs(raw) {
 
 /**
  * Capture a child process's stdout + stderr into bounded buffers. Returns
- * a Promise resolving to `{ stdout, stderr, truncatedStdout, truncatedStderr }`
- * when both streams close. Each stream stops appending once it has
- * collected `cap` bytes; further data is silently dropped (we still
- * have to drain the stream so the child doesn't block on backpressure,
- * but `data` events past the cap don't grow the buffer).
+ * a Promise resolving to `{ stdout, stderr, truncatedStdout, truncatedStderr,
+ * stdoutBytes, stderrBytes }` when both streams close. Each stream stops
+ * appending once it has collected `cap` UTF-8 bytes; further data is
+ * silently dropped (we still drain the stream so the child doesn't block
+ * on backpressure, but `data` events past the cap don't grow the buffer).
+ *
+ * The cap is enforced in **UTF-8 bytes**, not JS string `.length` (which
+ * is UTF-16 code units). With multi-byte output a naive length-based
+ * cap could let through up to 4× the intended on-the-wire size; we slice
+ * each chunk character-by-character so a code point that would push the
+ * total past `cap` is dropped wholesale (no broken surrogates).
  */
 function captureBoundedStreams(child, cap) {
     const state = {
@@ -125,20 +130,43 @@ function captureBoundedStreams(child, cap) {
         stdoutBytes: 0, stderrBytes: 0,
         truncatedStdout: false, truncatedStderr: false,
     };
+
+    /**
+     * Take as much of `chunk` as fits in `maxBytes` UTF-8 bytes. Iterates
+     * by code point (`for...of` on a string yields full code points, so
+     * surrogate pairs stay intact). Returns the accepted prefix, the
+     * byte count of that prefix, and whether anything was dropped.
+     */
+    function sliceChunkToUtf8Bytes(chunk, maxBytes) {
+        if (maxBytes <= 0) return { text: '', bytes: 0, truncated: chunk.length > 0 };
+        const chunkBytes = Buffer.byteLength(chunk, 'utf8');
+        if (chunkBytes <= maxBytes) {
+            return { text: chunk, bytes: chunkBytes, truncated: false };
+        }
+        let text = '';
+        let bytes = 0;
+        for (const ch of chunk) {
+            const chBytes = Buffer.byteLength(ch, 'utf8');
+            if (bytes + chBytes > maxBytes) break;
+            text += ch;
+            bytes += chBytes;
+        }
+        return { text, bytes, truncated: true };
+    }
+
     function attach(stream, key, bytesKey, truncKey) {
         if (!stream) return Promise.resolve();
         stream.setEncoding('utf8');
         return new Promise((resolve) => {
             stream.on('data', (chunk) => {
-                state[bytesKey] += Buffer.byteLength(chunk, 'utf8');
                 if (state[truncKey]) return;
-                if (state[key].length + chunk.length > cap) {
-                    const remaining = cap - state[key].length;
-                    if (remaining > 0) state[key] += chunk.slice(0, remaining);
-                    state[truncKey] = true;
-                } else {
-                    state[key] += chunk;
+                const remaining = cap - state[bytesKey];
+                const { text, bytes, truncated } = sliceChunkToUtf8Bytes(chunk, remaining);
+                if (bytes > 0) {
+                    state[key] += text;
+                    state[bytesKey] += bytes;
                 }
+                if (truncated) state[truncKey] = true;
             });
             stream.on('end', resolve);
             stream.on('error', resolve);
@@ -199,10 +227,15 @@ function createShellRunHandler({
     return async function shellRunHandler(req, res) {
         const body = req?.body || {};
         const cmd = typeof body.cmd === 'string' ? body.cmd : '';
+        // Coerce args/timeout up-front so the audit entry on a refusal
+        // can still record the *count* of args (which doesn't leak
+        // values) for diagnostics.
+        const args = coerceArgs(body.args);
+        const timeoutMs = coerceTimeout(body.timeoutMs);
         if (!cmd) {
             await audit(auditLogger, {
                 route: '/shell/run', outcome: 'refused-bad-arg',
-                argsSummary: { cmd: '', argsCount: 0 },
+                argsSummary: { cmd: '', argsCount: args.length },
                 error: 'cmd-required',
             });
             return sendError(res, 400, 'cmd-required');
@@ -212,15 +245,12 @@ function createShellRunHandler({
         if (typeof absPath !== 'string' || absPath.length === 0) {
             await audit(auditLogger, {
                 route: '/shell/run', outcome: 'refused-not-allowed',
-                argsSummary: { cmd, argsCount: 0 },
+                argsSummary: { cmd, argsCount: args.length },
             });
             return sendError(res, 403, 'command-not-allowed', {
                 detail: `'${cmd}' is not on the configured allow-list`,
             });
         }
-
-        const args = coerceArgs(body.args);
-        const timeoutMs = coerceTimeout(body.timeoutMs);
 
         // Resolve cwd against root using the same path-safety pipeline as
         // fs routes. Default cwd = root. An explicitly-supplied cwd that
@@ -233,9 +263,13 @@ function createShellRunHandler({
                 root, normalizePath, requestPath: body.cwd, realpathImpl,
             });
             if (!resolved.ok) {
+                // Don't audit the raw `body.cwd` — it's user-supplied
+                // input that may carry path-shaped material we don't
+                // want in the log. The `error` field carries the
+                // closed-enum reason; that's enough for forensics.
                 await audit(auditLogger, {
                     route: '/shell/run', outcome: 'refused-cwd',
-                    argsSummary: { cmd, argsCount: args.length, cwd: body.cwd },
+                    argsSummary: { cmd, argsCount: args.length },
                     error: resolved.error,
                 });
                 return sendError(res, resolved.status, resolved.error,

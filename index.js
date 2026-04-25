@@ -4552,7 +4552,17 @@ async function openNovaSoulMemoryEditor() {
    see new entries without closing/reopening.
    ---------------------------------------------------------------------- */
 function openNovaAuditLogViewer() {
-    document.querySelector('.cx-modal-overlay.cx-nova-audit-overlay')?.remove();
+    // Re-opening the viewer while one is already up: invoke the
+    // previous instance's close() through the shared cleanup hook
+    // so its keydown listener is removed alongside the DOM. Without
+    // this, each re-open would leave a stale `keydown` handler bound
+    // to `document` until the user happened to press Escape.
+    const existing = document.querySelector('.cx-modal-overlay.cx-nova-audit-overlay');
+    if (existing && typeof existing._cxClose === 'function') {
+        try { existing._cxClose(); } catch (_) { existing.remove(); }
+    } else if (existing) {
+        existing.remove();
+    }
 
     const overlay = document.createElement('div');
     overlay.className = 'cx-modal-overlay cx-nova-audit-overlay';
@@ -4570,6 +4580,9 @@ function openNovaAuditLogViewer() {
         overlay.remove();
         document.removeEventListener('keydown', onKey);
     };
+    // Expose the cleanup hook on the DOM node so a second call to
+    // openNovaAuditLogViewer can invoke it before removing the node.
+    overlay._cxClose = close;
     const onKey = (e) => { if (e.key === 'Escape') close(); };
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
     overlay.querySelector('#cx-nova-audit-close').addEventListener('click', close);

@@ -322,9 +322,48 @@ describe('createShellRunHandler — fake-spawn flow', () => {
             child.emit('exit', 0, null);
         });
         await p;
-        assert.equal(res._state.body.stdout.length, cap, 'stdout must be capped at cap bytes');
+        // ASCII: 1 byte per char, so byte cap == char cap.
+        assert.equal(Buffer.byteLength(res._state.body.stdout, 'utf8'), cap,
+            'stdout must be capped at cap UTF-8 bytes');
         assert.equal(res._state.body.truncated.stdout, true);
         assert.equal(res._state.body.truncated.stderr, false);
+    });
+
+    it('caps multibyte UTF-8 output at byte count, not string length', async () => {
+        // Each '☃' (snowman, U+2603) is 3 UTF-8 bytes, 1 JS string char.
+        // A naive `.length`-based cap would let through 3× the byte budget
+        // before truncating. The byte-aware cap stops at the byte limit
+        // and never returns a broken surrogate.
+        const child = makeFakeChild();
+        const h = createShellRunHandler(baseDeps({
+            allowList: { node: '/abs/node' },
+            spawnImpl: fakeSpawnFactory(child, {}),
+        }));
+        const res = mockRes();
+        const p = h({ body: { cmd: 'node' } }, res);
+        const cap = _internal.SHELL_OUTPUT_CAP_BYTES;
+        // Push enough snowmen to comfortably exceed the cap in BYTES
+        // (cap/3 + a buffer of 1024 chars). This is `cap/3 * 3 ≈ cap` so
+        // we add a clear excess.
+        const snowman = '☃';
+        const charCount = Math.floor(cap / 3) + 1024;
+        setImmediate(() => {
+            child.stdout.push(snowman.repeat(charCount));
+            child.stdout.push(null);
+            child.stderr.push(null);
+            child.emit('exit', 0, null);
+        });
+        await p;
+        const outBytes = Buffer.byteLength(res._state.body.stdout, 'utf8');
+        assert.ok(outBytes <= cap, `outBytes=${outBytes} must be ≤ cap=${cap}`);
+        // Must keep at least floor(cap/3) full snowmen — i.e. at least
+        // cap - 2 bytes (we may drop the trailing partial code point).
+        assert.ok(outBytes >= cap - 3,
+            `outBytes=${outBytes} should be near cap (${cap}) when truncating multi-byte input`);
+        assert.equal(res._state.body.truncated.stdout, true);
+        // Output must be exactly N copies of '☃' — no broken surrogates.
+        assert.ok(/^☃+$/.test(res._state.body.stdout),
+            'truncated output must not contain partial code points');
     });
 
     it('triggers timeout: kills with SIGTERM and reports timedOut:true', async () => {
