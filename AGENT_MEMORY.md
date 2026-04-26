@@ -77,15 +77,26 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
-### 2026-04-26 — Final docs housekeeping sweep (commit pending)
+### 2026-04-26 — Preset installer docs review follow-up (commit pending)
+
+**Context:** Follow-up to PR review on the final docs housekeeping sweep.
+
+**Notes for future agents:**
+- `index.js` logs the preset JSON to DevTools unconditionally during the
+  installer flow, even when download/clipboard handoff succeeds. Docs should
+  describe that accurately while still making clear DevTools access is optional
+  and not required for iPad/VM users who can use the downloaded file or
+  clipboard copy.
+
+### 2026-04-26 — Final docs housekeeping sweep (commit 82ef6c0)
 
 **Context:** Doc-only cleanup after the v0.13.0 Nova stabilization work.
 
 **Notes for future agents:**
 - The preset installer does **not** write directly into ST user presets. It
   downloads `Command-X.json`, best-effort copies the formatted JSON to the
-  clipboard, logs it to DevTools, and tells the user to import through ST's
-  preset UI. Keep README, `settings.html`, and `presets/openai/README.md`
+  clipboard, also logs it to DevTools, and tells the user to import through
+  ST's preset UI. Keep README, `settings.html`, and `presets/openai/README.md`
   wording aligned with that handoff unless a real ST preset-save API is added.
 - `st_write_character` and `st_write_worldbook` are still deliberate
   `not-implemented` handlers with hints to the bridge `fs_write` workaround.

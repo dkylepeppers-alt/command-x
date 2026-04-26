@@ -65,8 +65,9 @@ Open the SillyTavern extensions panel for **Command-X Phone**, scroll to
 Because ST does not expose a stable documented preset-save API for third-party
 extensions, the button uses a best-effort handoff instead of silently writing
 into your presets: it downloads `Command-X.json`, copies the formatted JSON to
-your clipboard when the browser allows it, logs the JSON to DevTools as a final
-fallback, and shows the same import instructions as **Option B**.
+your clipboard when the browser allows it, also logs the JSON to DevTools for
+users who have console access (optional fallback only), and shows the same
+import instructions as **Option B**.
 
 ### Option B — Import manually
 

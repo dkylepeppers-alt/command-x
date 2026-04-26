@@ -213,7 +213,7 @@ For the full status / remaining-work list, see [`docs/nova-agent-plan.md`](docs/
 Command-X ships a chat-completion preset at `presets/openai/Command-X.json` that's tuned for Nova: sensible defaults for `temperature`, `frequency_penalty`, `presence_penalty`, `stream_openai`, `wi_format`, `scenario_format`, and `names_behavior`. The shape is OpenAI-style but provider-agnostic — clone it, change `chat_completion_source` and the corresponding `*_model` field, and you're set up for Claude, Gemini, OpenRouter, etc.
 
 To install:
-- **From the extension settings** — Click **Install Command-X chat-completion preset**. This best-effort path downloads `Command-X.json`, copies the JSON to your clipboard when possible, logs it to DevTools as a final fallback, and then shows import instructions.
+- **From the extension settings** — Click **Install Command-X chat-completion preset**. This best-effort path downloads `Command-X.json`, copies the JSON to your clipboard when possible, also logs it to DevTools for users who have console access (optional fallback only), and then shows import instructions.
 - **Manually** — Open the file from `presets/openai/Command-X.json`, then in ST go to **Chat Completion → Presets → Import** and select it.
 
 See `presets/openai/README.md` for the full breakdown of which fields are tuned and why.
