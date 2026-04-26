@@ -7853,7 +7853,7 @@ const NOVA_TOOLS = [
     },
     {
         name: 'st_write_worldbook', displayName: 'Write worldbook', permission: 'write', backend: 'st-api',
-        description: 'Create or update a worldbook. Requires approval.',
+        description: 'Create or replace an entire worldbook file. Requires name and a full book object with entries; do not use this for a single entry unless you have read and are sending the complete worldbook JSON.',
         parameters: {
             type: 'object',
             properties: {
@@ -8089,7 +8089,8 @@ const NOVA_SKILLS = [
             '  depth, group, groupOverride, groupWeight, scanDepth, caseSensitive,',
             '  matchWholeWords, useGroupScoring, automationId, role, vectorized.',
             'Worldbooks live at SillyTavern/data/<user>/worlds/<name>.json.',
-            'Prefer st_write_worldbook over fs_write — the ST API normalizes uids.',
+            'st_write_worldbook is only for full-worldbook replacement and must include a complete `book` object.',
+            'For a single new entry, read the target file with fs_read, merge the entry into entries, then write the complete JSON back with fs_write.',
             'When building a new world, start with 3–5 foundational entries',
             '(setting, factions, tone) before branching into specifics.',
         ].join('\n'),
@@ -9063,9 +9064,19 @@ function buildNovaStTools({
         },
 
         st_write_worldbook: async (rawArgs) => {
-            const { name } = safeArgs(rawArgs);
-            const cleanName = safeName(name);
+            const args = safeArgs(rawArgs);
+            const cleanName = safeName(args.name);
             if (!cleanName) return { error: 'name must be a non-empty string' };
+            if (!isObject(args.book)) {
+                return {
+                    error: 'missing-book',
+                    tool: 'st_write_worldbook',
+                    receivedKeys: Object.keys(args),
+                    hint: 'st_write_worldbook requires a full `book` object, e.g. { entries: ... }. '
+                        + 'For a single new worldbook entry, first read the current file, merge the new entry into `entries`, '
+                        + `then use fs_write at SillyTavern/data/<user>/worlds/${cleanName}.json with the complete JSON.`,
+                };
+            }
             return {
                 error: 'not-implemented',
                 tool: 'st_write_worldbook',
