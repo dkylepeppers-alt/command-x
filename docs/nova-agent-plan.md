@@ -666,7 +666,8 @@ Always concatenated into the Nova system prompt regardless of skill.
 - [x] `GET /manifest` → `{ id, version, root, shellAllowList, capabilities, auditLogPath }`.
   `capabilities` is `{ fs_list, fs_read, fs_write, fs_delete, fs_move,
   fs_stat, fs_search, shell_run }`, each `true|false`. Post-write-sprint
-  every `fs_*` flag is `true`; only `shell_run` remains `false`.
+  every `fs_*` flag is `true`; `shell_run` is computed dynamically from the
+  resolved allow-list (see the shipped shell-route bullet below).
 - [x] `GET /health` → `{ ok: true, id, version }`.
 - [x] `GET /fs/list`, `GET /fs/read`, `GET /fs/stat`, `POST /fs/search` —
   **shipped** in `server-plugin/nova-agent-bridge/routes-fs-read.js` as
@@ -684,9 +685,7 @@ Always concatenated into the Nova system prompt regardless of skill.
   `overwrite: true` the destination is backed up to trash before the
   rename. All three reuse `resolveRequestPath` from the read module for
   path safety. All three append to the audit log. Covered by
-  `test/nova-fs-write.test.mjs` (23 assertions). `POST /shell/run` —
-  still `501 not-implemented`; shell needs allow-list + spawn-without-shell
-  + hard-timeout and lands in the next sprint.
+  `test/nova-fs-write.test.mjs` (23 assertions).
 - [x] `POST /shell/run` — **shipped** as a single-shot JSON response
   (final stdout/stderr/exitCode/signal/timedOut/durationMs). Allow-list
   resolved at startup via `resolveAllowList(DEFAULT_SHELL_ALLOW)`

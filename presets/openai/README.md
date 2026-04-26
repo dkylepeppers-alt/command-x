@@ -1,7 +1,7 @@
 # Command-X Chat Completion Preset
 
-`Command-X.json` is a Chat Completion preset tuned for Command-X roleplay and for
-the upcoming **Nova** agent. It matches SillyTavern's upstream
+`Command-X.json` is a Chat Completion preset tuned for Command-X roleplay and the
+**Nova** agent. It matches SillyTavern's upstream
 `default/content/presets/openai/Default.json` schema so it imports cleanly into
 the **AI Response Configuration → Chat Completion presets** panel.
 
@@ -58,13 +58,15 @@ add project-specific text per profile rather than shipping it here.
 
 ## Installing
 
-### Option A — Install from the Command-X extension *(planned, not yet shipped)*
+### Option A — Install from the Command-X extension
 
-A future Nova rollout (plan §11b) adds an **"Install Command-X Chat
-Completion preset"** button to the Command-X settings panel that will call
-`ctx.executeSlashCommandsWithOptions('/preset-import …')` — or fall back to
-`POST /api/presets/save` — and select the preset automatically. Until that
-button ships, use **Option B** below.
+Open the SillyTavern extensions panel for **Command-X Phone**, scroll to
+**✴︎ Nova Agent**, and click **Install Command-X chat-completion preset**.
+Because ST does not expose a stable documented preset-save API for third-party
+extensions, the button uses a best-effort handoff instead of silently writing
+into your presets: it downloads `Command-X.json`, copies the formatted JSON to
+your clipboard when the browser allows it, logs the JSON to DevTools as a final
+fallback, and shows the same import instructions as **Option B**.
 
 ### Option B — Import manually
 

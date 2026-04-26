@@ -137,7 +137,7 @@ Optional (only required for the bridge-plugin sections below):
 
 ---
 
-## D. Write-tier turn — Character Creator (no bridge)
+## D. Write-tier turn — Character Creator fallback surface
 
 - [ ] **User/browser:** In **Settings → NOVA**, raise **Default permission tier**
   to **write**.
@@ -145,15 +145,18 @@ Optional (only required for the bridge-plugin sections below):
   **Character Creator**.
 - [ ] **User/browser:** Send: **"Create Aria, a witty cyberpunk hacker."**
 - [ ] **User/browser:** Nova proposes **`st_write_character`** (the canonical
-  write path — goes through ST's character API, not the filesystem). The
-  **approval modal** opens showing the parsed args; click **Approve**.
-- [ ] **User/browser:** After the turn ends, **Aria** appears in your ST
-  character list (refresh the character panel if needed).
+  ST-native write path). The **approval modal** opens showing the parsed args;
+  click **Approve**.
+- [ ] **User/browser:** The tool result is the expected closed-enum
+  **`not-implemented`** response with a hint to use **`fs_write`** at
+  `SillyTavern/data/<user>/characters/Aria.json`. This is the current v0.13.0
+  behavior; the safer ST-native character-write handler is deliberately
+  deferred until the correct ST internal API surface is confirmed.
 - [ ] **Both:** *(Optional bridge variant)* If the bridge is installed and tier is
-  **write**, Nova may instead choose **`fs_write`** to drop the JSON onto
-  disk. In that case the approval modal additionally renders a **unified diff
-  preview** of the proposed file content. Approve → file written → re-read by
-  Nova on the next turn.
+  **write**, ask Nova to use the hinted **`fs_write`** workaround to drop the
+  JSON onto disk. The approval modal renders a **unified diff preview** of the
+  proposed file content. Approve → file written → refresh/restart ST as needed
+  for the character list to pick up the new JSON.
 
 ---
 
@@ -164,10 +167,15 @@ Optional (only required for the bridge-plugin sections below):
   **"Build a small worldbook with three entries about the city of Pacifica."**
 - [ ] **User/browser:** Nova proposes **`st_write_worldbook`** with three
   entries; approve.
-- [ ] **User/browser:** Open ST's **World Info / Lorebook** UI. The new
-  worldbook loads cleanly, all three entries are present, each entry's `keys` /
-  `content` / `comment` fields are populated, and the schema validates (no red
-  error toasts).
+- [ ] **User/browser:** The tool result is the expected closed-enum
+  **`not-implemented`** response with a hint to use **`fs_write`** at
+  `SillyTavern/data/<user>/worlds/Pacifica.json` (or the exact name Nova chose).
+  This is the current v0.13.0 behavior; the safer ST-native worldbook-write
+  handler is deliberately deferred for the same reason as character writes.
+- [ ] **Both:** *(Optional bridge variant)* If the bridge is installed, ask Nova
+  to use the hinted **`fs_write`** workaround. Approve the diff, then open ST's
+  **World Info / Lorebook** UI after refresh/restart as needed and verify the
+  worldbook JSON loads cleanly.
 
 ---
 
