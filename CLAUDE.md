@@ -193,7 +193,7 @@ Architecture:
 - **Approval modal** — Writes and shell calls open `cxNovaApprovalModal` with an optional unified-diff preview (`buildNovaUnifiedDiff`) before execution. The user approves or rejects per-call.
 - **Transcript** — Per-chat, stored under `ctx.chatMetadata[EXT].nova`, replayed into the phone's Nova view.
 - **Soul / memory** — Markdown docs under `nova/soul.md` and `nova/memory.md` (seeded on first use, then per-chat editable via the `nova_write_soul`, `nova_append_memory`, and `nova_overwrite_memory` tools behind the approval gate).
-- **Server plugin** — `server-plugin/nova-agent-bridge/` exposes `/fs/*` routes (list, read, stat, search, write, delete, move — with `.nova-trash` safety + audit log + symlink-escape hardening via parent-realpath walk) and a reserved `/shell/run` route. The extension probes `/health` on startup to discover plugin capabilities.
+- **Server plugin** — `server-plugin/nova-agent-bridge/` exposes `/fs/*` routes (list, read, stat, search, write, delete, move — with `.nova-trash` safety + audit log + symlink-escape hardening via parent-realpath walk) and `POST /shell/run` (allow-listed, no-shell spawn with hard timeout and capped output). The extension probes `/manifest` before each Nova turn (cached briefly) to discover plugin capabilities and filter unavailable bridge-backed tools.
 - **Audit:** every dispatched tool — approved or denied — appends a JSONL line to `<root>/data/_nova-audit.jsonl` (preferred) or `<root>/_nova-audit.jsonl` (fallback when no `data/` dir exists) via `audit.js`, with `content`/`data`/`payload`/`body`/`raw` stripped at top-level and via a JSON.stringify replacer for nested occurrences.
 
 `settings.nova` shape (see `NOVA_DEFAULTS`):

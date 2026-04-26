@@ -77,6 +77,35 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-26 — Preset installer docs review follow-up (commit pending)
+
+**Context:** Follow-up to PR review on the final docs housekeeping sweep.
+
+**Notes for future agents:**
+- `index.js` logs the preset JSON to DevTools unconditionally during the
+  installer flow, even when download/clipboard handoff succeeds. Docs should
+  describe that accurately while still making clear DevTools access is optional
+  and not required for iPad/VM users who can use the downloaded file or
+  clipboard copy.
+
+### 2026-04-26 — Final docs housekeeping sweep (commit 82ef6c0)
+
+**Context:** Doc-only cleanup after the v0.13.0 Nova stabilization work.
+
+**Notes for future agents:**
+- The preset installer does **not** write directly into ST user presets. It
+  downloads `Command-X.json`, best-effort copies the formatted JSON to the
+  clipboard, also logs it to DevTools, and tells the user to import through
+  ST's preset UI. Keep README, `settings.html`, and `presets/openai/README.md`
+  wording aligned with that handoff unless a real ST preset-save API is added.
+- `st_write_character` and `st_write_worldbook` are still deliberate
+  `not-implemented` handlers with hints to the bridge `fs_write` workaround.
+  Manual validation should verify that closed-enum fallback, not claim those
+  ST-native writes create cards/worldbooks.
+- `shell_run` is implemented in the bridge plugin; stale docs should not
+  describe `/shell/run` as reserved, 501, or a future sprint. Capability
+  discovery uses `/manifest`, not `/health`.
+
 ### 2026-04-25 (shell route) — `POST /shell/run` plugin route shipped (plan §4b/§8b)
 
 **Context:** Continuing the "tackle the most important tasks first, lets finish this thing" sweep. The Nova plan's biggest remaining functional gap was `/shell/run`: the extension-side `buildNovaShellHandler` factory shipped weeks ago (fully tested), the approval pipeline + tier gate + audit log all routed through it, but the plugin route itself was a 501 stub. So the LLM could see `shell_run` in the tool list (when `defaultTier:'full'`), the user could approve a call, the dispatcher could dispatch it, the `_novaBridgeRequest` would happily POST to `/shell/run` — and the plugin would always return `{ error: 'not-implemented' }`. End-to-end shell execution was the only Nova capability that was completely non-functional.
