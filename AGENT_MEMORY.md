@@ -1984,3 +1984,312 @@ priority order:
 
 The §14 manual-validation list is the right user-facing acceptance
 gate for a v0.13.0 release tag; an agent should never tick those.
+
+---
+
+## 2026-04-25 (very final) — §4b remember-approvals toggle + §12 README rewrite
+
+**Goal of this PR:** finish the remaining agent-completable work on
+the Nova implementation per the prior session's hand-off priority list.
+The `[ ]` items the previous sweep left as "genuinely deferred" or
+"open question" stay deferred; the two well-scoped items ship here.
+
+**Shipped:**
+
+1. **§4b "Remember approvals this session" toggle** — full plumbing.
+   - **Setting**: `settings.nova.rememberApprovalsSession` was already
+     declared in `NOVA_DEFAULTS` but had no UI and no plumbing. Now
+     declared in `NOVA_SETTING_BINDINGS` as `type: 'bool'` with both
+     DOM ids wired (`cx_nova_remember_approvals` for ST's settings
+     panel, `cx-set-nova-remember-approvals` for in-phone Settings →
+     NOVA). The existing table-driven `loadSettings` / `saveSettings`
+     pipeline picks it up without bespoke handlers.
+   - **UI**: checkbox in `settings.html` under the Nova section, and
+     a `cx-toggle`-styled row in the in-phone Settings → NOVA section
+     directly under the bridge plugin URL.
+   - **Per-session state**: new module-level
+     `novaSessionApprovedTools = new Set()` plus accessor
+     `getNovaSessionApprovedTools()` and clearer
+     `clearNovaSessionApprovedTools()`. Lifecycle is documented in
+     the comment block: toggle on keeps existing entries, toggle off
+     clears, page reload starts fresh-empty, user-rejected calls
+     never get added.
+   - **Plumbing**: `novaHandleSend` now passes
+     `rememberedApprovals: nova.rememberApprovalsSession ?
+     novaSessionApprovedTools : null` into `sendNovaTurn`, which
+     forwards it to `runNovaToolDispatch`, which forwards it to
+     `novaToolGate`. The composer's `confirmApproval` callback adds
+     the tool name to the Set only when (a) the user clicked OK,
+     (b) the toggle is on, and (c) the tool has a name — reads never
+     reach this branch because the gate returns
+     `requiresApproval:false` for `read` permission upstream.
+   - **Auto-clear on toggle-off**: `saveSettings` snapshots the prior
+     `rememberApprovalsSession` boolean before applying DOM values
+     and calls `clearNovaSessionApprovedTools()` on a true→false
+     transition. So unchecking the box has the same effect as starting
+     a fresh session — every previously-remembered tool re-prompts
+     next time.
+   - **Tests**: new `test/nova-remember-approvals.test.mjs`
+     (14 assertions, 3 suites): bindings + DOM-surface + composer
+     wiring source-shape assertions, plus an inline-copy
+     behavioural contract for `novaToolGate` proving that the Set
+     short-circuits approval correctly, doesn't bypass tier-too-low
+     denial, and treats null/empty containers identically.
+
+2. **§12 README rewrite** — promote Nova from a `> **Note:**` callout
+   to a top-level section.
+   - Order is now Features → Install → Usage → **`## ✴︎ Nova Agent`**
+     → **`## Chat-Completion Preset`** → How It Works (RP messaging) →
+     Private Polling → Tag Reference → Architecture, matching the
+     plan's prescribed structure.
+   - The Features list also gained a `### ✴︎ Nova App (Agentic
+     Assistant)` subsection that cross-links to the top-level Nova
+     section.
+   - The Usage list's item 9 now points at `[Nova Agent](#-nova-agent)`
+     instead of "preview; see `docs/nova-agent-plan.md`".
+   - The new top-level Nova Agent section covers Quick start,
+     How it works (ASCII flow diagram), Permission tiers (table),
+     Soul and memory, Skills, the bridge plugin, and
+     Cancellation/errors/audit. Most prose is re-shaped from
+     `CLAUDE.md` and `docs/nova-agent-plan.md`.
+   - The new Chat-Completion Preset section documents both the
+     "Install Command-X chat-completion preset" button and the
+     manual import path, and points at `presets/openai/README.md`
+     for the field-by-field rationale.
+
+**Plan + memory updates:**
+- `docs/nova-agent-plan.md`: §4b "UI toggle still pending" → fully
+  ticked with the implementation contract; §12 README rewrite
+  ticked; banner block at the top updated to call out the
+  stabilisation sweep; new amendment appended.
+- This entry.
+
+**Validation:**
+- `node --check index.js` clean.
+- `node --test test/*.mjs` → **793/793 pass** (was 779; +14 from the
+  new file).
+- `parallel_validation` run before completing the task.
+
+**Hand-off notes for next session:**
+
+The genuinely deferred items remain deferred, by design:
+
+1. **§3c registered-path fallback** — only matters for ST builds
+   missing `ConnectionManagerRequestService` (pre-1.12.6). Current
+   `cxAlert`-and-bail is the right v0.13.0 behaviour. If a future
+   user hits this, the fix is to add a `ctx.registerFunctionTool`
+   loop in `novaHandleSend`'s textOnlyFallback branch with
+   `shouldRegister: () => true` for the duration of the turn, then
+   un-register in the `finally` block.
+2. **§10 starter-file auto-creation** — depends on the open question
+   of whether to support no-bridge soul/memory writes at all.
+   Without the bridge plugin, the `nova_write_*` handlers fail
+   gracefully today; auto-seeding the user data dir on first Nova
+   load would only matter for installs that want soul/memory to
+   work without ever installing `nova-agent-bridge`. That tradeoff
+   should be a user decision, not an agent guess.
+3. **§14 manual-validation walk-through** — permanent `[ ]` user
+   checklist; never agent-tickable. Run through it before tagging a
+   v0.13.0 release.
+
+Nothing structural is left for the v0.13.0 critical path. The next
+sensible direction is whatever the user prioritises after a release
+tag.
+
+---
+
+## 2026-04-25 — README: SillyTavern prerequisites for Nova
+
+### Why
+
+`server-plugin/nova-agent-bridge/README.md` documents `enableServerPlugins: true` but the **main** `README.md` did not — a user could follow the Nova Quick Start, drop the plugin into `plugins/`, restart, and have it silently ignored. Also, the minimum ST version (1.12.6+) and the
+tool-calling-source requirement were only mentioned in passing in step 2 of the Quick Start, with no consolidated "what does my ST install need before I touch the phone" answer.
+
+### Change
+
+Added a `### SillyTavern prerequisites` subsection under `## ✴︎ Nova Agent` (just before the existing Quick Start). Five numbered items:
+
+1. ST 1.12.6+ (for `ConnectionManagerRequestService`, `isToolCallingSupported`, Connection Profiles).
+2. A tool-calling-capable chat completion source — OpenAI / Claude / Gemini / OpenRouter; describes the text-only-mode fallback when the source can't tool-call.
+3. Connection Profiles enabled (built-in ST extension, on by default; verify it isn't disabled).
+4. (Optional, bridge plugin only) `enableServerPlugins: true` in `config.yaml` — with the full code-fenced YAML snippet, and a cross-link to the bridge plugin README for the rest of the install walkthrough.
+5. (Optional, Private Polling only) `generateQuietPrompt` available (1.12.10+) — cross-links to the existing Private Polling section.
+
+Also tightened Quick Start step 4 ("Install the bridge plugin") to point back to the prereq for the `enableServerPlugins` requirement instead of just saying "drop in and restart."
+
+### Why this minimal shape
+
+- No duplication: `enableServerPlugins` install detail lives in `server-plugin/nova-agent-bridge/README.md`; the main README only states the requirement and links there.
+- Doesn't redefine the Private Polling requirement — just cross-links so the version number lives in one place.
+- Doesn't gate the rest of the README behind these prereqs; everything except Nova is unaffected by them.
+
+### Validation
+
+Scope note: this memory entry records only the README prerequisites follow-up
+commit. The broader PR also includes the earlier `index.js` / `settings.html` /
+`test/nova-remember-approvals.test.mjs` remember-approvals implementation and a
+later `server-plugin/nova-agent-bridge/README.md` documentation refresh. The new
+anchor `#sillytavern-prerequisites` and the existing `#private-polling` anchor
+both use GitHub's standard kebab-case heading slug, so the in-page links resolve.
+The full PR was later sanity-validated with `node --test test/*.mjs` (793/793
+pass) after the manual-validation/docs sweep.
+
+---
+
+## 2026-04-25 (later) — Manual-validation extracted to a standalone file + final docs housekeeping
+
+### Why
+
+The `docs/nova-agent-plan.md` §14 walk-through was sparse (12 bullets, mid-plan)
+and had two real bugs: step 6 said the Character-Creator turn would propose
+`fs_write`, but the canonical write path for that skill is `st_write_character`
+(`index.js:7763`); and step 10 quoted the audit-log path as
+`<root>/.nova-trash/audit/audit-YYYY-MM-DD.jsonl`, which never existed in
+the shipped code. The actual path (per `audit.js` + `index.js::resolveAuditLogPath`)
+is a single append-only file at `<root>/data/_nova-audit.jsonl` (preferred) or
+`<root>/_nova-audit.jsonl` (fallback when no `data/` dir exists). The same wrong
+path was duplicated in the root `README.md` and in `CLAUDE.md`.
+
+The user wants to load SillyTavern and walk through this checklist via a CLI,
+so it needs to be (a) standalone (no flipping between docs), (b) 100% accurate
+against the shipped UI labels and on-disk paths, and (c) complete (preconditions
++ every shipped tool path + bridge install/uninstall + audit + cancellation +
+RP-chat isolation + non-Nova phone-app smoke).
+
+### What shipped
+
+1. **`docs/MANUAL_VALIDATION.md` (new, standalone, canonical)** — 15 phases
+   (§0 Preconditions through §O Tagging the release). Every UI label, button
+   id, file path, console string, and tool name is quoted verbatim from the
+   v0.13.0 source. Designed to be readable top-to-bottom in `less` /
+   `glow` / `cat` without flipping between files.
+   - §0 Preconditions explicitly calls out `enableServerPlugins: true` so a
+     user does not silently get a no-op bridge install in §H.
+   - §D fixes the Character-Creator step to point at `st_write_character`
+     (canonical write path), with an *Optional bridge variant* note for the
+     `fs_write` + diff-preview path that some agents may pick instead.
+   - §I quotes the correct audit-log path and explicitly says it is a single
+     file, not a directory.
+   - §J adds an explicit shell-allow-list refusal step (`rm` not on the
+     allow-list → `outcome: "refused-not-allowed"`) so the deny path is
+     observed, not just the happy path.
+   - §K adds a graceful-degradation step (uninstall bridge → ST-API subset
+     still works + yellow banner shows) that the old §14 had as a one-liner.
+   - §N adds a non-Nova phone-app smoke (Command-X messages, neural toggle,
+     Profiles, Quests, Map, Private polling) so a v0.13.0 release does not
+     ship with a regression in the rest of the phone — the old §14 had
+     none of this.
+
+2. **`docs/nova-agent-plan.md` §14** — replaced the inline 12-bullet checklist
+   with a one-paragraph pointer at `MANUAL_VALIDATION.md` and a "do not
+   duplicate" note. Single source of truth.
+
+3. **Audit-log path corrected in three places** (the main user-facing locations
+   that previously had the bogus `.nova-trash/audit/audit-YYYY-MM-DD.jsonl`
+   path):
+   - `README.md` (root) — Nova-app feature bullet + Cancellation/errors/audit
+     section.
+   - `CLAUDE.md` — Nova Agent §Audit bullet.
+   - (`docs/MANUAL_VALIDATION.md` is correct on first write.)
+
+4. **`server-plugin/nova-agent-bridge/README.md` Status section refresh**
+   — shell route is no longer "501 / lands next sprint" (it shipped); the
+   Status block now describes the shell route's safety model (allow-list
+   resolved at init, absolute-path spawn, no-shell, stdin closed, 1 MB
+   per-stream cap, hard timeout) at the same level of detail as the fs
+   bullets. The Security model section's "once the fs handlers land" /
+   "shell invocations will" future-tense was rewritten to present tense
+   ("uses `spawn` without `shell: true`", "resolves the binary against a
+   static allow-list at init time and spawns the absolute path so a later
+   PATH change cannot redirect mid-session"). Audit-path on this README was
+   already mostly right but tightened for consistency.
+
+### What was NOT changed
+
+- The actual extraction code in `index.js` and the server plugin — doc-only
+  housekeeping.
+- The starter `nova/soul.md` / `nova/memory.md` files — out of scope for this
+  pass.
+- `docs/nova-agent-plan.md` outside §14 — also out of scope (the plan still
+  reads top-to-bottom, just with §14 now externalised).
+
+### Validation
+
+Doc-only changes; no `index.js`/`test/`/`server-plugin/*.js` files touched.
+`grep -r '\.nova-trash/audit\|YYYY-MM-DD\.jsonl' README.md CLAUDE.md docs server-plugin`
+returns only historical mentions in `AGENT_MEMORY.md` (when included) and no
+live user-facing instructions, confirming the stale path is gone from the docs
+users follow.
+
+---
+
+## 2026-04-25 (review follow-up) — README tool names, audit wording, settings layout
+
+### Why
+
+PR review flagged several documentation/layout mismatches left over from the
+Nova docs sweep:
+
+- `README.md` still referenced non-existent `nova_write_memory` and
+  `st_create_character` names. The implemented tools are `nova_append_memory`,
+  `nova_overwrite_memory`, and `st_write_character`.
+- The README audit bullet blurred two different logs: user approval denials are
+  captured client-side in the in-phone audit viewer, but never reach the bridge
+  and therefore cannot be written to the server-side JSONL file.
+- The ST extension settings checkbox `cx_nova_remember_approvals` was missing
+  the surrounding `.cx-opt` wrapper used by neighboring controls.
+- The earlier AGENT_MEMORY validation note was scoped to a single README commit
+  but could be misread as describing the whole PR, which also includes code,
+  settings, and test changes.
+
+### Change
+
+- `README.md`: replaced `nova_write_memory` references with
+  `nova_append_memory` / `nova_overwrite_memory` (and `nova_read_memory` where
+  the section lists the read/edit tool set), changed the flow example to
+  `st_write_character`, and split audit wording into server-side executed bridge
+  requests vs client-side approval outcomes.
+- `CLAUDE.md`: kept the Nova soul/memory tool-name list aligned with README.
+- `index.js`: updated a stale helper comment that mentioned `nova_write_memory`.
+- `settings.html`: wrapped `cx_nova_remember_approvals` in `<div class="cx-opt">`
+  for the same layout structure as the surrounding controls.
+- `AGENT_MEMORY.md`: clarified the older README-prerequisites validation note so
+  future readers do not mistake it for whole-PR validation.
+
+### Validation
+
+- `rg 'nova_write_memory|st_create_character' /home/runner/work/command-x/command-x`
+  → no matches.
+- `rg '\.nova-trash/audit|YYYY-MM-DD\.jsonl' README.md CLAUDE.md docs server-plugin`
+  → no matches.
+- `node --test test/nova-remember-approvals.test.mjs` → 14/14 pass.
+
+---
+
+## 2026-04-26 — Manual validation tailored for Codex CLI
+
+### Why
+
+PR feedback asked to tailor the standalone manual-validation walk-through for
+Codex CLI. The existing `docs/MANUAL_VALIDATION.md` was CLI-readable, but it did
+not make the operator split explicit: Codex can run terminal/HTTP checks while a
+human performs browser-only SillyTavern clicks against the live instance.
+
+### Change
+
+- Added a **How to run this with Codex CLI** section near the top of
+  `docs/MANUAL_VALIDATION.md` with `ST_ROOT` / `CX_DIR` setup commands and a
+  reusable prompt for a Codex CLI session.
+- Added explicit checklist prefixes (`Codex CLI`, `User/browser`,
+  `Codex CLI + user`, `Both`) so the walkthrough reads as a coordinated Codex
+  terminal session plus live browser acceptance pass.
+- Kept the existing permanent `[ ]` checklist semantics — Codex should not tick
+  boxes or edit source unless a user explicitly asks it to fix a failed step.
+- Updated `docs/nova-agent-plan.md` §14 to call the file Codex-CLI-oriented.
+
+### Validation
+
+- `python` line-length check over `docs/MANUAL_VALIDATION.md` found 0 lines over
+  110 chars after the reflow.
+- `node --test test/*.mjs` was run after the docs-only change and passed
+  793/793.

@@ -3487,6 +3487,10 @@ function buildPhone() {
                     <span class="cx-settings-label">Bridge plugin URL</span>
                     <input type="text" id="cx-set-nova-plugin-url" class="cx-settings-text-input" value="${escAttr(settings.nova?.pluginBaseUrl || NOVA_DEFAULTS.pluginBaseUrl)}" />
                 </div>
+                <div class="cx-settings-row">
+                    <span class="cx-settings-label">Remember approvals (this session)</span>
+                    <label class="cx-toggle"><input type="checkbox" id="cx-set-nova-remember-approvals" ${settings.nova?.rememberApprovalsSession ? 'checked' : ''}><span class="cx-toggle-slider"></span></label>
+                </div>
                 <div class="cx-settings-row cx-settings-btn-row">
                     <button class="cx-settings-btn" id="cx-set-nova-edit-sm">📝 Edit Soul &amp; Memory</button>
                 </div>
@@ -4860,8 +4864,20 @@ async function novaHandleSend() {
                 args,
                 fsRead: toolHandlers.fs_read,
             });
-            return cxNovaApprovalModal({ tool, args, diffText, permission: tool?.permission });
+            const ok = await cxNovaApprovalModal({ tool, args, diffText, permission: tool?.permission });
+            // §4b — when the user has opted into "Remember approvals this
+            // session", approving the call adds the tool to the per-session
+            // Set so the dispatcher's gate skips the modal next time. The
+            // Set is read by the gate via `rememberedApprovals` below.
+            // Reads never reach this function (gate returns
+            // requiresApproval:false), so the only entries that ever land
+            // here are write/shell tools.
+            if (ok && nova.rememberApprovalsSession && tool?.name) {
+                novaSessionApprovedTools.add(String(tool.name));
+            }
+            return ok;
         },
+        rememberedApprovals: nova.rememberApprovalsSession ? novaSessionApprovedTools : null,
     });
 
     let result;
@@ -4980,6 +4996,7 @@ function wirePhone() {
     phoneContainer.querySelector('#cx-set-nova-max-tools')?.addEventListener('change', novaOnChange);
     phoneContainer.querySelector('#cx-set-nova-timeout')?.addEventListener('change', novaOnChange);
     phoneContainer.querySelector('#cx-set-nova-plugin-url')?.addEventListener('change', novaOnChange);
+    phoneContainer.querySelector('#cx-set-nova-remember-approvals')?.addEventListener('change', novaOnChange);
     phoneContainer.querySelector('#cx-set-nova-edit-sm')?.addEventListener('click', () => {
         openNovaSoulMemoryEditor().catch(err => cxAlert(String(err?.message || err), 'Nova'));
     });
@@ -5724,6 +5741,49 @@ let novaTurnInFlight = false;
 let novaAbortController = null;
 let novaToolRegistryVersion = 0;
 
+/* §4b — Per-session approval cache.
+
+   When `settings.nova.rememberApprovalsSession` is ON, approving a
+   write/shell tool adds its name to this `Set<string>` and the
+   dispatcher's gate (`novaToolGate`) returns `requiresApproval:false`
+   for any subsequent call to that same tool *for the rest of this
+   browser session*. The Set is intentionally module-level (not
+   persisted) — closing/reopening the page or reloading ST clears it,
+   which matches the user contract ("for this session").
+
+   Lifecycle:
+     - Toggle goes true  → Set kept (existing approvals stay).
+     - Toggle goes false → Set cleared (every tool re-prompts).
+     - Tool approved     → name added (only when toggle is true).
+     - Tool denied       → name NOT added.
+     - Page reload       → Set fresh-empty.
+
+   The per-call read-and-mutate happens in `novaHandleSend`'s
+   `confirmApproval` composer; the dispatcher itself only ever reads
+   the Set via `rememberedApprovals`. */
+const novaSessionApprovedTools = new Set();
+
+/**
+ * Public accessor for the per-session approvals Set. Returns the live
+ * Set so callers (tests, diagnostics, the approval composer) can
+ * inspect / mutate it directly. The dispatcher gate accepts a Set or
+ * Array via `rememberedApprovals`, so passing this directly is safe.
+ */
+function getNovaSessionApprovedTools() {
+    return novaSessionApprovedTools;
+}
+
+/**
+ * Clear the per-session approvals Set. Called when the user toggles
+ * `rememberApprovalsSession` off, so unchecking the box has the same
+ * effect as starting a fresh session. Returns the count cleared.
+ */
+function clearNovaSessionApprovedTools() {
+    const n = novaSessionApprovedTools.size;
+    novaSessionApprovedTools.clear();
+    return n;
+}
+
 /**
  * Read-only snapshot of the module-level Nova turn state. Safe to call
  * from tests or diagnostics without leaking the live AbortController.
@@ -6065,9 +6125,10 @@ async function probeNovaBridge({
    - Both files are fetched in parallel via `Promise.all`. A failure
      on one does not take down the other.
    - Result is cached in a module-level cache for
-     `NOVA_SOUL_MEMORY_TTL_MS` (5 min). `invalidateNovaSoulMemoryCache()`
-     drops the cache; callers should invoke it after a `nova_write_soul`
-     / `nova_write_memory` / "Reload soul/memory" action.
+      `NOVA_SOUL_MEMORY_TTL_MS` (5 min). `invalidateNovaSoulMemoryCache()`
+      drops the cache; callers should invoke it after a `nova_write_soul`
+      / `nova_append_memory` / `nova_overwrite_memory` / "Reload
+      soul/memory" action.
    - `fetchImpl` / `nowImpl` are injectable so
      `test/nova-soul-memory.test.mjs` can drive the helper without a
      live network or real timers.
@@ -9093,6 +9154,12 @@ const NOVA_SETTING_BINDINGS = [
     // an empty plugin URL is never useful and the bridge needs *some*
     // path to probe.
     { key: 'pluginBaseUrl', type: 'string', default: NOVA_DEFAULTS.pluginBaseUrl, defaultOnEmpty: true, ids: ['cx_nova_plugin_base_url', 'cx-set-nova-plugin-url'] },
+    // §4b — when on, approving a write/shell tool adds it to a per-session
+    // `Set<toolName>` that the dispatcher's gate checks via
+    // `rememberedApprovals`. The Set lives in module-level state and is
+    // cleared whenever the toggle goes false. The persisted boolean here
+    // is whether the *behaviour* is enabled, not the per-session list.
+    { key: 'rememberApprovalsSession', type: 'bool', default: false, ids: ['cx_nova_remember_approvals', 'cx-set-nova-remember-approvals'] },
 ];
 
 /** Read a DOM input value for a binding; return `undefined` if no id is wired. */
@@ -9204,9 +9271,16 @@ function saveSettings() {
     }
     // Nova settings live under settings.nova.
     settings.nova = settings.nova || { ...NOVA_DEFAULTS };
+    // Capture the prior remember-approvals state so we can detect a
+    // true→false transition and clear the per-session approvals Set.
+    // (Toggling the box off should make every tool re-prompt next time.)
+    const priorRemember = !!settings.nova.rememberApprovalsSession;
     for (const b of NOVA_SETTING_BINDINGS) {
         const raw = _readSettingFromDom(b);
         settings.nova[b.key] = _coerceSettingValue(b, raw, settings.nova[b.key]);
+    }
+    if (priorRemember && !settings.nova.rememberApprovalsSession) {
+        clearNovaSessionApprovedTools();
     }
     const ctx = getContext();
     ctx.extensionSettings[EXT] = { ...settings };

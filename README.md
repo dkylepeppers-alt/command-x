@@ -64,6 +64,17 @@ Messages flow through the RP naturally. The extension uses prompt injection so t
 - **Auto-detection** — NPCs appear automatically as the story introduces them
 - **Persistent** — NPC data survives page refreshes (localStorage-backed)
 
+### ✴︎ Nova App (Agentic Assistant)
+- **Tool-calling agent inside the phone** — Nova talks to your LLM through a dedicated chat-completion connection profile and runs **approval-gated tool calls** against the SillyTavern frontend, your install directory, and (optionally) a sandboxed shell
+- **Three permission tiers** — `read` (read-only tools), `write` (adds file/character/worldbook writes, every destructive call needs approval), and `full` (also enables the shell allow-list). Configure the default in Settings → NOVA
+- **Approval modal with diff preview** — Every write or shell call opens a modal showing the tool, the parsed arguments, and (for `fs_write`) a unified diff against the current file. Click Approve to execute, Cancel to deny
+- **Skills** — A skill pack (Character Creator, Worldbook Creator, Image Prompter, free-form helper, STscript & Regex) shapes Nova's system prompt for the task at hand
+- **Soul + memory** — Nova reads `nova/soul.md` (persona) and `nova/memory.md` (running notes) on every turn and can edit them through the same approval gate via the `nova_write_soul`, `nova_append_memory`, and `nova_overwrite_memory` tools
+- **Audit log** — Executed bridge requests append a JSONL line to `<root>/data/_nova-audit.jsonl` (preferred) or `<root>/_nova-audit.jsonl` (fallback) on the server side, including bridge-side refusals/errors. The in-phone Settings → 📜 audit-log viewer (client side) also records approval outcomes such as user approvals/denials before dispatch. Raw `content` / `data` / `payload` is **never** logged
+- **Companion server plugin** — `server-plugin/nova-agent-bridge/` exposes scoped `/fs/*` and `/shell/run` routes. Without the plugin, only ST-API tools are available; a yellow banner in the transcript explains what's filtered.
+
+See the [Nova Agent](#-nova-agent) section below for setup.
+
 ### 🔔 Notifications
 - **Unread badges** — Contact rows and the phone toggle button show unread counts
 - **Toast notifications** — Banner slides in when a text arrives while you're not viewing that chat. Tap to jump directly to the conversation.
@@ -106,12 +117,108 @@ Refresh SillyTavern.
 6. **Profiles app** — View NPC intel cards
 7. **Quests app** — Track persistent story goals
 8. **Map app** — Track contact locations
-9. **Nova app** — Agentic assistant (preview; approval-gated tool calls, see `docs/nova-agent-plan.md`)
+9. **Nova app** — Agentic assistant; see the [Nova Agent](#-nova-agent) section
 10. **Settings app** — Configure everything in-phone
 
-> **Note:** A previous bridge-console app (OpenClaw) was retired in favor of **Nova** — a tool-calling agent with a companion server plugin (`server-plugin/nova-agent-bridge/`) that can read and write the SillyTavern install directory under approval-gated tool calls. Nova ships with the extension as a preview app; see `docs/nova-agent-plan.md` for status and remaining work.
+## ✴︎ Nova Agent
 
-### How It Works
+Nova is a tool-calling assistant that lives inside the phone. It talks to your LLM through a dedicated chat-completion connection profile and dispatches **approval-gated tool calls** against the SillyTavern frontend, your install directory, and (optionally) a sandboxed shell — all without polluting your roleplay chat.
+
+### SillyTavern prerequisites
+
+Before configuring Nova in the phone, make sure your SillyTavern install has the following:
+
+1. **SillyTavern 1.12.6 or newer.** Nova relies on `ConnectionManagerRequestService`, `isToolCallingSupported()`, and the built-in Connection Profiles, all of which landed in 1.12.6. Older builds will load the extension but Nova will refuse to dispatch a turn and surface an explanatory alert.
+2. **A tool-calling-capable chat completion source.** OpenAI, Anthropic (Claude), Google (Gemini), and OpenRouter all qualify; pick the source on your connection profile and confirm the model you're using supports function/tool calls. Sources without tool-calling support fall back to a text-only mode (the transcript shows a yellow `⚠︎ Text-only mode` notice and tool calls are disabled for that turn).
+3. **Connection Profiles enabled.** This is a built-in ST extension and is on by default; verify under **Extensions** that it isn't disabled. Nova uses it to swap to a dedicated profile for each turn and restore your previous one afterwards.
+4. **(Optional, bridge plugin only) Server plugins enabled.** If you want filesystem/shell tools, add this line to the `config.yaml` at the root of your SillyTavern install **before** restarting:
+   ```yaml
+   enableServerPlugins: true
+   ```
+   Without this, ST will not load any server plugin (including `nova-agent-bridge`) and Nova will run with the ST-API-only tool subset. See [`server-plugin/nova-agent-bridge/README.md`](server-plugin/nova-agent-bridge/README.md) for the full bridge install walkthrough.
+5. **(Optional, Private Polling only) `generateQuietPrompt` available.** Shipped in ST 1.12.10+ — see the [Private Polling](#private-polling) section.
+
+### Quick start
+
+1. **Install the chat-completion preset** — Open the ST extensions panel for Command-X Phone, scroll to **✴︎ Nova Agent**, and click **Install Command-X chat-completion preset**. This copies `presets/openai/Command-X.json` into your user presets so Nova has a known-good starting config (`temperature` 0.7, `tool_choice: 'auto'`, sane stop tokens, `wi_format` aligned with ST's defaults). Switch the model to whatever provider you use.
+2. **Pick a connection profile** — In ST, create a connection profile that points at a chat-completion source supporting tool calling (OpenAI, Claude, Gemini, OpenRouter, etc.) and apply the preset above. Then in the phone, tap **Settings → NOVA → Connection profile** and enter the profile name.
+3. **Pick a default tier** — `read` (safe, read-only), `write` (adds file/character/worldbook writes, approval-gated), or `full` (also enables shell). Start with `read`.
+4. **(Optional) Install the bridge plugin** — Make sure `enableServerPlugins: true` is set in your ST `config.yaml` (see [SillyTavern prerequisites](#sillytavern-prerequisites) above), drop `server-plugin/nova-agent-bridge/` into your SillyTavern `plugins/` directory, and restart ST to enable filesystem and shell tools. Without it, Nova still works but only with ST-API tools (characters, worldbooks, slash commands, etc.).
+5. **Open the Nova app** in the phone, type a request, and hit send. Reads run silently; writes and shell calls open an approval modal with a diff preview before executing.
+
+### How it works
+
+```
+You type in Nova
+        ↓
+Nova swaps to your dedicated connection profile (then restores after)
+        ↓
+System prompt = base + active skill + soul.md + memory.md + tool contract
+        ↓
+LLM calls back with tool_calls (e.g. `fs_read`, `st_write_character`)
+        ↓
+Each call → tier check → approval modal (writes/shells) → handler → tool result back to LLM
+        ↓
+Loop until LLM stops calling tools, hits the per-turn cap, or you cancel
+        ↓
+Profile is restored; transcript and audit log are persisted per chat
+```
+
+### Permission tiers
+
+| Tier | What's allowed | Approval required? |
+|------|----------------|--------------------|
+| `read` | All `*_read` / `*_list` / `*_stat` / `*_search` tools | No |
+| `write` | Read tools + every `*_write` / `*_delete` / `*_move` / character-edit / worldbook-edit / soul-and-memory-edit tool | **Yes**, per call (or once per session if "Remember approvals this session" is on) |
+| `full` | Write tools + `shell_run` (only commands on the bridge's allow-list) | **Yes**, per call |
+
+Toggle **Settings → NOVA → Remember approvals (this session)** to skip the modal for tools you've already approved during this browser session. Reloading the page clears the list.
+
+### Soul and memory
+
+`nova/soul.md` and `nova/memory.md` are markdown files that get prepended to every Nova system prompt. The repo ships starter templates; the live runtime copies live under your ST install root and are edited by Nova itself through the `nova_write_soul`, `nova_read_memory`, `nova_append_memory`, and `nova_overwrite_memory` tools (approval-gated, with diff preview). Use **Settings → NOVA → 📝 Edit Soul & Memory** to edit them by hand from inside the phone.
+
+### Skills
+
+Pick the active skill from the Nova app's skill pill. Each skill swaps in a tailored system-prompt fragment:
+
+- **Free-form helper** — General assistant, no specialised contract.
+- **Character Creator** — Asks for archetype + traits, returns a complete character JSON ready for `st_write_character`.
+- **Worldbook Creator** — Returns a structured worldbook payload with entries + keys + comments.
+- **Image Prompter** — Produces structured positive/negative prompt pairs for image-gen integrations.
+- **STscript & Regex** — Drafts STscript blocks and regex extension entries with safety notes.
+
+### The `nova-agent-bridge` server plugin
+
+`server-plugin/nova-agent-bridge/` is a zero-runtime-dependency CommonJS plugin that exposes:
+
+- `GET /health` and `GET /manifest` — capability probe (used to filter the tool list)
+- `GET /fs/list`, `/fs/read`, `/fs/stat` — read-only filesystem tools, rooted at the ST install dir, with `.git/`, `node_modules/`, and the plugin folder denied
+- `POST /fs/search` — content search with binary-skip and per-file caps
+- `POST /fs/write`, `/fs/delete`, `/fs/move` — destructive routes that **always route through `.nova-trash/<ts>/<relPath>` first**, never hard-unlink, and append a redacted entry to the audit log
+- `POST /shell/run` — single-shot, no-shell `child_process.spawn` against an allow-list resolved at startup, hard timeout (default 60s, max 5min), stdin closed, 1 MB per-stream output cap
+
+Every state-changing route requires the `x-csrf-token` header (the extension provides it automatically) and a valid ST session. Audit entries strip top-level and nested `content` / `data` / `payload` / `body` / `raw` keys via a JSON replacer so user data never leaks into the log. See `server-plugin/nova-agent-bridge/README.md` for installation.
+
+### Cancellation, errors, audit
+
+- **Cancel** — The Nova view's cancel button calls `.abort()` on the live `AbortController`. The dispatcher checks the signal between every tool call and round, the LLM request is interrupted, and the connection profile is restored.
+- **Errors** — Tool handler exceptions surface as a `role:'tool'` message containing `{ error: <message> }` so the LLM can recover or apologise. The transcript shows a red card.
+- **Audit log** — In-phone: **Settings → NOVA → 📜 View audit log**. Server-side: `<root>/data/_nova-audit.jsonl` (or `<root>/_nova-audit.jsonl` if no `data/` dir).
+
+For the full status / remaining-work list, see [`docs/nova-agent-plan.md`](docs/nova-agent-plan.md).
+
+## Chat-Completion Preset
+
+Command-X ships a chat-completion preset at `presets/openai/Command-X.json` that's tuned for Nova: `tool_choice: 'auto'`, sensible defaults for `temperature`, `frequency_penalty`, `presence_penalty`, `wi_format`, `scenario_format`, and `names_behavior`. The shape is OpenAI-style but provider-agnostic — clone it, change `chat_completion_source` and the corresponding `*_model` field, and you're set up for Claude, Gemini, OpenRouter, etc.
+
+To install:
+- **From the extension settings** — Click **Install Command-X chat-completion preset**. This best-effort path tries `/preset-import` first and falls back to a Blob download + clipboard copy with import instructions.
+- **Manually** — Open the file from `presets/openai/Command-X.json`, then in ST go to **Chat Completion → Presets → Import** and select it.
+
+See `presets/openai/README.md` for the full breakdown of which fields are tuned and why.
+
+### How It Works (RP messaging)
 
 ```
 You type in phone UI
