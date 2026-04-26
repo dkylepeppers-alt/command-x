@@ -108,6 +108,14 @@ function buildNovaSecurityMiddleware(opts) {
         // --- Session check ---
         if (sessionRequired) {
             const session = req.session;
+            const headers = (req.headers && typeof req.headers === 'object') ? req.headers : {};
+            const authHeader = typeof headers.authorization === 'string' ? headers.authorization : '';
+            // SillyTavern mounts its Basic Auth middleware before cookie-session.
+            // In that mode a request can be fully authenticated by ST but still
+            // have no session handle/csrf slot yet. Because this middleware runs
+            // after ST's Basic Auth gate, the presence of a Basic header here
+            // means the request already passed the configured credential check.
+            const hasBasicAuthPassThrough = /^Basic\s+/i.test(authHeader);
             const isValidSession = session
                 && typeof session === 'object'
                 // At least one of the slots ST populates must be present.
@@ -116,8 +124,8 @@ function buildNovaSecurityMiddleware(opts) {
                 // enough to prove the browser already holds a live ST
                 // session cookie.
                 && (typeof session.handle === 'string' || typeof session.csrfToken === 'string');
-            if (!isValidSession) {
-                sendError(res, 401, 'nova-unauthorized', { hint: 'No valid SillyTavern session cookie on request.' });
+            if (!isValidSession && !hasBasicAuthPassThrough) {
+                sendError(res, 401, 'nova-unauthorized', { hint: 'No valid SillyTavern session cookie or Basic Auth context on request.' });
                 return;
             }
         }

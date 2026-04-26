@@ -4684,26 +4684,65 @@ async function novaPickTier() {
  * Returns an async function with signature:
  *   ({ messages, tools, tool_choice, signal }) => Promise<{ content, tool_calls }>
  */
-function buildNovaSendRequest(ctx) {
+function resolveNovaConnectionProfileId(ctx, profileName) {
+    const wanted = String(profileName || '').trim();
+    if (!wanted) return '';
+    const profiles = ctx?.extensionSettings?.connectionManager?.profiles;
+    if (!Array.isArray(profiles)) return wanted;
+    const hit = profiles.find(p => p && (p.id === wanted || p.name === wanted));
+    return String(hit?.id || wanted);
+}
+
+function normaliseNovaToolSchema(tool) {
+    if (!tool || typeof tool !== 'object') return null;
+    if (tool.type === 'function' && tool.function && typeof tool.function === 'object') return tool;
+    const name = String(tool.name || '').trim();
+    if (!name) return null;
+    const parameters = tool.parameters && typeof tool.parameters === 'object'
+        ? tool.parameters
+        : { type: 'object', properties: {}, additionalProperties: false };
+    return {
+        type: 'function',
+        function: {
+            name,
+            description: String(tool.description || tool.displayName || name),
+            parameters,
+        },
+    };
+}
+
+function normaliseNovaToolSchemas(tools) {
+    if (!Array.isArray(tools)) return [];
+    return tools.map(normaliseNovaToolSchema).filter(Boolean);
+}
+
+function buildNovaSendRequest(ctx, profileName = '') {
     const svc = ctx?.ConnectionManagerRequestService;
+    const profileId = resolveNovaConnectionProfileId(ctx, profileName);
     // Preferred: full chat-completion request with tools support.
     if (svc && typeof svc.sendRequest === 'function') {
         return async ({ messages, tools, tool_choice, signal }) => {
-            const resp = await svc.sendRequest({
+            const resp = await svc.sendRequest(
+                profileId,
                 messages,
-                tools: Array.isArray(tools) ? tools : [],
-                tool_choice,
-                signal,
-            });
+                undefined,
+                { stream: false, signal, extractData: false, includePreset: true },
+                {
+                    tools: normaliseNovaToolSchemas(tools),
+                    tool_choice,
+                },
+            );
             // Normalise to { content, tool_calls } shape the dispatcher expects.
             if (resp && typeof resp === 'object') {
-                if (resp.content !== undefined || resp.tool_calls !== undefined) return resp;
-                if (resp.message && typeof resp.message === 'object') {
-                    return { content: resp.message.content || '', tool_calls: resp.message.tool_calls || [] };
-                }
                 if (resp.choices && Array.isArray(resp.choices) && resp.choices[0]?.message) {
                     const m = resp.choices[0].message;
-                    return { content: m.content || '', tool_calls: m.tool_calls || [] };
+                    return { content: m.content || '', tool_calls: Array.isArray(m.tool_calls) ? m.tool_calls : [] };
+                }
+                if (resp.message && typeof resp.message === 'object') {
+                    return { content: resp.message.content || '', tool_calls: Array.isArray(resp.message.tool_calls) ? resp.message.tool_calls : [] };
+                }
+                if (resp.content !== undefined || resp.tool_calls !== undefined) {
+                    return { content: resp.content || '', tool_calls: Array.isArray(resp.tool_calls) ? resp.tool_calls : [] };
                 }
             }
             return { content: typeof resp === 'string' ? resp : '', tool_calls: [] };
@@ -4769,7 +4808,7 @@ async function novaHandleSend() {
         return;
     }
 
-    const sendRequest = buildNovaSendRequest(ctx);
+    const sendRequest = buildNovaSendRequest(ctx, nova.profileName);
     if (!sendRequest) {
         await cxAlert('This SillyTavern build exposes neither ConnectionManagerRequestService nor generateRaw. Nova cannot dispatch a turn.', 'Nova');
         return;
@@ -4881,6 +4920,7 @@ async function novaHandleSend() {
     });
 
     let result;
+    let thrownNotice = '';
     try {
         // Announce swap + restore around the turn body for user feedback.
         result = await withNovaProfileMutex(async () => {
@@ -4889,11 +4929,15 @@ async function novaHandleSend() {
             return out;
         });
     } catch (err) {
-        appendNovaTranscriptLine(`❌ Turn threw: ${String(err?.message || err)}`, 'notice');
+        thrownNotice = `❌ Turn threw: ${String(err?.message || err)}`;
     } finally {
         setNovaInFlight(false);
     }
 
+    // Re-render the persisted session first. Some preflight failures return
+    // before a session exists; appending transient notices after this keeps
+    // those failures visible instead of being cleared by the empty-state render.
+    renderNovaTranscript();
     if (result && result.swappedProfile) {
         appendNovaTranscriptLine(`🔌 Restored profile to ${result.swappedProfile.from || '(none)'}.`, 'system');
     }
@@ -4901,8 +4945,9 @@ async function novaHandleSend() {
         const reason = result.reason || 'unknown';
         appendNovaTranscriptLine(`⚠︎ Turn failed: ${reason}${result.error ? ' — ' + result.error : ''}`, 'notice');
     }
-    // Re-render transcript so the persisted session messages are visible.
-    renderNovaTranscript();
+    if (thrownNotice) {
+        appendNovaTranscriptLine(thrownNotice, 'notice');
+    }
 }
 
 function novaHandleCancel() {
@@ -6694,8 +6739,21 @@ function buildNovaRequestMessages({ systemPrompt, sessionMessages = [] }) {
     if (systemPrompt) out.push({ role: 'system', content: String(systemPrompt) });
     for (const m of sessionMessages) {
         if (!m || typeof m !== 'object') continue;
-        if (!m.role) continue;
-        out.push({ role: String(m.role), content: String(m.content ?? '') });
+        const role = String(m.role || '');
+        if (!role) continue;
+
+        // Persisted Nova sessions include assistant tool-call frames and
+        // role:'tool' results so the transcript/audit can show exactly what
+        // happened. Those frames are only valid inside the original provider
+        // round-trip: replaying an old tool result in a later turn without its
+        // exact preceding assistant tool_calls makes OpenAI reject the request.
+        // New turns keep conversational user/assistant text only; live dispatch
+        // still appends tool_calls/tool results to the in-flight `messages`
+        // array before the follow-up LLM call.
+        if (role === 'tool') continue;
+        if (role === 'assistant' && Array.isArray(m.tool_calls) && !String(m.content ?? '').trim()) continue;
+
+        out.push({ role, content: String(m.content ?? '') });
     }
     return out;
 }
@@ -7244,6 +7302,10 @@ async function getActiveNovaProfile({ executeSlash }) {
     }
 }
 
+function quoteNovaSlashArg(value) {
+    return `"${String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
 /**
  * Parse the pipe value returned by `/profile-list` into a de-duplicated
  * array of profile names. ST returns a JSON-serialised array; accept
@@ -7429,7 +7491,7 @@ async function sendNovaTurn({
             // already had active.
             if (swappedFrom !== targetProfile) {
                 try {
-                    await executeSlash(`/profile ${targetProfile}`);
+                    await executeSlash(`/profile ${quoteNovaSlashArg(targetProfile)}`);
                     swapPerformed = true;
                 } catch (err) {
                     appendNovaAuditLog(state, {
@@ -7589,7 +7651,7 @@ async function sendNovaTurn({
             // up whatever profile their workflow selects.
             try {
                 if (swappedFrom) {
-                    await executeSlash(`/profile ${swappedFrom}`);
+                    await executeSlash(`/profile ${quoteNovaSlashArg(swappedFrom)}`);
                 }
             } catch (err) {
                 appendNovaAuditLog(state, {
