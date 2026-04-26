@@ -993,7 +993,7 @@ All under `test/` using Node `--test`.
 ## 14. Manual Validation
 
 The manual-validation walk-through has been extracted to its own standalone,
-CLI-walkthroughable file: **[`docs/MANUAL_VALIDATION.md`](MANUAL_VALIDATION.md)**.
+Codex-CLI-oriented file: **[`docs/MANUAL_VALIDATION.md`](MANUAL_VALIDATION.md)**.
 
 That file is the single source of truth — it covers preconditions, every
 shipped tool path (read / write / shell), bridge install + uninstall, audit

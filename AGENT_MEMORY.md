@@ -2263,3 +2263,33 @@ Nova docs sweep:
 - `rg '\.nova-trash/audit|YYYY-MM-DD\.jsonl' README.md CLAUDE.md docs server-plugin`
   → no matches.
 - `node --test test/nova-remember-approvals.test.mjs` → 14/14 pass.
+
+---
+
+## 2026-04-26 — Manual validation tailored for Codex CLI
+
+### Why
+
+PR feedback asked to tailor the standalone manual-validation walk-through for
+Codex CLI. The existing `docs/MANUAL_VALIDATION.md` was CLI-readable, but it did
+not make the operator split explicit: Codex can run terminal/HTTP checks while a
+human performs browser-only SillyTavern clicks against the live instance.
+
+### Change
+
+- Added a **How to run this with Codex CLI** section near the top of
+  `docs/MANUAL_VALIDATION.md` with `ST_ROOT` / `CX_DIR` setup commands and a
+  reusable prompt for a Codex CLI session.
+- Added explicit checklist prefixes (`Codex CLI`, `User/browser`,
+  `Codex CLI + user`, `Both`) so the walkthrough reads as a coordinated Codex
+  terminal session plus live browser acceptance pass.
+- Kept the existing permanent `[ ]` checklist semantics — Codex should not tick
+  boxes or edit source unless a user explicitly asks it to fix a failed step.
+- Updated `docs/nova-agent-plan.md` §14 to call the file Codex-CLI-oriented.
+
+### Validation
+
+- `python` line-length check over `docs/MANUAL_VALIDATION.md` found 0 lines over
+  110 chars after the reflow.
+- `node --test test/*.mjs` was run after the docs-only change and passed
+  793/793.
