@@ -8904,9 +8904,10 @@ function buildNovaShellHandler({ pluginBaseUrl, fetchImpl, headersProvider } = {
 
    `buildNovaStTools` returns the `st_*` tool handlers that read/write
    SillyTavern's own state (characters, worldbooks, chat context,
-   connection profiles, slash commands). No plugin dependency — these
-   handlers go through `getContext()` + `executeSlashCommandsWithOptions`
-   only, so they work even when `nova-agent-bridge` isn't installed.
+   connection profiles, slash commands). These handlers work even when
+   `nova-agent-bridge` isn't installed; however, character and worldbook
+   write paths perform direct ST-native HTTP calls via `fetch`/`postJson`
+   in addition to `getContext()` + `executeSlashCommandsWithOptions`.
 
    Scope of THIS factory:
      - `st_list_characters`, `st_read_character`     — read `ctx.characters`
@@ -8933,6 +8934,9 @@ function buildNovaShellHandler({ pluginBaseUrl, fetchImpl, headersProvider } = {
                              `novaGetExecuteSlash()` (lazy resolution so a
                              test can pass a fake without ST loaded).
      - `listProfilesImpl`  : default = production `listNovaProfiles`.
+     - `fetchImpl`         : default = `globalThis.fetch` (used for native
+                             character + worldbook HTTP writes). Override
+                             in tests to avoid real network calls.
    ---------------------------------------------------------------------- */
 
 function buildNovaStTools({
@@ -9159,7 +9163,13 @@ function buildNovaStTools({
             const cleanName = safeName(name);
             if (!cleanName) return { error: 'name must be a non-empty string' };
             const card = characterCardFromArgs(cleanName, args);
-            if (!isObject(card)) return { error: 'card must be an object', tool: 'st_write_character' };
+            if (!isObject(card)) {
+                return {
+                    error: 'provide a nested card object or at least one writable top-level character field',
+                    tool: 'st_write_character',
+                    hint: 'Accepted inputs: { name, card: {...} } or { name, description, personality, scenario, first_mes, ... }.',
+                };
+            }
 
             const ctx = getCtx();
             const existing = findCharacterByName(ctx, cleanName);
@@ -9281,8 +9291,9 @@ function buildNovaStTools({
                     tool: 'st_write_worldbook',
                     receivedKeys: Object.keys(args),
                     hint: 'st_write_worldbook requires a full `book` object, e.g. { entries: ... }. '
-                        + 'For a single new worldbook entry, first read the current file, merge the new entry into `entries`, '
-                        + `then use fs_write at SillyTavern/data/<user>/worlds/${cleanName}.json with the complete JSON.`,
+                        + 'To add or update a single entry: call st_read_worldbook to fetch the current book, '
+                        + 'merge your changes into the `entries` object, then call st_write_worldbook with overwrite=true '
+                        + 'and the complete updated book. Only fall back to fs_* if the native endpoints are unavailable.',
                 };
             }
             if (!isObject(args.book.entries)) {
