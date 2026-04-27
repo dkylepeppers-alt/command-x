@@ -47,6 +47,7 @@ const QUEST_HISTORY_CAP = 150;              // max quests stored
 const PLACES_CAP = 40;                      // max registered places per chat
 const LOCATION_TRAIL_CAP = 50;              // max trail entries per contact
 const TOAST_DURATION_MS = 4_000;            // toast auto-dismiss duration
+const MAX_SUMMARISED_SKILL_TOOLS = 6;       // max tool names shown in skill picker
 
 /**
  * Depth values passed to `setExtensionPrompt` (`extension_prompt_types.IN_CHAT`).
@@ -4665,7 +4666,7 @@ async function novaPickSkill() {
     const options = NOVA_SKILLS.map(s => ({
         value: s.id,
         label: `${s.icon} ${s.label}`,
-        hint: (s.description ? [s.description] : []).concat([
+        hint: [s.description].concat([
             `Default tier: ${_novaTierLabel(s.defaultTier)}`,
             `Tools: ${summariseNovaSkillTools(s)}`,
         ]).join('\n'),
@@ -6165,7 +6166,6 @@ function listUnavailableNovaSkillTools({ tools, skill } = {}) {
 }
 
 function summariseNovaSkillTools(skill) {
-    const MAX_SUMMARISED_SKILL_TOOLS = 6;
     const names = _novaSkillDefaultToolNames(skill);
     if (!names) return 'all tools allowed by the active permission tier';
     if (!names.length) return 'none';
