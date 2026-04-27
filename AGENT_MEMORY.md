@@ -77,6 +77,58 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-26 — Nova context clear + character creator hardening (commit pending)
+
+**Context:** Follow-up from manual testing: Nova needed an explicit way to
+clear chat-context history, and character creation was still brittle when the
+model failed to emit a nested `card` object.
+
+**Notes for future agents:**
+- The Nova composer now renders `#cx-nova-clear`. `novaHandleClearContext`
+  confirms with the user, refuses while a turn is in flight, clears the active
+  session's `messages` and `toolCalls`, saves Nova state, and preserves the
+  per-chat audit log.
+- `st_write_character` still accepts full Tavern Card v2 JSON in `card`, but
+  it also accepts top-level fields (`description`, `personality`, `scenario`,
+  `first_mes`, `mes_example`, `creator_notes`, `system_prompt`,
+  `post_history_instructions`, `tags`, `creator`, `character_version`) and
+  synthesizes a `chara_card_v2` object before calling
+  `/api/characters/create`.
+- The tool schema no longer requires `card`; it requires `name` and strongly
+  describes that a call with only `name` is invalid. This is intentional:
+  some model/provider combinations handle top-level string fields more
+  reliably than a loose nested object parameter.
+
+### 2026-04-26 — Nova ST-native write handlers (commit pending)
+
+**Context:** Replaced the deferred `not-implemented` surface for
+`st_write_character` and `st_write_worldbook` with real SillyTavern HTTP API
+calls.
+
+**Notes for future agents:**
+- `buildNovaStTools` now accepts `fetchImpl` for DI. Production uses browser
+  `fetch` plus `getRequestHeaders()`; tests inject a small response harness.
+- Character creates call `/api/characters/create` with the same form fields
+  used by ST's slash-command character creator. Existing characters are
+  updated through `/api/characters/merge-attributes` only when
+  `overwrite=true`; the handler preserves the existing `avatar` filename and
+  refreshes `ctx.getCharacters()` after successful writes when available.
+- Worldbook reads/lists now prefer `/api/worldinfo/get` and
+  `/api/worldinfo/list`, falling back to the slash `/world` commands for older
+  builds. Worldbook writes call `/api/worldinfo/edit` with a complete `book`
+  object and require `book.entries`.
+- The worldbook overwrite guard checks both display `name` and `file_id` from
+  `/api/worldinfo/list`. This matters because `/api/worldinfo/edit` writes to
+  the sanitized request `name`, while the list endpoint may expose a different
+  in-file display name.
+- The helper still never throws; HTTP failures and missing `fetch` return
+  closed-enum `write-failed`, `exists`, `missing-book`, or `invalid-book`
+  shapes.
+
+**Follow-ups / open questions:**
+- Manual browser validation should create/update a throwaway character and
+  worldbook via Nova before this is considered fully release-validated.
+
 ### 2026-04-26 — Preset installer docs review follow-up (commit pending)
 
 **Context:** Follow-up to PR review on the final docs housekeeping sweep.

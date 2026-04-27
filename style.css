@@ -1477,6 +1477,7 @@
 .cx-nova-composer-actions { display: flex; flex-direction: column; gap: 4px; }
 .cx-nova-send { min-width: 66px; }
 .cx-nova-cancel { min-width: 66px; }
+.cx-nova-clear { min-width: 66px; }
 
 /* Nova transcript message bubbles (v0.13.0) --------------------------- */
 .cx-nova-msg {

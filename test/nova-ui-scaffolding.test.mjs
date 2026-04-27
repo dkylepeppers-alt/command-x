@@ -50,6 +50,7 @@ test('Nova view shell exists with all scaffolding anchors', async () => {
     assert.match(js, /id="cx-nova-input"/);
     assert.match(js, /id="cx-nova-send"/);
     assert.match(js, /id="cx-nova-cancel"/);
+    assert.match(js, /id="cx-nova-clear"/);
     // Nav footer back to home
     assert.match(js, /<div class="cx-view" data-view="nova">[\s\S]*?data-goto="home"[\s\S]*?<\/div>\s*<\/div>/);
 });
@@ -70,6 +71,7 @@ test('Nova view is live (composer NOT disabled, pills NOT disabled) as of v0.13.
     assert.doesNotMatch(block, /id="cx-nova-pill-tier"[^>]*\bdisabled\b/);
     // Cancel still starts hidden (only revealed during an in-flight turn).
     assert.match(block, /class="[^"]*cx-hidden[^"]*"[^>]*id="cx-nova-cancel"/);
+    assert.match(block, /id="cx-nova-clear"/);
 });
 
 test('wirePhone() app-routing guard accepts "nova"', async () => {
