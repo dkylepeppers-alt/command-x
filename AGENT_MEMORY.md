@@ -94,7 +94,9 @@ Command-X turn/time advance.
 - Pending swipe markers are cleared on chat change and when the same message id
   is deleted, so they do not leak across chats or later normal turns.
 - `test/swipe-regeneration.test.mjs` is a small source-contract + inline-helper
-  regression test for this behavior.
+  regression test for this behavior; its source-shape assertions are deliberately
+  whitespace/semicolon-tolerant after review feedback, so avoid tightening them
+  back to exact formatting checks.
 
 ### 2026-04-26 — Nova context clear + character creator hardening (commit pending)
 

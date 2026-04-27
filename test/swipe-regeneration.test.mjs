@@ -148,14 +148,14 @@ describe('index.js source shape', () => {
     it('marks MESSAGE_SWIPED ids and skips turn throttling for the regenerated response', async () => {
         const src = await readFile(resolve(here, '..', 'index.js'), 'utf8');
 
-        assert.match(src, /const _pendingSwipeRegenerations = new Set\(\);/);
-        assert.match(src, /function markPendingSwipeRegeneration\(mesId\)/);
-        assert.match(src, /function consumePendingSwipeRegeneration\(mesId\)/);
-        assert.match(src, /function clearPendingSwipeRegeneration\(mesId\)/);
-        assert.match(src, /const isSwipeRegeneration = consumePendingSwipeRegeneration\(mesId\);/);
-        assert.match(src, /if \(!isSwipeRegeneration\) \{\s*applyInjectionThrottle\(\);\s*\}/);
-        assert.match(src, /messageSwiped: \(mesId\) => \{[\s\S]*?markPendingSwipeRegeneration\(mesId\);[\s\S]*?removeMessagesForMesId\(mesId\);/);
-        assert.match(src, /messageDeleted: \(deletedMesId\) => \{[\s\S]*?clearPendingSwipeRegeneration\(deletedId\);/);
-        assert.match(src, /chatChangedPhone: \(\) => \{[\s\S]*?_pendingSwipeRegenerations\.clear\(\);/);
+        assert.match(src, /const\s+_pendingSwipeRegenerations\s*=\s*new\s+Set\(\)\s*;?/);
+        assert.match(src, /function\s+markPendingSwipeRegeneration\s*\(\s*mesId\s*\)/);
+        assert.match(src, /function\s+consumePendingSwipeRegeneration\s*\(\s*mesId\s*\)/);
+        assert.match(src, /function\s+clearPendingSwipeRegeneration\s*\(\s*mesId\s*\)/);
+        assert.match(src, /const\s+isSwipeRegeneration\s*=\s*consumePendingSwipeRegeneration\s*\(\s*mesId\s*\)\s*;?/);
+        assert.match(src, /if\s*\(\s*!isSwipeRegeneration\s*\)\s*\{\s*applyInjectionThrottle\s*\(\s*\)\s*;?\s*\}/);
+        assert.match(src, /messageSwiped\s*:\s*\(\s*mesId\s*\)\s*=>\s*\{[\s\S]*?markPendingSwipeRegeneration\s*\(\s*mesId\s*\)\s*;?[\s\S]*?removeMessagesForMesId\s*\(\s*mesId\s*\)\s*;?/);
+        assert.match(src, /messageDeleted\s*:\s*\(\s*deletedMesId\s*\)\s*=>\s*\{[\s\S]*?clearPendingSwipeRegeneration\s*\(\s*deletedId\s*\)\s*;?/);
+        assert.match(src, /chatChangedPhone\s*:\s*\(\s*\)\s*=>\s*\{[\s\S]*?_pendingSwipeRegenerations\.clear\s*\(\s*\)\s*;?/);
     });
 });
