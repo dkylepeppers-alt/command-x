@@ -77,6 +77,27 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-27 — Swipe regeneration does not advance turn throttle (commit pending)
+
+**Context:** Fixed phone swipe handling so swiping/regenerating a character
+message replaces artifacts for that message without counting as a new
+Command-X turn/time advance.
+
+**Notes for future agents:**
+- `MESSAGE_SWIPED` now records the swiped `mesId` in `_pendingSwipeRegenerations`
+  before removing phone messages/private-phone events/location trails for that
+  message. The next `MESSAGE_RECEIVED` at the same `mesId` consumes the marker.
+- Swipe-regenerated responses are still parsed for `[sms]`, `[status]`,
+  `[quests]`, and `[place]` tags, but they skip `applyInjectionThrottle()`.
+  This prevents contacts/quests/map injection cadence and auto private polling
+  from advancing just because the user regenerated the same turn.
+- Pending swipe markers are cleared on chat change and when the same message id
+  is deleted, so they do not leak across chats or later normal turns.
+- `test/swipe-regeneration.test.mjs` is a small source-contract + inline-helper
+  regression test for this behavior; its source-shape assertions are deliberately
+  whitespace/semicolon-tolerant after review feedback, so avoid tightening them
+  back to exact formatting checks.
+
 ### 2026-04-26 — Nova context clear + character creator hardening (commit pending)
 
 **Context:** Follow-up from manual testing: Nova needed an explicit way to
