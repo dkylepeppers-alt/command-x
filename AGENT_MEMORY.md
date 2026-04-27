@@ -77,6 +77,40 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-27 — SMS attachment storage review follow-up (commit pending)
+
+**Context:** Follow-up to PR review on the non-Nova quest/map/SMS UX update.
+
+**Notes for future agents:**
+- SMS attachments are intentionally capped at 96 KB data URLs and only the newest
+  20 attachments per contact keep image data during normal message saves.
+- If `localStorage.setItem()` still fails, `saveMessages()` retries with all
+  attachments stripped so message text can survive and surfaces an async
+  `cxAlert()` storage warning to the user.
+- `buildMapView()` clears stale `mapMeta.userPlaceId` when the referenced place
+  no longer exists, allowing the map to fall back to the manual `userPin`.
+
+### 2026-04-27 — Non-Nova quest/map/SMS UX updates (commit pending)
+
+**Context:** Implemented the requested non-Nova UX sweep: quest checkboxes are
+goal-oriented and more stable across auto-updates, the user's map pin can
+auto-follow persona `place` updates, and normal SMS threads can attach photos.
+
+**Notes for future agents:**
+- SMS photo attachments are local-only thumbnails stored in the phone message
+  history (`msg.attachment = {type:'image', dataUrl, name, alt}`). The RP chat
+  receives descriptive text ("sends a picture (...)"), not the image bytes.
+- `pendingSmsAttachment` is module state cleared after send/back/chat-change.
+  Photo sending is intentionally blocked while neural mode is active.
+- User map auto-tracking uses `[status]` entries whose `name` matches `ctx.name1`
+  (or `user`/`me`/`you`) and a `place` field. It updates
+  `loadMapMeta().userPlaceId` + `userPin`; manual drag/drop clears
+  `userPlaceId` and remains a fallback.
+- `sanitizeQuestSubtasks()` now preserves checkbox ids/done state by incoming id
+  or normalized text before falling back to index, so LLM rewording can still
+  cause a new goal row but stable goal text no longer resets just because array
+  order changes.
+
 ### 2026-04-27 — Nova skill tool filtering and expanded skills (commit pending)
 
 **Context:** Implemented the Nova skills review recommendations: active-skill

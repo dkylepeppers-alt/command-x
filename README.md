@@ -15,6 +15,7 @@ Messages flow through the RP naturally. The extension uses prompt injection so t
 - **iMessage-style chat bubbles** — Sent (blue), received (dark gray), neural commands (pink/purple glow)
 - **Multi-target texting** — Send messages to multiple contacts in a single turn (batch mode)
 - **Compose queue** — Queue up texts to different people, then flush them all at once
+- **Photo attachments** — Tap ＋ in a normal SMS thread to attach a local image; the phone stores a compressed thumbnail locally and prompts the RP that a picture was sent
 - **Typing indicator** — Bouncing dots while waiting for a reply (30s safety timeout)
 - **`[sms from="Name" to="user"]` routing** — Messages land in the right contact's chat, even NPCs
 - **Swipe/regen handling** — When you regenerate a response in ST, old phone messages for that message ID are removed and replaced with the new content
@@ -38,6 +39,7 @@ Messages flow through the RP naturally. The extension uses prompt injection so t
 - **Persistent per-chat quest tracker** — Stores active, completed, and failed quests separately for each ST chat
 - **Automatic `[quests]` extraction** — The model can create/update quests from structured tags in story replies
 - **Manual add/edit controls** — Create quests yourself or pin field edits so later auto-syncs do not stomp them
+- **Goal checkboxes** — Quest subtasks are treated as forward-looking goals, with stable checkbox state when the model refreshes quest data
 - **Quick complete/fail actions** — Resolve quests directly from the phone UI
 - **Narrative influence injection** — Active quests are summarized back into prompt context so unresolved goals can shape future scenes naturally
 
@@ -45,7 +47,7 @@ Messages flow through the RP naturally. The extension uses prompt injection so t
 - **Visual location tracker** — Shows a smartphone-style map with pins for every place in the story plus one pin per known contact at their current location
 - **Schematic or custom background** — Uses a built-in dark grid by default, or upload any image (city plan, floor plan, fantasy map, screenshot) as the backdrop
 - **Zoom and pan** — Scroll-wheel / pinch / double-click to zoom (1×–5×), drag to pan; the control overlay (＋ − ⟲) stays available, and the live percentage indicator appears while zooming and briefly after zoom changes
-- **Interactive pins** — Tap empty map to add a place, drag pins to reposition, tap a contact pin to open their chat, tap "📍 You" to drop your own position marker
+- **Interactive pins** — Tap empty map to add a place, drag pins to reposition, tap a contact pin to open their chat; the "📍 You" pin auto-follows the persona's `[status].place` when available, with manual placement as a fallback
 - **Movement trails** — Optional dashed trails show each contact's last few locations so you can see where they've been
 - **Auto-registration** — The LLM can register new places and move contacts between them via `[status]` tags; manual edits are preserved
 

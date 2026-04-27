@@ -48,6 +48,13 @@ const PLACES_CAP = 40;                      // max registered places per chat
 const LOCATION_TRAIL_CAP = 50;              // max trail entries per contact
 const TOAST_DURATION_MS = 4_000;            // toast auto-dismiss duration
 const MAX_SUMMARISED_SKILL_TOOLS = 6;       // max tool names shown in skill picker
+const MAX_SMS_IMAGE_WIDTH = 768;             // max downscaled width for SMS image attachments
+// Keep this conservative: localStorage quotas are small (~5 MB in many browsers),
+// shared across all persisted phone state, and base64 data URLs add overhead.
+const MAX_SMS_ATTACHMENT_DATA_URL_SIZE = 96 * 1024; // cap stored SMS image data URLs
+const SMS_ATTACHMENT_HISTORY_CAP = 20;       // max image attachments retained per contact history
+const SMS_IMAGE_DATA_URL_RE = /^data:image\/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=]+$/i;
+const MESSAGE_SAVE_FAILURE_NOTICE_MS = 30_000; // throttle storage-full user alerts
 
 /**
  * Depth values passed to `setExtensionPrompt` (`extension_prompt_types.IN_CHAT`).
@@ -105,6 +112,8 @@ let privatePollInFlight = false;
 let scanContactsInFlight = false;
 const SCAN_CONTACTS_LABEL = '🔍 Scan Contacts';
 let questEnrichmentInFlight = false;
+let pendingSmsAttachment = null; // { type:'image', dataUrl, name, alt } | null
+let lastMessageSaveFailureNoticeAt = 0;
 
 
 /**
@@ -166,10 +175,10 @@ function getRecentMessages() {
    COMPOSE QUEUE — batch multiple texts before sending to LLM
    ====================================================================== */
 
-let composeQueue = []; // [{contactName, text, displayText, isNeural, cmdType}]
+let composeQueue = []; // [{contactName, text, displayText, isNeural, cmdType, attachment}]
 
-function addToQueue(contactName, text, displayText, isNeural, cmdType) {
-    composeQueue.push({ contactName, text, displayText, isNeural, cmdType });
+function addToQueue(contactName, text, displayText, isNeural, cmdType, attachment = null) {
+    composeQueue.push({ contactName, text, displayText, isNeural, cmdType, attachment: normalizeSmsAttachment(attachment) });
     updateQueueBar();
 }
 
@@ -186,9 +195,10 @@ function updateQueueBar() {
         return;
     }
     const names = [...new Set(composeQueue.map(q => q.contactName))];
+    const photoCount = composeQueue.filter(q => q.attachment).length;
     const label = composeQueue.length === 1
-        ? `1 text to ${names[0]}`
-        : `${composeQueue.length} texts to ${names.join(', ')}`;
+        ? `1 text${photoCount ? ' + photo' : ''} to ${names[0]}`
+        : `${composeQueue.length} texts${photoCount ? ` + ${photoCount} photo${photoCount === 1 ? '' : 's'}` : ''} to ${names.join(', ')}`;
     bar.querySelector('.cx-queue-label').textContent = label;
     bar.classList.remove('cx-hidden');
 }
@@ -200,6 +210,9 @@ function flushQueue() {
     const rpParts = composeQueue.map(q => {
         if (q.cmdType || q.isNeural) {
             return `*Command-X sends a neural command to ${q.contactName}:*\n${q.text}`;
+        } else if (q.attachment) {
+            const caption = q.text && q.text !== '[photo]' ? `\n"${q.text}"` : '';
+            return `*texts ${q.contactName} on phone and sends a picture (${q.attachment.name || 'image'}):*${caption}`;
         } else {
             return `*texts ${q.contactName} on phone:*\n"${q.text}"`;
         }
@@ -211,6 +224,7 @@ function flushQueue() {
         name: q.contactName,
         isNeural: q.isNeural,
         cmdType: q.cmdType,
+        attachmentName: q.attachment?.name || null,
     }));
 
     // Inject prompt for all targets
@@ -226,7 +240,7 @@ function flushQueue() {
             type: 'outgoing_sms',
             from: 'user',
             to: queued.contactName,
-            text: queued.displayText,
+            text: queued.attachment ? `${queued.displayText || 'Photo'} [photo]` : queued.displayText,
             visibility: 'private',
             source: 'inline',
             canonical: true,
@@ -582,9 +596,12 @@ function injectContactsPrompt() {
     const ctx = getContext();
     const userName = ctx.name1 || '';
     const excludeNote = [userName].filter(Boolean).map(n => `"${n}"`).join(' or ');
+    const userLocationNote = settings.trackLocations
+        ? ` Exception for map tracking: if the user's own current place is clear, you may include exactly one entry for ${userName ? `"${userName}"` : 'the user'} with a "place" field only so Command-X can move the "You" map pin.`
+        : '';
     setExtensionPrompt(
         INJECT_KEY_CONTACTS,
-        `[System: At the end of each response, include a [status] block with a JSON array of the present characters relevant to the scene, including the current main character and any side characters/NPCs. Format: [status][{"name":"Name","emoji":"👩","status":"online","mood":"😊 happy","location":"her apartment","relationship":"friendly","thoughts":"god he has no idea"}][/status] — "status" can be "online"/"offline"/"nearby". "mood" is an emoji + short descriptor. "location" is where they currently are. "relationship" is how they feel about the user (friendly/neutral/hostile/romantic/etc). "thoughts" is ONE short first-person sentence — a brief flash of inner monologue in the character's own private voice, as if we are overhearing a single thought they are silently having right now. Keep it short (roughly under 15 words). Do NOT summarize or recap what just happened in the scene. Do NOT describe their mood, state, or situation. Do NOT narrate. It should read like a genuine passing thought, not a status report. Include the active main character plus any relevant side characters/NPCs who exist in the scene. Do NOT include ${excludeNote || 'the user'}. If no other characters are relevant, you may still include the current main character alone.]`,
+        `[System: At the end of each response, include a [status] block with a JSON array of the present characters relevant to the scene, including the current main character and any side characters/NPCs. Format: [status][{"name":"Name","emoji":"👩","status":"online","mood":"😊 happy","location":"her apartment","relationship":"friendly","thoughts":"god he has no idea"}][/status] — "status" can be "online"/"offline"/"nearby". "mood" is an emoji + short descriptor. "location" is where they currently are. "relationship" is how they feel about the user (friendly/neutral/hostile/romantic/etc). "thoughts" is ONE short first-person sentence — a brief flash of inner monologue in the character's own private voice, as if we are overhearing a single thought they are silently having right now. Keep it short (roughly under 15 words). Do NOT summarize or recap what just happened in the scene. Do NOT describe their mood, state, or situation. Do NOT narrate. It should read like a genuine passing thought, not a status report. Include the active main character plus any relevant side characters/NPCs who exist in the scene. Do NOT include ${excludeNote || 'the user'} as a normal NPC/contact.${userLocationNote} If no other characters are relevant, you may still include the current main character alone.]`,
         extension_prompt_types.IN_CHAT,
         CX_PROMPT_DEPTHS.contacts,
         false,
@@ -637,17 +654,40 @@ function saveQuests(quests) {
     catch (e) { console.warn('[command-x] quest store save', e); }
 }
 
+function normalizeQuestSubtaskText(value) {
+    return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
 function sanitizeQuestSubtasks(value, existing = []) {
     const list = Array.isArray(value)
         ? value
         : typeof value === 'string'
             ? value.split(/\r?\n/).map(line => line.trim()).filter(Boolean).map(text => ({ text }))
             : [];
-    return list.map((item, index) => ({
-        id: String(item?.id || existing?.[index]?.id || `sub_${Math.random().toString(36).slice(2, 8)}`).trim(),
-        text: String(item?.text || item?.title || item || '').trim(),
-        done: !!item?.done,
-    })).filter(item => item.text);
+    const existingById = new Map();
+    const existingByText = new Map();
+    for (const item of Array.isArray(existing) ? existing : []) {
+        if (!item || typeof item !== 'object') continue;
+        const id = String(item.id || '').trim();
+        const textKey = normalizeQuestSubtaskText(item.text || item.title || item);
+        if (id) existingById.set(id, item);
+        if (textKey && !existingByText.has(textKey)) existingByText.set(textKey, item);
+    }
+    return list.map((raw, index) => {
+        const text = String(raw?.text || raw?.title || raw || '').trim();
+        if (!text) return null;
+        const incomingId = String(raw?.id || '').trim();
+        const matched = (incomingId && existingById.get(incomingId))
+            || existingByText.get(normalizeQuestSubtaskText(text))
+            || existing?.[index]
+            || null;
+        const hasDone = raw && typeof raw === 'object' && Object.prototype.hasOwnProperty.call(raw, 'done');
+        return {
+            id: incomingId || String(matched?.id || `sub_${Math.random().toString(36).slice(2, 8)}`).trim(),
+            text,
+            done: hasDone ? !!raw.done : !!matched?.done,
+        };
+    }).filter(Boolean);
 }
 
 function sanitizeQuestValue(field, value, existing = null) {
@@ -933,7 +973,7 @@ function injectQuestPrompt() {
     const activeSummary = activeQuestSummary(8);
     setExtensionPrompt(
         INJECT_KEY_QUESTS,
-        `[Command-X quest context. At the end of each response, include a [quests] JSON block ONLY when a meaningful quest should be created or updated. Format: [quests][{"id":"quest_optional_existing_id","title":"Quest title","summary":"short summary","objective":"current concrete objective","status":"active|waiting|blocked|completed|failed","priority":"low|normal|high|critical","urgency":"none|soon|urgent","source":"who/what created the quest","relatedContact":"matching contact name when relevant","focused":false,"nextAction":"optional immediate next step","subtasks":[{"id":"sub_optional","text":"step text","done":false}],"notes":"optional note"}][/quests]. Quests represent meaningful goals, obligations, promises, leads, investigations, errands, blockers, or unresolved story pressures that may matter later. Reuse existing quest ids/titles when updating instead of duplicating. Check existing quests for progress, completion, blockage, waiting state, next-step changes, and subtask completion — but do NOT rewrite summaries/objectives/priority/urgency/notes just because wording could be improved. Only change stable quest fields when the story meaning actually changed. Avoid trivial one-off actions and excessive churn, especially on rerolls. Manual quest edits may be pinned field-by-field and should not be blindly overwritten later. Focused quests matter most. Urgent/high-priority active quests matter next. Waiting/blocked quests are still relevant but lower pressure. Completed/failed quests are historical only and should not be treated as current pressure. Not every quest must be mentioned every turn.\nCurrent quest state:\n${activeSummary}]`,
+        `[Command-X quest context. At the end of each response, include a [quests] JSON block ONLY when a meaningful quest should be created or updated. Format: [quests][{"id":"quest_optional_existing_id","title":"Quest title","summary":"short summary","objective":"current concrete objective","status":"active|waiting|blocked|completed|failed","priority":"low|normal|high|critical","urgency":"none|soon|urgent","source":"who/what created the quest","relatedContact":"matching contact name when relevant","focused":false,"nextAction":"optional immediate next step","subtasks":[{"id":"sub_optional","text":"goal text","done":false}],"notes":"optional note"}][/quests]. Quests represent meaningful goals, obligations, promises, leads, investigations, errands, blockers, or unresolved story pressures that may matter later. Subtasks are forward-looking goal checkboxes, not a history log; keep stable ids/text when updating and only mark a goal done when the story clearly achieved it. Reuse existing quest ids/titles when updating instead of duplicating. Check existing quests for progress, completion, blockage, waiting state, next-step changes, and subtask completion — but do NOT rewrite summaries/objectives/priority/urgency/notes just because wording could be improved. Only change stable quest fields when the story meaning actually changed. Avoid trivial one-off actions and excessive churn, especially on rerolls. Manual quest edits may be pinned field-by-field and should not be blindly overwritten later. Focused quests matter most. Urgent/high-priority active quests matter next. Waiting/blocked quests are still relevant but lower pressure. Completed/failed quests are historical only and should not be treated as current pressure. Not every quest must be mentioned every turn.\nCurrent quest state:\n${activeSummary}]`,
         extension_prompt_types.IN_CHAT,
         CX_PROMPT_DEPTHS.quests,
         false,
@@ -1031,7 +1071,7 @@ function savePlaces(places) {
 }
 
 function defaultMapMeta() {
-    return { mode: 'schematic', imageDataUrl: null, width: 0, height: 0, userPin: null };
+    return { mode: 'schematic', imageDataUrl: null, width: 0, height: 0, userPin: null, userPlaceId: null };
 }
 
 function loadMapMeta() {
@@ -1046,6 +1086,7 @@ function loadMapMeta() {
             userPin: parsed.userPin && Number.isFinite(Number(parsed.userPin.x)) && Number.isFinite(Number(parsed.userPin.y))
                 ? { x: clampUnit(parsed.userPin.x), y: clampUnit(parsed.userPin.y) }
                 : null,
+            userPlaceId: typeof parsed.userPlaceId === 'string' && parsed.userPlaceId.trim() ? parsed.userPlaceId.trim() : null,
         };
     } catch { return defaultMapMeta(); }
 }
@@ -1255,6 +1296,27 @@ function getContactCurrentPlaceId(contactName) {
     return trail.length ? trail[trail.length - 1].placeId : null;
 }
 
+function matchesUserPersona(name, userKey = normalizeContactName(getContext().name1 || '')) {
+    const key = normalizeContactName(name);
+    if (!key) return false;
+    return key === 'user' || key === 'me' || key === 'you' || (!!userKey && key === userKey);
+}
+
+function updateUserPersonaPlace(place) {
+    if (!place?.id) return false;
+    const meta = loadMapMeta();
+    const nextPin = { x: clampUnit(place.x), y: clampUnit(place.y) };
+    const changed = meta.userPlaceId !== place.id
+        || !meta.userPin
+        || Math.abs(Number(meta.userPin.x) - nextPin.x) > 0.001
+        || Math.abs(Number(meta.userPin.y) - nextPin.y) > 0.001;
+    if (!changed) return false;
+    meta.userPlaceId = place.id;
+    meta.userPin = nextPin;
+    saveMapMeta(meta);
+    return true;
+}
+
 /**
  * Parse [place] JSON for new place registrations.
  * Format: [place][{"name":"café","emoji":"☕","near":"apartment","aliases":["the cafe"]}][/place]
@@ -1318,6 +1380,7 @@ function applyContactPlaces(contacts, mesId) {
     let placesChanged = false;
     let trailChanged = false;
     const stored = loadPlaces();
+    const userKey = normalizeContactName(getContext().name1 || '');
     for (const c of contacts) {
         if (!c.place) continue;
         let place = findPlaceByNameOrAlias(c.place, stored);
@@ -1328,6 +1391,12 @@ function applyContactPlaces(contacts, mesId) {
             stored.push(clean);
             place = clean;
             placesChanged = true;
+        }
+        if (matchesUserPersona(c.name, userKey)) {
+            if (updateUserPersonaPlace(place)) trailChanged = true;
+            // The user's persona is rendered via map metadata (`userPin` /
+            // `userPlaceId`) rather than the contact trail system.
+            continue;
         }
         if (pushLocationTrail(c.name, place.id, mesId)) trailChanged = true;
     }
@@ -1355,7 +1424,7 @@ function injectMapPrompt() {
         : 'Do NOT invent new places. Only reference places that already exist in the known list below; otherwise omit the "place" field.';
     setExtensionPrompt(
         INJECT_KEY_MAP,
-        `[Command-X map context. For each character in the [status] block, add an optional "place" field whose value MUST match one of the known place names or aliases below (exact or close match). "place" is a short categorical label (e.g. "apartment", "café") used to pin characters on a map; it is separate from the free-text "location" field which remains narrative. ${registrationLine}\nKnown places:\n${knownPlaces}]`,
+        `[Command-X map context. For each character in the [status] block, add an optional "place" field whose value MUST match one of the known place names or aliases below (exact or close match). Also include the user's persona (${getContext().name1 || 'user'}) with a "place" field when their current place is clear, so Command-X can automatically move the "You" map pin. "place" is a short categorical label (e.g. "apartment", "café") used to pin characters on a map; it is separate from the free-text "location" field which remains narrative. ${registrationLine}\nKnown places:\n${knownPlaces}]`,
         extension_prompt_types.IN_CHAT,
         CX_PROMPT_DEPTHS.map,
         false,
@@ -1459,7 +1528,7 @@ function renderQuestSubtasks(quest) {
     const doneCount = subtasks.filter(item => item.done).length;
     return `
         <div class="cx-quest-field">
-            <span>Checklist · ${doneCount}/${subtasks.length}</span>
+            <span>Goals · ${doneCount}/${subtasks.length}</span>
             <div class="cx-quest-subtasks">
                 ${subtasks.map(item => `
                     <button type="button" class="cx-quest-subtask ${item.done ? 'done' : ''}" data-cx-quest-subtask="${escAttr(quest.id)}" data-cx-subtask-id="${escAttr(item.id)}">
@@ -1572,7 +1641,7 @@ function buildQuestEnrichmentPrompt(partialQuest) {
         'Return ONLY valid JSON matching the provided schema.',
         'Fill ONLY missing or blank fields. Do not rewrite fields the user already supplied.',
         'Keep outputs concise, plausible, and useful for future narrative context.',
-        'Subtasks should be short actionable checklist items when appropriate.',
+        'Subtasks should be short forward-looking goal checkboxes when appropriate, not a log of completed history.',
         `Partial quest JSON: ${JSON.stringify(partialQuest)}`,
         `Known contacts JSON: ${JSON.stringify(knownContacts)}`,
         `Recent chat context JSON: ${JSON.stringify(recentMessages)}`,
@@ -1855,7 +1924,7 @@ function questEditorModalHTML() {
 /**
  * Build a single SMS prompt instruction for one target.
  */
-function buildSmsInstruction(contactName, isNeural, cmdType) {
+function buildSmsInstruction(contactName, isNeural, cmdType, attachmentName = null) {
     // Any command (neural-mode or legacy {{COMMAND}} syntax) is treated as subliminal —
     // character unaware, no SMS reply.
     if (cmdType) {
@@ -1869,7 +1938,10 @@ function buildSmsInstruction(contactName, isNeural, cmdType) {
     } else if (isNeural) {
         return `A subliminal neural command was silently transmitted to ${contactName}. They are completely unaware any command was sent or received. They do NOT send a text message in response. Show the command taking effect only through ${contactName}'s in-scene behavior or narrative — no [sms] tag, no phone reply.`;
     } else {
-        return `The user texted ${contactName}. ${contactName} texts back naturally and in-character. Keep the reply short and casual — written like a real text message, not prose. Think brief, conversational, often lowercase, maybe a sentence or two at most. No long verbose messages, no narration, no action description inside the text. Wrap their reply to the user in [sms from="${contactName}" to="user"]...[/sms].`;
+        const photoNote = attachmentName
+            ? ` The user's text included an attached picture (${attachmentName}); ${contactName} can react to the photo naturally if it matters.`
+            : '';
+        return `The user texted ${contactName}.${photoNote} ${contactName} texts back naturally and in-character. Keep the reply short and casual — written like a real text message, not prose. Think brief, conversational, often lowercase, maybe a sentence or two at most. No long verbose messages, no narration, no action description inside the text. Wrap their reply to the user in [sms from="${contactName}" to="user"]...[/sms].`;
     }
 }
 
@@ -1878,7 +1950,7 @@ function buildSmsInstruction(contactName, isNeural, cmdType) {
  * @param {Array<{name:string, isNeural:boolean, cmdType:string|null}>} targets
  */
 function injectSmsPrompt(targets) {
-    const parts = targets.map(t => buildSmsInstruction(t.name, t.isNeural, t.cmdType));
+    const parts = targets.map(t => buildSmsInstruction(t.name, t.isNeural, t.cmdType, t.attachmentName));
     const names = targets.map(t => t.name);
     const multi = targets.length > 1;
 
@@ -1955,15 +2027,77 @@ function loadMessages(contactName) {
     catch { return []; }
 }
 
+function stripSmsAttachment(message) {
+    if (!message?.attachment) return message;
+    const clean = { ...message };
+    delete clean.attachment;
+    return clean;
+}
+
+function pruneSmsAttachmentsForStorage(messages, keepAttachments = SMS_ATTACHMENT_HISTORY_CAP) {
+    const list = Array.isArray(messages) ? messages : [];
+    // Shallow-copy the array only: kept messages can be shared safely, while
+    // entries that lose an attachment are replaced with cloned objects below.
+    const result = list.slice();
+    let remaining = Math.max(0, Number(keepAttachments) || 0);
+    for (let i = list.length - 1; i >= 0; i -= 1) {
+        if (!list[i]?.attachment) continue;
+        if (remaining > 0) {
+            remaining -= 1;
+        } else {
+            result[i] = stripSmsAttachment(list[i]);
+        }
+    }
+    return result;
+}
+
+function notifyMessageSaveFailed(contactName, message) {
+    const nowTs = Date.now();
+    if (nowTs - lastMessageSaveFailureNoticeAt < MESSAGE_SAVE_FAILURE_NOTICE_MS) return;
+    lastMessageSaveFailureNoticeAt = nowTs;
+    console.warn('[command-x] message store save', message);
+    setTimeout(() => cxAlert(message, `SMS Storage${contactName ? ` — ${contactName}` : ''}`), 0);
+}
+
 function saveMessages(contactName, msgs) {
-    try { localStorage.setItem(storeKey(contactName), JSON.stringify(msgs.slice(-MESSAGE_HISTORY_CAP))); }
-    catch (e) { console.warn('[command-x] store save', e); }
+    const history = pruneSmsAttachmentsForStorage(msgs).slice(-MESSAGE_HISTORY_CAP);
+    try {
+        localStorage.setItem(storeKey(contactName), JSON.stringify(history));
+    } catch (e) {
+        try {
+            const withoutAttachments = history.map(stripSmsAttachment);
+            localStorage.setItem(storeKey(contactName), JSON.stringify(withoutAttachments));
+            notifyMessageSaveFailed(contactName, 'Phone storage is full, so SMS photo attachments were removed while keeping message text.');
+        } catch (retryError) {
+            notifyMessageSaveFailed(contactName, 'Phone message history could not be saved because browser storage is full. Clear old phone data or remove large images.');
+            console.warn('[command-x] store save retry', retryError, e);
+        }
+    }
     invalidateContactCaches(contactName);
 }
 
-function pushMessage(contactName, type, text, mesId) {
+function normalizeSmsAttachment(attachment) {
+    if (!attachment || typeof attachment !== 'object') return null;
+    const dataUrl = typeof attachment.dataUrl === 'string' ? attachment.dataUrl : '';
+    if (!SMS_IMAGE_DATA_URL_RE.test(dataUrl)) return null;
+    if (dataUrl.length > MAX_SMS_ATTACHMENT_DATA_URL_SIZE) return null;
+    return {
+        type: 'image',
+        dataUrl,
+        name: String(attachment.name || 'photo').trim().slice(0, 120) || 'photo',
+        alt: String(attachment.alt || attachment.name || 'Attached photo').trim().slice(0, 160) || 'Attached photo',
+    };
+}
+
+function smsAttachmentLabel(attachment) {
+    const clean = normalizeSmsAttachment(attachment);
+    return clean ? `📷 ${clean.name || 'Photo'}` : '';
+}
+
+function pushMessage(contactName, type, text, mesId, options = {}) {
     const msgs = loadMessages(contactName);
-    msgs.push({ type, text, time: now(), ts: Date.now(), mesId: mesId ?? null });
+    const attachment = normalizeSmsAttachment(options.attachment);
+    msgs.push({ type, text, time: now(), ts: Date.now(), mesId: mesId ?? null, ...(attachment ? { attachment } : {}) });
     saveMessages(contactName, msgs);
 }
 
@@ -2972,10 +3106,13 @@ async function promptDeleteContact(contactName) {
    SEND MESSAGE THROUGH THE RP
    ====================================================================== */
 
-async function sendToChat(text, contactName, isCommand) {
+async function sendToChat(text, contactName, isCommand, attachment = null) {
     let formatted;
     if (isCommand) {
         formatted = `*opens Command-X on phone and sends a neural command to ${contactName}:*\n${text}`;
+    } else if (attachment) {
+        const caption = text && text !== '[photo]' ? `\n"${text}"` : '';
+        formatted = `*texts ${contactName} on phone and sends a picture (${attachment.name || 'image'}):*${caption}`;
     } else {
         formatted = `*texts ${contactName} on phone:*\n"${text}"`;
     }
@@ -2996,8 +3133,8 @@ async function sendToChat(text, contactName, isCommand) {
 }
 
 /** Send immediately (instant mode) — single target */
-function sendImmediate(contactName, chatText, isNeural, cmdType) {
-    injectSmsPrompt([{ name: contactName, isNeural, cmdType }]);
+function sendImmediate(contactName, chatText, isNeural, cmdType, attachment = null) {
+    injectSmsPrompt([{ name: contactName, isNeural, cmdType, attachmentName: attachment?.name || null }]);
     // Always arm cleanup so the injected per-message prompt is cleared on the next
     // assistant message regardless of whether an SMS reply is expected. SMS-specific
     // UI (typing indicator, auto-route) is gated separately by the caller.
@@ -3009,7 +3146,7 @@ function sendImmediate(contactName, chatText, isNeural, cmdType) {
         clearTypingIndicator();
         if (awaitingReply) awaitingReply = false;
     }, AWAIT_TIMEOUT_MS);
-    sendToChat(chatText, contactName, !!cmdType || isNeural);
+    sendToChat(chatText, contactName, !!cmdType || isNeural, attachment);
 }
 
 /* ======================================================================
@@ -3101,7 +3238,12 @@ function profileEditorModalHTML() {
 function contactRowHTML(c, i, app) {
     const msgs = loadMessages(c.name);
     const last = msgs.length ? msgs[msgs.length - 1] : null;
-    const preview = last ? (last.type.startsWith('sent') ? `You: ${last.text}` : last.text) : 'Tap to chat';
+    const attachmentLabel = last?.attachment ? smsAttachmentLabel(last.attachment) : '';
+    const lastMessageText = last?.text || '';
+    const lastText = attachmentLabel
+        ? [attachmentLabel, lastMessageText].filter(Boolean).join(' · ')
+        : lastMessageText;
+    const preview = last ? (last.type.startsWith('sent') ? `You: ${lastText}` : lastText) : 'Tap to chat';
     const previewTrunc = preview.length > 38 ? preview.slice(0, 38) + '…' : preview;
     const npcBadge = c.isNpc ? '<span class="cx-npc-badge">NPC</span>' : '';
 
@@ -3142,6 +3284,10 @@ function buildMapView(contacts) {
 
     // Build trail SVG paths when enabled
     const placeById = new Map(places.map(p => [p.id, p]));
+    if (meta.userPlaceId && !placeById.has(meta.userPlaceId)) {
+        meta.userPlaceId = null;
+        saveMapMeta(meta);
+    }
     const trailsSvg = settings.showLocationTrails ? (() => {
         const paths = [];
         for (const c of contacts) {
@@ -3184,13 +3330,16 @@ function buildMapView(contacts) {
     }).join('');
 
     // User "You" pin
-    const youPinHtml = meta.userPin
-        ? `<div class="cx-map-pin cx-map-pin-you" data-cx-map-you="1" role="button" tabindex="0" aria-label="You are here" title="You" style="left:${(meta.userPin.x * 100).toFixed(2)}%;top:${(meta.userPin.y * 100).toFixed(2)}%">📍</div>`
+    const userPlace = meta.userPlaceId ? placeById.get(meta.userPlaceId) : null;
+    const userPin = userPlace ? { x: userPlace.x, y: userPlace.y, label: `You — ${userPlace.name}`, auto: true } : (meta.userPin ? { ...meta.userPin, label: 'You', auto: false } : null);
+    const youPinHtml = userPin
+        ? `<div class="cx-map-pin cx-map-pin-you${userPin.auto ? ' cx-map-pin-you-auto' : ''}" data-cx-map-you="1" role="button" tabindex="0" aria-label="${escAttr(userPin.label)}" title="${escAttr(userPin.label)}" style="left:${(userPin.x * 100).toFixed(2)}%;top:${(userPin.y * 100).toFixed(2)}%">📍</div>`
         : '';
 
     const placeList = places.length
         ? places.map(p => {
             const assigned = contacts.filter(c => currentPlaceIdFor(c.name) === p.id).map(c => c.name);
+            if (meta.userPlaceId === p.id) assigned.unshift('You');
             return `
             <div class="cx-map-place-row" data-cx-map-place-row="${escAttr(p.id)}">
                 <div class="cx-map-place-main">
@@ -3206,7 +3355,7 @@ function buildMapView(contacts) {
         : '<div class="cx-map-empty">No places registered yet. Tap the map surface to add one, or let the LLM register places automatically.</div>';
 
     const trackingHint = settings.trackLocations
-        ? `Tracking ${settings.autoRegisterPlaces ? 'on (auto-register)' : 'on (manual-only)'}`
+        ? `Tracking ${settings.autoRegisterPlaces ? 'on (auto-register)' : 'on (manual-only)'}${meta.userPlaceId ? ' · You auto-tracked' : ''}`
         : 'Tracking off';
 
     return `
@@ -3220,7 +3369,7 @@ function buildMapView(contacts) {
                     <button class="cx-settings-btn" id="cx-map-upload">${isImage ? 'Replace Image' : 'Upload Image'}</button>
                     <button class="cx-settings-btn" id="cx-map-help" title="How to upload a map background" aria-label="Map upload help">ℹ️</button>
                     ${isImage ? '<button class="cx-settings-btn" id="cx-map-clear-image">Use Schematic</button>' : ''}
-                    <button class="cx-settings-btn" id="cx-map-set-you" title="Set your position on the map">📍 You</button>
+                    <button class="cx-settings-btn" id="cx-map-set-you" title="Manually override your position on the map">📍 You</button>
                 </div>
             </div>
             <div class="cx-map-body">
@@ -3560,7 +3709,13 @@ function buildPhone() {
                 <button class="cx-queue-send" id="cx-queue-send">Send ▶</button>
                 <button class="cx-queue-clear" id="cx-queue-clear">✕</button>
             </div>
+            <div class="cx-attachment-preview cx-hidden" id="cx-attachment-preview">
+                <img alt="" />
+                <span class="cx-attachment-label"></span>
+                <button type="button" class="cx-attachment-remove" id="cx-attachment-remove" aria-label="Remove attached photo">✕</button>
+            </div>
             <div class="cx-input-bar">
+                <button type="button" class="cx-attach-btn" id="cx-attach" aria-label="Attach photo" title="Attach photo">＋</button>
                 <input type="text" id="cx-msg-input" placeholder="Type a message..." />
                 <button class="cx-send-btn" id="cx-send">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
@@ -3595,7 +3750,11 @@ function renderBubble(msg) {
     const div = document.createElement('div');
     const isSent = msg.type === 'sent' || msg.type === 'sent-neural';
     div.className = `cx-sms ${isSent ? 'cx-sms-sent' : 'cx-sms-recv'}${msg.type === 'sent-neural' ? ' cx-sms-neural' : ''}`;
-    div.innerHTML = `<span class="cx-sms-body">${escHtml(msg.text)}</span>` +
+    const attachment = normalizeSmsAttachment(msg.attachment);
+    const attachmentHtml = attachment
+        ? `<span class="cx-sms-attachment"><img src="${escAttr(attachment.dataUrl)}" alt="${escAttr(attachment.alt)}"><span>${escHtml(attachment.name)}</span></span>`
+        : '';
+    div.innerHTML = `${attachmentHtml}${msg.text ? `<span class="cx-sms-body">${escHtml(msg.text)}</span>` : ''}` +
                     (msg.time ? `<span class="cx-sms-ts">${msg.time}</span>` : '');
     return div;
 }
@@ -3618,6 +3777,7 @@ function openChat(contactName, app, preserveState = false) {
     if (!preserveState) {
         awaitingReply = false;
         commandMode = null;
+        pendingSmsAttachment = null;
         neuralMode = false;
         clearSmsPrompt();
         clearTypingIndicator();
@@ -3645,6 +3805,7 @@ function openChat(contactName, app, preserveState = false) {
 
     const area = phoneContainer?.querySelector('#cx-msg-area');
     if (area) renderAllBubbles(area, contactName, false);
+    updateSmsAttachmentPreview();
 
     switchView('chat');
 }
@@ -3663,16 +3824,24 @@ function clearTypingIndicator() {
 function sendPhoneMessage() {
     const input = phoneContainer?.querySelector('#cx-msg-input');
     const area = phoneContainer?.querySelector('#cx-msg-area');
-    const rawText = input?.value?.trim();
-    if (!rawText || !area || !currentContactName) return;
+    const rawText = input?.value?.trim() || '';
+    const attachment = normalizeSmsAttachment(pendingSmsAttachment);
+    if (!area || !currentContactName) return;
+    if (!rawText && !attachment) return;
+    if (attachment && neuralMode) {
+        cxAlert('Photo attachments can only be sent as normal SMS because neural commands do not produce phone replies. Turn off neural mode to send a photo.', 'SMS Photo');
+        return;
+    }
 
     const isNeural = neuralMode;
 
     // Determine command type: from drawer mode or legacy {{CMD}} syntax
     const CMD_RE = /\{\{(COMMAND|FORGET|BELIEVE|COMPEL)\}\}\s*\{\{(.+?)\}\}/i;
     let cmdType = commandMode; // from drawer (null if no mode active)
-    let displayText = rawText;
-    let chatText = rawText;
+    const displayFallback = attachment ? 'Photo' : '';
+    const chatFallback = attachment ? '[photo]' : '';
+    let displayText = rawText || displayFallback;
+    let chatText = rawText || chatFallback;
     const legacyMatch = CMD_RE.exec(rawText);
 
     if (legacyMatch) {
@@ -3691,34 +3860,38 @@ function sendPhoneMessage() {
 
     // Store + render sent bubble (pending style in batch mode)
     const msgType = isNeural ? 'sent-neural' : 'sent';
-    pushMessage(currentContactName, msgType, displayText);
+    pushMessage(currentContactName, msgType, displayText, null, { attachment });
 
     if (settings.batchMode) {
         // ── BATCH MODE: stage message, don't send yet ──
-        const bubble = renderBubble({ type: msgType, text: displayText, time: now() });
+        const bubble = renderBubble({ type: msgType, text: displayText, time: now(), attachment });
         bubble.classList.add('cx-sms-pending');
         area.appendChild(bubble);
         area.scrollTop = area.scrollHeight;
         input.value = '';
+        pendingSmsAttachment = null;
+        updateSmsAttachmentPreview();
 
-        addToQueue(currentContactName, chatText, displayText, isNeural, cmdType);
+        addToQueue(currentContactName, chatText, displayText, isNeural, cmdType, attachment);
     } else {
         // ── INSTANT MODE: send immediately (original behavior) ──
-        area.appendChild(renderBubble({ type: msgType, text: displayText, time: now() }));
+        area.appendChild(renderBubble({ type: msgType, text: displayText, time: now(), attachment }));
         input.value = '';
+        pendingSmsAttachment = null;
+        updateSmsAttachmentPreview();
 
         pushPrivatePhoneEvent({
             type: 'outgoing_sms',
             from: 'user',
             to: currentContactName,
-            text: displayText,
+            text: attachment ? `${displayText || 'Photo'} [photo]` : displayText,
             visibility: 'private',
             source: 'inline',
             canonical: true,
             sceneAware: false,
             timestamp: Date.now(),
         });
-        sendImmediate(currentContactName, chatText, isNeural, cmdType);
+        sendImmediate(currentContactName, chatText, isNeural, cmdType, attachment);
 
         // Typing indicator — only show when expecting an SMS reply.
         // Commands (neural or legacy {{COMMAND}}) don't produce an SMS reply.
@@ -3760,6 +3933,62 @@ function clearAllMapDataForCurrentChat() {
         }
         for (const k of toRemove) localStorage.removeItem(k);
     } catch (e) { console.warn('[command-x] clear map data', e); }
+}
+
+function updateSmsAttachmentPreview() {
+    const preview = phoneContainer?.querySelector('#cx-attachment-preview');
+    if (!preview) return;
+    const attachment = normalizeSmsAttachment(pendingSmsAttachment);
+    const img = preview.querySelector('img');
+    const label = preview.querySelector('.cx-attachment-label');
+    if (!attachment) {
+        preview.classList.add('cx-hidden');
+        if (img) img.removeAttribute('src');
+        if (label) label.textContent = '';
+        return;
+    }
+    if (img) {
+        img.src = attachment.dataUrl;
+        img.alt = attachment.alt;
+    }
+    if (label) label.textContent = attachment.name || 'Photo';
+    preview.classList.remove('cx-hidden');
+}
+
+function triggerSmsImagePicker() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.style.display = 'none';
+    document.body.appendChild(input);
+    input.addEventListener('change', async () => {
+        const file = input.files?.[0];
+        if (!file) { input.remove(); return; }
+        try {
+            if (Number.isFinite(file.size) && file.size > MAX_AVATAR_FILE_BYTES) {
+                const mb = (MAX_AVATAR_FILE_BYTES / (1024 * 1024)).toFixed(0);
+                throw new Error(`Image is too large (over ${mb} MB). Please choose a smaller file.`);
+            }
+            const dataUrl = await safeDataUrlFromFile(file, MAX_SMS_IMAGE_WIDTH, 0.82);
+            if (dataUrl.length > MAX_SMS_ATTACHMENT_DATA_URL_SIZE) {
+                const actualKb = Math.round(dataUrl.length / 1024);
+                const limitKb = Math.round(MAX_SMS_ATTACHMENT_DATA_URL_SIZE / 1024);
+                throw new Error(`Compressed image (${actualKb} KB) exceeds the ${limitKb} KB SMS limit. Please choose a smaller image.`);
+            }
+            pendingSmsAttachment = {
+                type: 'image',
+                dataUrl,
+                name: file.name || 'photo',
+                alt: file.name ? `Attached photo: ${file.name}` : 'Attached photo',
+            };
+            updateSmsAttachmentPreview();
+        } catch (error) {
+            await cxAlert(String(error?.message || error), 'SMS Photo');
+        } finally {
+            input.remove();
+        }
+    }, { once: true });
+    input.click();
 }
 
 /**
@@ -3885,7 +4114,8 @@ function wireMapInteractions() {
         switchView('map');
     });
 
-    // "Set You pin" — next click on surface places your pin.
+    // "Set You pin" — manual fallback/override. Normal map tracking updates it
+    // automatically from the user's `place` field in [status].
     let armYouPin = false;
     const youBtn = phoneContainer.querySelector('#cx-map-set-you');
     youBtn?.addEventListener('click', () => {
@@ -4153,6 +4383,7 @@ function wireMapInteractions() {
             }
             const meta = loadMapMeta();
             meta.userPin = { x: clampUnit(x), y: clampUnit(y) };
+            meta.userPlaceId = null;
             saveMapMeta(meta);
             rebuildPhone();
             switchView('map');
@@ -4217,6 +4448,7 @@ function wireMapInteractions() {
         makeDraggable(youPin, (x, y) => {
             const meta = loadMapMeta();
             meta.userPin = { x, y };
+            meta.userPlaceId = null;
             saveMapMeta(meta);
         });
     }
@@ -5317,8 +5549,10 @@ saveQuestEditor().catch(error => cxAlert(String(error?.message || error), 'Quest
         awaitingReply = false;
         commandMode = null;
         neuralMode = false;
+        pendingSmsAttachment = null;
         clearSmsPrompt();
         clearTypingIndicator();
+        updateSmsAttachmentPreview();
     });
     // Batch mode toggle
     phoneContainer.querySelector('#cx-batch-toggle')?.addEventListener('click', () => {
@@ -5376,6 +5610,11 @@ saveQuestEditor().catch(error => cxAlert(String(error?.message || error), 'Quest
         })
     );
     phoneContainer.querySelector('#cx-send')?.addEventListener('click', sendPhoneMessage);
+    phoneContainer.querySelector('#cx-attach')?.addEventListener('click', triggerSmsImagePicker);
+    phoneContainer.querySelector('#cx-attachment-remove')?.addEventListener('click', () => {
+        pendingSmsAttachment = null;
+        updateSmsAttachmentPreview();
+    });
     phoneContainer.querySelector('#cx-msg-input')?.addEventListener('keydown', e => {
         if (e.key === 'Enter') sendPhoneMessage();
     });
