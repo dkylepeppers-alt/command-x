@@ -5693,6 +5693,8 @@ function wireEventListeners() {
                 rebuildPhone();
             }
 
+            // A swipe regeneration re-rolls the same ST message, so it should
+            // replace phone artifacts without advancing Command-X turn cadence.
             if (!isSwipeRegeneration) {
                 applyInjectionThrottle();
             }

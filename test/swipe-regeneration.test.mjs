@@ -78,6 +78,8 @@ describe('swipe regeneration tracker', () => {
         tracker.mark(-1);
         tracker.mark(1.5);
         tracker.mark('7');
+        tracker.mark('007');
+        tracker.mark('7.0');
 
         assert.equal(tracker.consume('bad'), false);
         assert.equal(tracker.consume(8), false);
@@ -116,8 +118,9 @@ describe('swipe regeneration handler flow', () => {
         runtime.messageSwiped(2);
         runtime.messageReceived(3);
         runtime.messageReceived(2);
+        runtime.messageReceived(2);
 
-        assert.equal(runtime.throttleCount(), 1);
+        assert.equal(runtime.throttleCount(), 2);
     });
 
     it('message deletion clears the pending regeneration marker', () => {
