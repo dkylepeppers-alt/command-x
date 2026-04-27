@@ -147,16 +147,11 @@ Optional (only required for the bridge-plugin sections below):
 - [ ] **User/browser:** Nova proposes **`st_write_character`** (the canonical
   ST-native write path). The **approval modal** opens showing the parsed args;
   click **Approve**.
-- [ ] **User/browser:** The tool result is the expected closed-enum
-  **`not-implemented`** response with a hint to use **`fs_write`** at
-  `SillyTavern/data/<user>/characters/Aria.json`. This is the current v0.13.0
-  behavior; the safer ST-native character-write handler is deliberately
-  deferred until the correct ST internal API surface is confirmed.
-- [ ] **Both:** *(Optional bridge variant)* If the bridge is installed and tier is
-  **write**, ask Nova to use the hinted **`fs_write`** workaround to drop the
-  JSON onto disk. The approval modal renders a **unified diff preview** of the
-  proposed file content. Approve → file written → refresh/restart ST as needed
-  for the character list to pick up the new JSON.
+- [ ] **User/browser:** The tool result reports a successful ST-native create
+  through `/api/characters/create`; refresh the character list if needed and
+  verify **Aria** appears without using the filesystem bridge workaround.
+- [ ] **Both:** If Nova detects an existing **Aria**, it should read the card
+  and ask before overwriting rather than silently replacing it.
 
 ---
 
@@ -167,15 +162,10 @@ Optional (only required for the bridge-plugin sections below):
   **"Build a small worldbook with three entries about the city of Pacifica."**
 - [ ] **User/browser:** Nova proposes **`st_write_worldbook`** with three
   entries; approve.
-- [ ] **User/browser:** The tool result is the expected closed-enum
-  **`not-implemented`** response with a hint to use **`fs_write`** at
-  `SillyTavern/data/<user>/worlds/Pacifica.json` (or the exact name Nova chose).
-  This is the current v0.13.0 behavior; the safer ST-native worldbook-write
-  handler is deliberately deferred for the same reason as character writes.
-- [ ] **Both:** *(Optional bridge variant)* If the bridge is installed, ask Nova
-  to use the hinted **`fs_write`** workaround. Approve the diff, then open ST's
-  **World Info / Lorebook** UI after refresh/restart as needed and verify the
-  worldbook JSON loads cleanly.
+- [ ] **User/browser:** The tool result reports a successful ST-native worldbook
+  write through `/api/worldinfo/edit`.
+- [ ] **Both:** Open ST's **World Info / Lorebook** UI and verify the Pacifica
+  worldbook loads with the expected entries, activation keys, and content.
 
 ---
 
