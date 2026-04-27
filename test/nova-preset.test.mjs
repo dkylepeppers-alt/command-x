@@ -26,7 +26,8 @@ test('preset declares required top-level Chat Completion fields', async () => {
     const REQUIRED = [
         'chat_completion_source', 'openai_model', 'temperature', 'top_p',
         'frequency_penalty', 'presence_penalty', 'openai_max_context',
-        'openai_max_tokens', 'stream_openai', 'names_behavior',
+        'openai_max_tokens', 'stream_openai', 'function_calling',
+        'custom_prompt_post_processing', 'names_behavior',
         'send_if_empty', 'impersonation_prompt', 'new_chat_prompt',
         'new_group_chat_prompt', 'new_example_chat_prompt',
         'continue_nudge_prompt', 'wi_format', 'scenario_format',
@@ -45,8 +46,10 @@ test('preset tuning values match the documented intent', async () => {
     assert.equal(preset.frequency_penalty, 0.1);
     assert.equal(preset.presence_penalty, 0.1);
     assert.equal(preset.openai_max_context, 32768);
-    assert.equal(preset.openai_max_tokens, 800);
+    assert.equal(preset.openai_max_tokens, 1200);
     assert.equal(preset.stream_openai, true);
+    assert.equal(preset.function_calling, true);
+    assert.equal(preset.custom_prompt_post_processing, '');
     assert.equal(preset.names_behavior, 2);
 });
 
@@ -89,6 +92,8 @@ test('Main Prompt teaches all four Command-X tag grammars', async () => {
     assert.match(c, /\[\/quests\]/);
     assert.match(c, /\[place\]/);
     assert.match(c, /\[\/place\]/);
+    assert.match(c, /valid compact JSON/, 'main prompt should require strict JSON payloads');
+    assert.match(c, /Never use side-channel tags for Nova tool calls/, 'main prompt should keep RP tags separate from Nova tools');
 });
 
 test('prompt_order references only defined prompt identifiers', async () => {
@@ -127,6 +132,7 @@ test('schema matches upstream ST Default.json field set', async () => {
         'assistant_impersonation', 'use_sysprompt', 'squash_system_messages',
         'media_inlining', 'bypass_status_check', 'continue_prefill',
         'continue_postfix', 'seed', 'n',
+        'function_calling', 'custom_prompt_post_processing',
     ];
     for (const key of UPSTREAM_FIELDS) {
         assert.ok(key in preset, `missing upstream field: ${key}`);

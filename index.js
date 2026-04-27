@@ -4853,13 +4853,9 @@ async function novaHandleSend() {
 
     const { soul, memory } = await loadNovaSoulMemory();
 
-    // Build the tool handler set. Shipped today: soul/memory self-edit
-    // (§6b) + phone-internal stores (§4e) + plugin-backed filesystem
-    // (§4a) + ST-API tools (§4d, with `st_write_character` and
-    // `st_write_worldbook` deferred — see `buildNovaStTools` header) +
-    // plugin-backed shell (§4b, forwards to the plugin's `/shell/run`
-    // route — currently returns `{ error: 'not-implemented' }` until the
-    // route lands).
+    // Build the tool handler set: soul/memory self-edit (§6b),
+    // phone-internal stores (§4e), plugin-backed filesystem (§4a),
+    // ST-API tools (§4d), and plugin-backed shell (§4b).
     const toolHandlers = {
         ...buildNovaSoulMemoryHandlers({}),
         ...buildNovaPhoneHandlers({}),
@@ -4968,7 +4964,11 @@ async function novaHandleSend() {
     }
     if (result && !result.ok) {
         const reason = result.reason || 'unknown';
-        appendNovaTranscriptLine(`⚠︎ Turn failed: ${reason}${result.error ? ' — ' + result.error : ''}`, 'notice');
+        if (reason === 'no-active-profile') {
+            appendNovaTranscriptLine('⚠︎ Turn failed: no active profile to restore. Save or select your current SillyTavern connection profile before using Nova, then try again.', 'notice');
+        } else {
+            appendNovaTranscriptLine(`⚠︎ Turn failed: ${reason}${result.error ? ' — ' + result.error : ''}`, 'notice');
+        }
     }
     if (thrownNotice) {
         appendNovaTranscriptLine(thrownNotice, 'notice');
@@ -7556,6 +7556,19 @@ async function sendNovaTurn({
             // slash round-trip and preserves whatever chat state the user
             // already had active.
             if (swappedFrom !== targetProfile) {
+                if (!swappedFrom) {
+                    appendNovaAuditLog(state, {
+                        tool: 'profile-swap',
+                        argsSummary: `to=${targetProfile}`,
+                        outcome: 'refused-no-active-profile',
+                    });
+                    saveNovaState(ctx);
+                    return {
+                        ok: false,
+                        reason: 'no-active-profile',
+                        error: 'Nova requires an active restorable connection profile before switching.',
+                    };
+                }
                 try {
                     await executeSlash(`/profile ${quoteNovaSlashArg(targetProfile)}`);
                     swapPerformed = true;
