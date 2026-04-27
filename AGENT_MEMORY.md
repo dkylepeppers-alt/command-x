@@ -77,6 +77,22 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-27 — Nova skill tool filtering and expanded skills (commit pending)
+
+**Context:** Implemented the Nova skills review recommendations: active-skill
+tool filtering, richer skill picker hints, stronger skill prompts, and five
+additional specialized skills.
+
+**Notes for future agents:**
+- `filterNovaToolsBySkill()` is applied after bridge capability filtering in
+  `novaHandleSend()`. Skill `defaultTools` now controls what schemas the LLM
+  sees; `defaultTools: 'all'` remains the free-form escape hatch.
+- `NOVA_SKILLS` entries now require a `description` for the skill picker, and
+  `SKILLS_VERSION` is pinned by `test/nova-tool-args.test.mjs`; bump it whenever
+  skill prompts/default skill definitions change.
+- Missing bridge-backed tools are surfaced as a skill-specific transcript notice,
+  so changing a skill's `defaultTools` can affect user-facing warnings.
+
 ### 2026-04-27 — Copyable phone transcript text (commit pending)
 
 **Context:** Made Command-X SMS bubbles and Nova transcript/tool text
