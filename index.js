@@ -2036,6 +2036,8 @@ function stripSmsAttachment(message) {
 
 function pruneSmsAttachmentsForStorage(messages, keepAttachments = SMS_ATTACHMENT_HISTORY_CAP) {
     const list = Array.isArray(messages) ? messages : [];
+    // Shallow-copy the array only: kept messages can be shared safely, while
+    // entries that lose an attachment are replaced with cloned objects below.
     const result = list.slice();
     let remaining = Math.max(0, Number(keepAttachments) || 0);
     for (let i = list.length - 1; i >= 0; i -= 1) {
@@ -2054,9 +2056,7 @@ function notifyMessageSaveFailed(contactName, message) {
     if (nowTs - lastMessageSaveFailureNoticeAt < MESSAGE_SAVE_FAILURE_NOTICE_MS) return;
     lastMessageSaveFailureNoticeAt = nowTs;
     console.warn('[command-x] message store save', message);
-    if (typeof cxAlert === 'function') {
-        setTimeout(() => cxAlert(message, `SMS Storage${contactName ? ` — ${contactName}` : ''}`), 0);
-    }
+    setTimeout(() => cxAlert(message, `SMS Storage${contactName ? ` — ${contactName}` : ''}`), 0);
 }
 
 function saveMessages(contactName, msgs) {
@@ -2067,7 +2067,7 @@ function saveMessages(contactName, msgs) {
         try {
             const withoutAttachments = history.map(stripSmsAttachment);
             localStorage.setItem(storeKey(contactName), JSON.stringify(withoutAttachments));
-            notifyMessageSaveFailed(contactName, 'Phone storage is almost full, so SMS photo attachments were removed while keeping message text.');
+            notifyMessageSaveFailed(contactName, 'Phone storage is full, so SMS photo attachments were removed while keeping message text.');
         } catch (retryError) {
             notifyMessageSaveFailed(contactName, 'Phone message history could not be saved because browser storage is full. Clear old phone data or remove large images.');
             console.warn('[command-x] store save retry', retryError, e);
