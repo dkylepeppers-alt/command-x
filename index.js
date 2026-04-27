@@ -4901,12 +4901,14 @@ async function novaHandleSend() {
     }
     const activeSkill = resolveNovaSkill(nova.activeSkill || 'freeform');
     effectiveTools = filterNovaToolsBySkill({ tools: effectiveTools, skill: activeSkill });
-    const unavailableSkillTools = listUnavailableNovaSkillTools({ tools: effectiveTools, skill: activeSkill });
-    if (unavailableSkillTools.length) {
-        appendNovaTranscriptLine(
-            `⚠︎ ${activeSkill.label} expected tools unavailable this turn: ${unavailableSkillTools.join(', ')}. If these are bridge-backed tools, install or update nova-agent-bridge.`,
-            'notice',
-        );
+    if (!textOnlyFallback) {
+        const unavailableSkillTools = listUnavailableNovaSkillTools({ tools: effectiveTools, skill: activeSkill });
+        if (unavailableSkillTools.length) {
+            appendNovaTranscriptLine(
+                `⚠︎ ${activeSkill.label} expected tools unavailable this turn: ${unavailableSkillTools.join(', ')}. If these are bridge-backed tools, install or update nova-agent-bridge.`,
+                'notice',
+            );
+        }
     }
 
     const run = () => sendNovaTurn({
@@ -7696,7 +7698,7 @@ async function sendNovaTurn({
             const dispatchResult = await runNovaToolDispatch({
                 initialResponse: { content: assistantContent, tool_calls: toolCalls },
                 messages,
-                toolRegistry: NOVA_TOOLS,
+                toolRegistry: tools,
                 handlers: toolHandlers,
                 tier,
                 rememberedApprovals,

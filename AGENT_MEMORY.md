@@ -87,11 +87,16 @@ additional specialized skills.
 - `filterNovaToolsBySkill()` is applied after bridge capability filtering in
   `novaHandleSend()`. Skill `defaultTools` now controls what schemas the LLM
   sees; `defaultTools: 'all'` remains the free-form escape hatch.
+- `sendNovaTurn()` passes the same filtered per-turn `tools` array as the
+  dispatch `toolRegistry`; do not switch this back to `NOVA_TOOLS` or a model
+  could execute tools hidden from its active skill.
 - `NOVA_SKILLS` entries now require a `description` for the skill picker, and
   `SKILLS_VERSION` is pinned by `test/nova-tool-args.test.mjs`; bump it whenever
   skill prompts/default skill definitions change.
 - Missing bridge-backed tools are surfaced as a skill-specific transcript notice,
-  so changing a skill's `defaultTools` can affect user-facing warnings.
+  so changing a skill's `defaultTools` can affect user-facing warnings. The
+  warning is intentionally skipped in text-only fallback mode because all tools
+  are unavailable there for non-bridge reasons.
 
 ### 2026-04-27 — Copyable phone transcript text (commit pending)
 

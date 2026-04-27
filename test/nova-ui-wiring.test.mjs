@@ -253,6 +253,8 @@ test('Tool capability filter gates the NOVA_TOOLS registry per turn (plan §4f)'
     // The filtered output must be what gets passed as `tools:`.
     assert.match(novaHandleSend[0], /tools:\s*effectiveTools/,
         'sendNovaTurn must receive the filtered tool list (effectiveTools)');
+    assert.match(novaHandleSend[0], /if\s*\(\s*!textOnlyFallback\s*\)\s*\{[\s\S]*listUnavailableNovaSkillTools/,
+        'skill missing-tool warnings must be skipped in text-only fallback mode');
     // A transcript notice must be emitted when bridge is absent.
     assert.match(novaHandleSend[0], /Nova bridge plugin not detected/,
         'novaHandleSend must warn the user when the bridge is missing');
