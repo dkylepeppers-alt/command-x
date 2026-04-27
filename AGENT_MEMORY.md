@@ -77,6 +77,19 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-27 — SMS attachment storage review follow-up (commit pending)
+
+**Context:** Follow-up to PR review on the non-Nova quest/map/SMS UX update.
+
+**Notes for future agents:**
+- SMS attachments are intentionally capped at 96 KB data URLs and only the newest
+  20 attachments per contact keep image data during normal message saves.
+- If `localStorage.setItem()` still fails, `saveMessages()` retries with all
+  attachments stripped so message text can survive and surfaces an async
+  `cxAlert()` storage warning to the user.
+- `buildMapView()` clears stale `mapMeta.userPlaceId` when the referenced place
+  no longer exists, allowing the map to fall back to the manual `userPin`.
+
 ### 2026-04-27 — Non-Nova quest/map/SMS UX updates (commit pending)
 
 **Context:** Implemented the requested non-Nova UX sweep: quest checkboxes are

@@ -49,7 +49,10 @@ const LOCATION_TRAIL_CAP = 50;              // max trail entries per contact
 const TOAST_DURATION_MS = 4_000;            // toast auto-dismiss duration
 const MAX_SUMMARISED_SKILL_TOOLS = 6;       // max tool names shown in skill picker
 const MAX_SMS_IMAGE_WIDTH = 768;             // max downscaled width for SMS image attachments
-const MAX_SMS_ATTACHMENT_DATA_URL_SIZE = 512 * 1024; // cap stored SMS image data URLs
+// Keep this conservative: localStorage quotas are small (~5 MB in many browsers),
+// shared across all persisted phone state, and base64 data URLs add overhead.
+const MAX_SMS_ATTACHMENT_DATA_URL_SIZE = 96 * 1024; // cap stored SMS image data URLs
+const SMS_ATTACHMENT_HISTORY_CAP = 20;       // max image attachments retained per contact history
 const SMS_IMAGE_DATA_URL_RE = /^data:image\/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=]+$/i;
 
 /**
@@ -109,6 +112,7 @@ let scanContactsInFlight = false;
 const SCAN_CONTACTS_LABEL = '🔍 Scan Contacts';
 let questEnrichmentInFlight = false;
 let pendingSmsAttachment = null; // { type:'image', dataUrl, name, alt } | null
+let lastMessageSaveFailureNoticeAt = 0;
 
 
 /**
@@ -2022,9 +2026,50 @@ function loadMessages(contactName) {
     catch { return []; }
 }
 
+function pruneSmsAttachmentsForStorage(messages, keepAttachments = SMS_ATTACHMENT_HISTORY_CAP) {
+    const list = Array.isArray(messages) ? messages : [];
+    let remaining = Math.max(0, Number(keepAttachments) || 0);
+    for (let i = list.length - 1; i >= 0; i--) {
+        if (!list[i]?.attachment) continue;
+        if (remaining > 0) {
+            remaining -= 1;
+            continue;
+        }
+        list[i] = { ...list[i] };
+        delete list[i].attachment;
+    }
+    return list;
+}
+
+function notifyMessageSaveFailed(contactName, message) {
+    const nowTs = Date.now();
+    if (nowTs - lastMessageSaveFailureNoticeAt < TOAST_DURATION_MS) return;
+    lastMessageSaveFailureNoticeAt = nowTs;
+    console.warn('[command-x] message store save', message);
+    if (typeof cxAlert === 'function') {
+        setTimeout(() => cxAlert(message, `SMS Storage${contactName ? ` — ${contactName}` : ''}`), 0);
+    }
+}
+
 function saveMessages(contactName, msgs) {
-    try { localStorage.setItem(storeKey(contactName), JSON.stringify(msgs.slice(-MESSAGE_HISTORY_CAP))); }
-    catch (e) { console.warn('[command-x] store save', e); }
+    const history = pruneSmsAttachmentsForStorage((Array.isArray(msgs) ? msgs : []).slice(-MESSAGE_HISTORY_CAP));
+    try {
+        localStorage.setItem(storeKey(contactName), JSON.stringify(history));
+    } catch (e) {
+        try {
+            const withoutAttachments = history.map(msg => {
+                if (!msg?.attachment) return msg;
+                const clean = { ...msg };
+                delete clean.attachment;
+                return clean;
+            });
+            localStorage.setItem(storeKey(contactName), JSON.stringify(withoutAttachments));
+            notifyMessageSaveFailed(contactName, 'Phone storage is almost full, so older SMS photo attachments were removed while keeping message text.');
+        } catch (retryError) {
+            notifyMessageSaveFailed(contactName, 'Phone message history could not be saved because browser storage is full. Clear old phone data or remove large images.');
+            console.warn('[command-x] store save retry', retryError, e);
+        }
+    }
     invalidateContactCaches(contactName);
 }
 
@@ -3236,6 +3281,10 @@ function buildMapView(contacts) {
 
     // Build trail SVG paths when enabled
     const placeById = new Map(places.map(p => [p.id, p]));
+    if (meta.userPlaceId && !placeById.has(meta.userPlaceId)) {
+        meta.userPlaceId = null;
+        saveMapMeta(meta);
+    }
     const trailsSvg = settings.showLocationTrails ? (() => {
         const paths = [];
         for (const c of contacts) {
