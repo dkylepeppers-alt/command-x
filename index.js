@@ -54,6 +54,7 @@ const MAX_SMS_IMAGE_WIDTH = 768;             // max downscaled width for SMS ima
 const MAX_SMS_ATTACHMENT_DATA_URL_SIZE = 96 * 1024; // cap stored SMS image data URLs
 const SMS_ATTACHMENT_HISTORY_CAP = 20;       // max image attachments retained per contact history
 const SMS_IMAGE_DATA_URL_RE = /^data:image\/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=]+$/i;
+const MESSAGE_SAVE_FAILURE_NOTICE_MS = 30_000; // throttle storage-full user alerts
 
 /**
  * Depth values passed to `setExtensionPrompt` (`extension_prompt_types.IN_CHAT`).
@@ -2029,21 +2030,25 @@ function loadMessages(contactName) {
 function pruneSmsAttachmentsForStorage(messages, keepAttachments = SMS_ATTACHMENT_HISTORY_CAP) {
     const list = Array.isArray(messages) ? messages : [];
     let remaining = Math.max(0, Number(keepAttachments) || 0);
-    for (let i = list.length - 1; i >= 0; i--) {
+    const keep = new Set();
+    for (let i = list.length - 1; i >= 0; i -= 1) {
         if (!list[i]?.attachment) continue;
         if (remaining > 0) {
+            keep.add(i);
             remaining -= 1;
-            continue;
         }
-        list[i] = { ...list[i] };
-        delete list[i].attachment;
     }
-    return list;
+    return list.map((msg, index) => {
+        if (!msg?.attachment || keep.has(index)) return msg;
+        const clean = { ...msg };
+        delete clean.attachment;
+        return clean;
+    });
 }
 
 function notifyMessageSaveFailed(contactName, message) {
     const nowTs = Date.now();
-    if (nowTs - lastMessageSaveFailureNoticeAt < TOAST_DURATION_MS) return;
+    if (nowTs - lastMessageSaveFailureNoticeAt < MESSAGE_SAVE_FAILURE_NOTICE_MS) return;
     lastMessageSaveFailureNoticeAt = nowTs;
     console.warn('[command-x] message store save', message);
     if (typeof cxAlert === 'function') {
@@ -2052,7 +2057,7 @@ function notifyMessageSaveFailed(contactName, message) {
 }
 
 function saveMessages(contactName, msgs) {
-    const history = pruneSmsAttachmentsForStorage((Array.isArray(msgs) ? msgs : []).slice(-MESSAGE_HISTORY_CAP));
+    const history = pruneSmsAttachmentsForStorage(msgs).slice(-MESSAGE_HISTORY_CAP);
     try {
         localStorage.setItem(storeKey(contactName), JSON.stringify(history));
     } catch (e) {
