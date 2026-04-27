@@ -4666,10 +4666,11 @@ async function novaPickSkill() {
     const options = NOVA_SKILLS.map(s => ({
         value: s.id,
         label: `${s.icon} ${s.label}`,
-        hint: [s.description].concat([
+        hint: [
+            s.description,
             `Default tier: ${_novaTierLabel(s.defaultTier)}`,
             `Tools: ${summariseNovaSkillTools(s)}`,
-        ]).join('\n'),
+        ].join('\n'),
     }));
     const chosen = await cxPickList('Skill', options, {
         initial: settings.nova?.activeSkill || 'freeform',
@@ -6142,6 +6143,10 @@ function filterNovaToolsByCapabilities({ tools, probe } = {}) {
     });
 }
 
+/**
+ * Return a skill's declared tool names, normalised for comparisons.
+ * `null` means "all tools"; `[]` means no valid defaultTools array.
+ */
 function _novaSkillDefaultToolNames(skill) {
     if (!skill || skill.defaultTools === 'all') return null;
     if (!Array.isArray(skill.defaultTools)) return [];
@@ -6150,6 +6155,11 @@ function _novaSkillDefaultToolNames(skill) {
         .filter(Boolean);
 }
 
+/**
+ * Apply a skill's `defaultTools` allow-list after bridge capability filtering.
+ * Returns a fresh unfiltered copy for `defaultTools:'all'`, otherwise the
+ * subset of available tool metadata whose names are allowed by the skill.
+ */
 function filterNovaToolsBySkill({ tools, skill } = {}) {
     if (!Array.isArray(tools)) return [];
     const allowed = _novaSkillDefaultToolNames(skill);
@@ -6158,6 +6168,10 @@ function filterNovaToolsBySkill({ tools, skill } = {}) {
     return tools.filter(tool => allowedSet.has(String(tool?.name || '')));
 }
 
+/**
+ * List skill-declared tools that are absent from the effective registry.
+ * Used for user-facing bridge/capability warnings before a Nova turn starts.
+ */
 function listUnavailableNovaSkillTools({ tools, skill } = {}) {
     const expected = _novaSkillDefaultToolNames(skill);
     if (!expected || !expected.length) return [];
@@ -6165,6 +6179,9 @@ function listUnavailableNovaSkillTools({ tools, skill } = {}) {
     return expected.filter(name => !available.has(name));
 }
 
+/**
+ * Build the skill-picker tool summary, capped to avoid overlong modal rows.
+ */
 function summariseNovaSkillTools(skill) {
     const names = _novaSkillDefaultToolNames(skill);
     if (!names) return 'all tools allowed by the active permission tier';
