@@ -2027,23 +2027,26 @@ function loadMessages(contactName) {
     catch { return []; }
 }
 
+function stripSmsAttachment(message) {
+    if (!message?.attachment) return message;
+    const clean = { ...message };
+    delete clean.attachment;
+    return clean;
+}
+
 function pruneSmsAttachmentsForStorage(messages, keepAttachments = SMS_ATTACHMENT_HISTORY_CAP) {
     const list = Array.isArray(messages) ? messages : [];
+    const result = list.slice();
     let remaining = Math.max(0, Number(keepAttachments) || 0);
-    const keep = new Set();
     for (let i = list.length - 1; i >= 0; i -= 1) {
         if (!list[i]?.attachment) continue;
         if (remaining > 0) {
-            keep.add(i);
             remaining -= 1;
+        } else {
+            result[i] = stripSmsAttachment(list[i]);
         }
     }
-    return list.map((msg, index) => {
-        if (!msg?.attachment || keep.has(index)) return msg;
-        const clean = { ...msg };
-        delete clean.attachment;
-        return clean;
-    });
+    return result;
 }
 
 function notifyMessageSaveFailed(contactName, message) {
@@ -2062,14 +2065,9 @@ function saveMessages(contactName, msgs) {
         localStorage.setItem(storeKey(contactName), JSON.stringify(history));
     } catch (e) {
         try {
-            const withoutAttachments = history.map(msg => {
-                if (!msg?.attachment) return msg;
-                const clean = { ...msg };
-                delete clean.attachment;
-                return clean;
-            });
+            const withoutAttachments = history.map(stripSmsAttachment);
             localStorage.setItem(storeKey(contactName), JSON.stringify(withoutAttachments));
-            notifyMessageSaveFailed(contactName, 'Phone storage is almost full, so older SMS photo attachments were removed while keeping message text.');
+            notifyMessageSaveFailed(contactName, 'Phone storage is almost full, so SMS photo attachments were removed while keeping message text.');
         } catch (retryError) {
             notifyMessageSaveFailed(contactName, 'Phone message history could not be saved because browser storage is full. Clear old phone data or remove large images.');
             console.warn('[command-x] store save retry', retryError, e);
