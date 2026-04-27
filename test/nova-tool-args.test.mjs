@@ -162,6 +162,8 @@ describe('NOVA_SKILLS — structural invariants', () => {
             assert.ok(skill.id.length > 0);
             assert.equal(typeof skill.label, 'string');
             assert.equal(typeof skill.icon, 'string');
+            assert.equal(typeof skill.description, 'string');
+            assert.ok(skill.description.length > 0, `${skill.id}: missing picker description`);
             assert.equal(typeof skill.systemPrompt, 'string');
             assert.ok(skill.systemPrompt.length > 0);
             assert.ok(VALID_TIERS.has(skill.defaultTier), `bad tier on ${skill.id}: ${skill.defaultTier}`);
@@ -192,17 +194,70 @@ describe('NOVA_SKILLS — structural invariants', () => {
 
     it('every plan-specified skill id is present', () => {
         const ids = new Set(NOVA_SKILLS.map(s => s.id));
-        for (const required of ['character-creator', 'worldbook-creator', 'image-prompter', 'freeform']) {
+        for (const required of [
+            'character-creator',
+            'worldbook-creator',
+            'stscript-regex',
+            'image-prompter',
+            'quest-designer',
+            'npc-contact-manager',
+            'map-location-designer',
+            'lore-auditor',
+            'prompt-doctor',
+            'freeform',
+        ]) {
             assert.ok(ids.has(required), `missing required skill: ${required}`);
+        }
+    });
+
+    it('runtime filters exposed tools through each skill defaultTools list', () => {
+        assert.match(SOURCE, /function filterNovaToolsBySkill\(/,
+            'filterNovaToolsBySkill helper must exist');
+        assert.match(SOURCE, /effectiveTools\s*=\s*filterNovaToolsBySkill\(\s*\{\s*tools:\s*effectiveTools,\s*skill:\s*activeSkill\s*\}\s*\)/,
+            'novaHandleSend must apply active-skill tool filtering after capability filtering');
+
+        const allToolNames = NOVA_TOOLS.map(t => t.name);
+        for (const skill of NOVA_SKILLS) {
+            const exposed = skill.defaultTools === 'all'
+                ? allToolNames
+                : allToolNames.filter(name => skill.defaultTools.includes(name));
+            if (skill.defaultTools !== 'all') {
+                assert.deepEqual(new Set(exposed), new Set(skill.defaultTools),
+                    `${skill.id}: exposed tools must exactly match defaultTools`);
+            }
+        }
+    });
+
+    it('skill prompts include the current safety and quality requirements', () => {
+        // Intentional source-contract test: these prompt phrases are brittle by
+        // design so a future semantic rewrite forces a conscious test update.
+        const byId = Object.fromEntries(NOVA_SKILLS.map(s => [s.id, s.systemPrompt]));
+        const requirements = {
+            'character-creator': ['st_list_characters', 'alternate greetings', 'mes_example', 'avatar_prompt', 'duplicate'],
+            'worldbook-creator': ['read → merge → validate → write', 'keysecondary', 'token budget', 'constant entries', 'selective'],
+            'stscript-regex': ['mandatory before any save', 'Quick Reply', 'lookarounds', 'catastrophically backtrack'],
+            'image-prompter': ['scene_summary', 'SDXL', 'Flux', 'Illustrious', 'negative'],
+            'quest-designer': ['phone_list_quests', 'phone_write_quest', 'subtasks'],
+            'npc-contact-manager': ['phone_list_npcs', 'phone_write_npc', 'phone_inject_message'],
+            'map-location-designer': ['phone_list_places', 'phone_write_place', 'occupants'],
+            'lore-auditor': ['contradictions', 'worldbooks', 'Do not write'],
+            'prompt-doctor': ['conflicting instructions', 'smallest safe improvement', 'approval diff'],
+        };
+        for (const [id, needles] of Object.entries(requirements)) {
+            assert.ok(byId[id], `missing skill prompt for ${id}`);
+            for (const needle of needles) {
+                assert.ok(byId[id].includes(needle), `${id}: missing prompt requirement ${needle}`);
+            }
         }
     });
 });
 
 describe('SKILLS_VERSION', () => {
-    it('is declared as a positive integer constant', () => {
+    it('is declared as the current skill prompt generation', () => {
         const m = SOURCE.match(/const SKILLS_VERSION\s*=\s*(\d+)\s*;/);
         assert.ok(m, 'SKILLS_VERSION constant not found');
         const v = Number(m[1]);
         assert.ok(Number.isInteger(v) && v > 0);
+        assert.equal(v, 3, 'bump SKILLS_VERSION when skill prompts, defaultTools, or defaultTier change');
     });
 });

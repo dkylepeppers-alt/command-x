@@ -47,6 +47,7 @@ const QUEST_HISTORY_CAP = 150;              // max quests stored
 const PLACES_CAP = 40;                      // max registered places per chat
 const LOCATION_TRAIL_CAP = 50;              // max trail entries per contact
 const TOAST_DURATION_MS = 4_000;            // toast auto-dismiss duration
+const MAX_SUMMARISED_SKILL_TOOLS = 6;       // max tool names shown in skill picker
 
 /**
  * Depth values passed to `setExtensionPrompt` (`extension_prompt_types.IN_CHAT`).
@@ -4665,7 +4666,11 @@ async function novaPickSkill() {
     const options = NOVA_SKILLS.map(s => ({
         value: s.id,
         label: `${s.icon} ${s.label}`,
-        hint: `Default tier: ${_novaTierLabel(s.defaultTier)}`,
+        hint: [
+            s.description,
+            `Default tier: ${_novaTierLabel(s.defaultTier)}`,
+            `Tools: ${summariseNovaSkillTools(s)}`,
+        ].join('\n'),
     }));
     const chosen = await cxPickList('Skill', options, {
         initial: settings.nova?.activeSkill || 'freeform',
@@ -4853,13 +4858,9 @@ async function novaHandleSend() {
 
     const { soul, memory } = await loadNovaSoulMemory();
 
-    // Build the tool handler set. Shipped today: soul/memory self-edit
-    // (§6b) + phone-internal stores (§4e) + plugin-backed filesystem
-    // (§4a) + ST-API tools (§4d, with `st_write_character` and
-    // `st_write_worldbook` deferred — see `buildNovaStTools` header) +
-    // plugin-backed shell (§4b, forwards to the plugin's `/shell/run`
-    // route — currently returns `{ error: 'not-implemented' }` until the
-    // route lands).
+    // Build the tool handler set: soul/memory self-edit (§6b),
+    // phone-internal stores (§4e), plugin-backed filesystem (§4a),
+    // ST-API tools (§4d), and plugin-backed shell (§4b).
     const toolHandlers = {
         ...buildNovaSoulMemoryHandlers({}),
         ...buildNovaPhoneHandlers({}),
@@ -4894,6 +4895,17 @@ async function novaHandleSend() {
         if (probe && probe.present === false && effectiveTools.length !== NOVA_TOOLS.length) {
             appendNovaTranscriptLine(
                 '⚠︎ Nova bridge plugin not detected — filesystem and shell tools are disabled this turn. Install `nova-agent-bridge` to enable them.',
+                'notice',
+            );
+        }
+    }
+    const activeSkill = resolveNovaSkill(nova.activeSkill || 'freeform');
+    effectiveTools = filterNovaToolsBySkill({ tools: effectiveTools, skill: activeSkill });
+    if (!textOnlyFallback) {
+        const unavailableSkillTools = listUnavailableNovaSkillTools({ tools: effectiveTools, skill: activeSkill });
+        if (unavailableSkillTools.length) {
+            appendNovaTranscriptLine(
+                `⚠︎ ${activeSkill.label} expected tools unavailable this turn: ${unavailableSkillTools.join(', ')}. If these are bridge-backed tools, install or update nova-agent-bridge.`,
                 'notice',
             );
         }
@@ -4968,7 +4980,11 @@ async function novaHandleSend() {
     }
     if (result && !result.ok) {
         const reason = result.reason || 'unknown';
-        appendNovaTranscriptLine(`⚠︎ Turn failed: ${reason}${result.error ? ' — ' + result.error : ''}`, 'notice');
+        if (reason === 'no-active-profile') {
+            appendNovaTranscriptLine('⚠︎ Turn failed: no active profile to restore. Save or select your current SillyTavern connection profile before using Nova, then try again.', 'notice');
+        } else {
+            appendNovaTranscriptLine(`⚠︎ Turn failed: ${reason}${result.error ? ' — ' + result.error : ''}`, 'notice');
+        }
     }
     if (thrownNotice) {
         appendNovaTranscriptLine(thrownNotice, 'notice');
@@ -6127,6 +6143,53 @@ function filterNovaToolsByCapabilities({ tools, probe } = {}) {
         // compat with capabilities-light plugin builds).
         return caps[name] !== false;
     });
+}
+
+/**
+ * Return a skill's declared tool names, normalised for comparisons.
+ * `null` means "all tools"; `[]` means no valid defaultTools array.
+ */
+function _novaSkillDefaultToolNames(skill) {
+    if (!skill || skill.defaultTools === 'all') return null;
+    if (!Array.isArray(skill.defaultTools)) return [];
+    return skill.defaultTools
+        .map(name => String(name || '').trim())
+        .filter(Boolean);
+}
+
+/**
+ * Apply a skill's `defaultTools` allow-list after bridge capability filtering.
+ * Returns a fresh unfiltered copy for `defaultTools:'all'`, otherwise the
+ * subset of available tool metadata whose names are allowed by the skill.
+ */
+function filterNovaToolsBySkill({ tools, skill } = {}) {
+    if (!Array.isArray(tools)) return [];
+    const allowed = _novaSkillDefaultToolNames(skill);
+    if (!allowed) return tools.slice();
+    const allowedSet = new Set(allowed);
+    return tools.filter(tool => allowedSet.has(String(tool?.name || '')));
+}
+
+/**
+ * List skill-declared tools that are absent from the effective registry.
+ * Used for user-facing bridge/capability warnings before a Nova turn starts.
+ */
+function listUnavailableNovaSkillTools({ tools, skill } = {}) {
+    const expected = _novaSkillDefaultToolNames(skill);
+    if (!expected || !expected.length) return [];
+    const available = new Set((Array.isArray(tools) ? tools : []).map(tool => String(tool?.name || '')));
+    return expected.filter(name => !available.has(name));
+}
+
+/**
+ * Build the skill-picker tool summary, capped to avoid overlong modal rows.
+ */
+function summariseNovaSkillTools(skill) {
+    const names = _novaSkillDefaultToolNames(skill);
+    if (!names) return 'all tools allowed by the active permission tier';
+    if (!names.length) return 'none';
+    if (names.length <= MAX_SUMMARISED_SKILL_TOOLS) return names.join(', ');
+    return `${names.slice(0, MAX_SUMMARISED_SKILL_TOOLS).join(', ')} +${names.length - MAX_SUMMARISED_SKILL_TOOLS} more`;
 }
 
 async function probeNovaBridge({
@@ -7556,6 +7619,19 @@ async function sendNovaTurn({
             // slash round-trip and preserves whatever chat state the user
             // already had active.
             if (swappedFrom !== targetProfile) {
+                if (!swappedFrom) {
+                    appendNovaAuditLog(state, {
+                        tool: 'profile-swap',
+                        argsSummary: `to=${targetProfile}`,
+                        outcome: 'refused-no-active-profile',
+                    });
+                    saveNovaState(ctx);
+                    return {
+                        ok: false,
+                        reason: 'no-active-profile',
+                        error: 'Nova requires an active restorable connection profile before switching.',
+                    };
+                }
                 try {
                     await executeSlash(`/profile ${quoteNovaSlashArg(targetProfile)}`);
                     swapPerformed = true;
@@ -7622,7 +7698,7 @@ async function sendNovaTurn({
             const dispatchResult = await runNovaToolDispatch({
                 initialResponse: { content: assistantContent, tool_calls: toolCalls },
                 messages,
-                toolRegistry: NOVA_TOOLS,
+                toolRegistry: tools,
                 handlers: toolHandlers,
                 tier,
                 rememberedApprovals,
@@ -7754,7 +7830,7 @@ async function sendNovaTurn({
    skill default-tool lists.
    ---------------------------------------------------------------------- */
 
-const SKILLS_VERSION = 2; // bump when any skill prompt changes; v2 adds STscript & Regex
+const SKILLS_VERSION = 3; // bump when any skill prompt, defaultTools, or defaultTier changes; v3 expands tool-scoped skills
 
 const NOVA_TOOLS = [
     // === 4a. Filesystem (plugin-backed) ===
@@ -8128,6 +8204,7 @@ const NOVA_SKILLS = [
         id: 'character-creator',
         label: 'Character Creator',
         icon: '👤',
+        description: 'Drafts and updates Tavern Card v2 characters with duplicate checks, complete lore fields, and avatar prompts.',
         defaultTier: 'write',
         allowTierEscalation: true,
         defaultTools: [
@@ -8136,6 +8213,9 @@ const NOVA_SKILLS = [
         ],
         systemPrompt: [
             'You are the Character Creator skill inside Nova.',
+            'Before creating, call st_list_characters and check for duplicate',
+            'or near-duplicate names. If updating an existing card, read it',
+            'first and preserve useful fields unless the user says otherwise.',
             'You are an expert on the SillyTavern character-card v2 schema:',
             "  spec: 'chara_card_v2', spec_version: '2.0', data: { name, description,",
             '  personality, scenario, first_mes, mes_example, creator_notes,',
@@ -8149,6 +8229,13 @@ const NOVA_SKILLS = [
             'post_history_instructions, tags, creator, character_version.',
             'Never call st_write_character with only `name`.',
             'Never overwrite an existing card without showing a diff first.',
+            'For every new character, include description, personality,',
+            'scenario hooks, first_mes, mes_example, creator_notes,',
+            'system_prompt or post_history_instructions when useful, tags,',
+            'and 2–4 alternate greetings in a complete card object when the',
+            'provider can emit nested JSON reliably.',
+            'Also include an `extensions.command_x.avatar_prompt` string with',
+            'a concise image-generation prompt for the character portrait.',
             'When a user asks you to invent a character, pick opinionated',
             'concrete details; never leave schema fields as "TBD".',
         ].join('\n'),
@@ -8157,6 +8244,7 @@ const NOVA_SKILLS = [
         id: 'worldbook-creator',
         label: 'Worldbook Creator',
         icon: '📖',
+        description: 'Builds and maintains SillyTavern worldbooks with activation keys, depth/order tuning, and safe merge writes.',
         defaultTier: 'write',
         allowTierEscalation: true,
         defaultTools: [
@@ -8175,6 +8263,14 @@ const NOVA_SKILLS = [
             'Use st_read_worldbook and st_write_worldbook for creation and updates.',
             'st_write_worldbook is a full-worldbook save and must include a complete `book` object.',
             'For a single new entry, read the target book, merge the entry into entries, then call st_write_worldbook with overwrite=true.',
+            'For existing books, always use read → merge → validate → write;',
+            'never replace unrelated entries or renumber existing uids.',
+            'Each entry should have focused activation key[] values, optional',
+            'keysecondary[] for disambiguation, concise content sized for the',
+            'token budget, and deliberate depth/order/position settings.',
+            'Use constant entries for always-on setting facts; use selective',
+            'entries for names, places, factions, and lore that should activate',
+            'only when keys appear. Validate JSON shape and entries before write.',
             'When building a new world, start with 3–5 foundational entries',
             '(setting, factions, tone) before branching into specifics.',
         ].join('\n'),
@@ -8183,6 +8279,7 @@ const NOVA_SKILLS = [
         id: 'stscript-regex',
         label: 'STscript & Regex',
         icon: '⚙️',
+        description: 'Authors, tests, and packages STscript, Regex extension rules, Macros 2.0 snippets, and Quick Replies.',
         defaultTier: 'write',
         allowTierEscalation: true,
         // Default set is biased toward authoring + testing automation assets.
@@ -8217,6 +8314,8 @@ const NOVA_SKILLS = [
             'length. Scripts can be saved as Quick Replies for one-click use.',
             'Safety: always dry-run with `/echo` before destructive commands;',
             'use `/abort` to bail early on invalid input.',
+            'When packaging a reusable script, provide the Quick Reply name,',
+            'button label, script body, expected input, and expected output.',
             '',
             '## Regex extension',
             'Two scopes: `Global` scripts live in `settings.json` (apply to all',
@@ -8278,17 +8377,21 @@ const NOVA_SKILLS = [
             "  doesn't match the identifier rules (letters, digits, `_`, `-`,",
             '  not ending in `_` or `-`).',
             '- For any tricky pattern, test it with `st_run_slash` using a',
-            '  trivial input before saving. Example:',
+            '  trivial input before saving; this is mandatory before any save.',
+            '  Example:',
             '  `/regex name="foo" silent=true hello world | /echo`.',
             '- Never emit patterns that could catastrophically backtrack',
             '  (nested quantifiers on overlapping classes, e.g. `(a+)+`).',
             '  Prefer anchored and atomic-ish forms.',
+            '- Explain lookarounds, multiline (`m`), dotAll (`s`), unicode (`u`),',
+            '  and escaping choices when they affect correctness.',
         ].join('\n'),
     },
     {
         id: 'image-prompter',
         label: 'Image Prompter',
         icon: '🎨',
+        description: 'Turns the current scene into copy-ready image prompts for SDXL, Flux, Illustrious, anime, realistic, and cinematic modes.',
         defaultTier: 'read',
         allowTierEscalation: true,
         // Read-only by design: prompts are emitted as structured output for the user
@@ -8298,22 +8401,124 @@ const NOVA_SKILLS = [
         defaultTools: ['st_get_context', 'phone_list_npcs'],
         systemPrompt: [
             'You are the Image Prompter skill inside Nova.',
-            'Use st_get_context to read the current RP scene and produce prompts',
+            'First use st_get_context to extract the current scene: subjects,',
+            'relationship, action, location, outfit, mood, lighting, and camera.',
+            'Then produce prompts',
             'for SD / SDXL / Flux / Illustrious. Emit structured output:',
-            '  { positive, negative, sampler_hint, steps_hint, cfg_hint, notes }.',
-            'Support three flavours (user picks):',
+            '  { mode, scene_summary, positive, negative, sampler_hint, steps_hint, cfg_hint, size_hint, notes }.',
+            'Support model families: SDXL, Flux, Illustrious. Support flavours:',
             '  • Anime — booru-tag style, comma-separated, concrete visual tokens.',
             '  • Realistic — natural language + cinematography (lens, light, mood).',
-            '  • Artistic — style tokens + artist references + medium words.',
+            '  • Cinematic / Artistic — style tokens, medium words, composition.',
+            'Use family-appropriate negatives: anatomy/extra limb defects for',
+            'anime and Illustrious; low-quality, text, watermark, bad hands,',
+            'oversharpening, and compression artifacts for realistic/SDXL;',
+            'keep Flux negatives sparse unless the user asks otherwise.',
+            'Include parameter hints: SDXL often 25–35 steps CFG 5–7;',
+            'Flux often lower CFG/guidance; Illustrious accepts booru tags.',
             'Always tie the prompt to the *current* scene: character, outfit,',
             'location, lighting, camera. Never invent details that contradict',
             'the chat context.',
         ].join('\n'),
     },
     {
+        id: 'quest-designer',
+        label: 'Quest Designer',
+        icon: '🧭',
+        description: 'Creates and updates Command-X quest tracker entries from current RP goals and unresolved plot threads.',
+        defaultTier: 'write',
+        allowTierEscalation: true,
+        defaultTools: ['st_get_context', 'phone_list_quests', 'phone_write_quest', 'phone_list_npcs', 'phone_list_messages'],
+        systemPrompt: [
+            'You are the Quest Designer skill inside Nova.',
+            'Use st_get_context and phone_list_quests before changing quests.',
+            'Use phone_write_quest for approved quest creates and updates.',
+            'Create compact, actionable quest entries with title, status,',
+            'priority, objective, next_action, subtasks, involved NPCs, and',
+            'recent evidence from the chat. Preserve manual user edits and',
+            'avoid duplicating existing quests; update an existing quest when',
+            'the new goal is a continuation of it.',
+        ].join('\n'),
+    },
+    {
+        id: 'npc-contact-manager',
+        label: 'NPC / Contact Manager',
+        icon: '🪪',
+        description: 'Maintains Command-X Profiles data and can stage contact messages when explicitly requested.',
+        defaultTier: 'write',
+        allowTierEscalation: true,
+        defaultTools: ['st_get_context', 'phone_list_npcs', 'phone_write_npc', 'phone_list_messages', 'phone_inject_message'],
+        systemPrompt: [
+            'You are the NPC / Contact Manager skill inside Nova.',
+            'Use st_get_context and phone_list_npcs before editing profiles.',
+            'Use phone_write_npc for approved profile updates.',
+            'Maintain concise NPC profile fields: name, emoji, status, mood,',
+            'location, relationship, thoughts, notes, and last-known intent.',
+            'Preserve existing user-authored details. Only use phone_inject_message',
+            'when the user explicitly asks to seed or stage a phone thread.',
+        ].join('\n'),
+    },
+    {
+        id: 'map-location-designer',
+        label: 'Map / Location Designer',
+        icon: '🗺️',
+        description: 'Curates Command-X places and contact-location context for the Map app.',
+        defaultTier: 'write',
+        allowTierEscalation: true,
+        defaultTools: ['st_get_context', 'phone_list_places', 'phone_write_place', 'phone_list_npcs'],
+        systemPrompt: [
+            'You are the Map / Location Designer skill inside Nova.',
+            'Use st_get_context, phone_list_places, and phone_list_npcs before',
+            'editing places. Use phone_write_place for approved place updates.',
+            'Create distinct, reusable places with name, emoji,',
+            'description, occupants, and story relevance. Preserve manually',
+            'placed pins and avoid inventing locations that contradict the scene.',
+        ].join('\n'),
+    },
+    {
+        id: 'lore-auditor',
+        label: 'Lore Auditor',
+        icon: '🔎',
+        description: 'Reads characters, worldbooks, and chat context to find contradictions, stale lore, and continuity gaps.',
+        defaultTier: 'read',
+        allowTierEscalation: true,
+        defaultTools: [
+            'st_get_context', 'st_list_characters', 'st_read_character',
+            'st_list_worldbooks', 'st_read_worldbook', 'fs_list', 'fs_read', 'fs_search',
+        ],
+        systemPrompt: [
+            'You are the Lore Auditor skill inside Nova.',
+            'Read relevant characters, worldbooks, and recent chat context, then',
+            'report contradictions, duplicated facts, stale assumptions, missing',
+            'activation keys, and continuity risks. Do not write changes unless',
+            'the user explicitly asks; prefer a prioritized audit with suggested fixes.',
+        ].join('\n'),
+    },
+    {
+        id: 'prompt-doctor',
+        label: 'Prompt Doctor',
+        icon: '🩺',
+        description: 'Reviews and improves SillyTavern prompts, character instructions, and card text with minimal safe edits.',
+        defaultTier: 'write',
+        allowTierEscalation: true,
+        defaultTools: [
+            'st_get_context', 'st_list_characters', 'st_read_character', 'st_write_character',
+            'fs_list', 'fs_read', 'fs_search', 'fs_write',
+        ],
+        systemPrompt: [
+            'You are the Prompt Doctor skill inside Nova.',
+            'Diagnose prompt and character-card problems: conflicting instructions,',
+            'weak role boundaries, missing scenario hooks, overlong prose, and',
+            'formatting that wastes context. Read before editing, propose the',
+            'smallest safe improvement, preserve the author voice, and never',
+            'overwrite a card or prompt file without an approval diff.',
+        ].join('\n'),
+    },
+    {
         id: 'freeform',
         label: 'Plain helper',
         icon: '✴︎',
+        description: 'General Nova mode with every available tool still gated by permission tier and approvals.',
         defaultTier: 'read',
         allowTierEscalation: true,
         defaultTools: 'all',

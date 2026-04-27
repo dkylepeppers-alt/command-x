@@ -77,6 +77,61 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-27 — Nova skill tool filtering and expanded skills (commit pending)
+
+**Context:** Implemented the Nova skills review recommendations: active-skill
+tool filtering, richer skill picker hints, stronger skill prompts, and five
+additional specialized skills.
+
+**Notes for future agents:**
+- `filterNovaToolsBySkill()` is applied after bridge capability filtering in
+  `novaHandleSend()`. Skill `defaultTools` now controls what schemas the LLM
+  sees; `defaultTools: 'all'` remains the free-form escape hatch.
+- `sendNovaTurn()` passes the same filtered per-turn `tools` array as the
+  dispatch `toolRegistry`; do not switch this back to `NOVA_TOOLS` or a model
+  could execute tools hidden from its active skill.
+- `NOVA_SKILLS` entries now require a `description` for the skill picker, and
+  `SKILLS_VERSION` is pinned by `test/nova-tool-args.test.mjs`; bump it whenever
+  skill prompts/default skill definitions change.
+- Missing bridge-backed tools are surfaced as a skill-specific transcript notice,
+  so changing a skill's `defaultTools` can affect user-facing warnings. The
+  warning is intentionally skipped in text-only fallback mode because all tools
+  are unavailable there for non-bridge reasons.
+
+### 2026-04-27 — Copyable phone transcript text (commit pending)
+
+**Context:** Made Command-X SMS bubbles and Nova transcript/tool text
+selectable/copyable despite the phone shell's global no-select styling.
+
+**Notes for future agents:**
+- `.cx-device` intentionally keeps `user-select: none` to preserve phone-app
+  button/tile feel. Copyable text is enabled by a targeted override block in
+  `style.css` for `.cx-messages`, `.cx-sms*`, `.cx-nova-transcript`,
+  `.cx-nova-msg*`, `.cx-nova-toolcard`, and Nova approval pre blocks.
+- `test/nova-ui-wiring.test.mjs` has a CSS source-contract assertion for that
+  override. If new transcript surfaces are added, include them in the selectable
+  block and update the test.
+
+### 2026-04-27 — Nova preset/profile hardening (commit pending)
+
+**Context:** Tightened the shipped Command-X preset for Nova/tool use and made
+Nova refuse unsafe profile swaps when ST has no active profile to restore.
+
+**Notes for future agents:**
+- `presets/openai/Command-X.json` now sets `function_calling: true` and keeps
+  `custom_prompt_post_processing: ""`; ST's `isToolCallingSupported()` can stay
+  false if the active profile does not persist function calling as enabled.
+- The preset's `[place]` grammar is JSON (`[{"name":...,"occupants":[...]}]`),
+  not a bare place string. Keep prompt docs/tests aligned with the parser's
+  object/array contract.
+- `sendNovaTurn` now aborts with `reason: 'no-active-profile'` before swapping
+  if `/profile` returns empty/None. This is intentional: SillyTavern has no
+  slash command to restore an unsaved "no active profile" settings state, so
+  swapping anyway would leave the user on Nova's profile.
+- In this sandbox, `node --test test/*.mjs` may colorize child `node -e` stdout
+  under a TTY and trip `nova-shell-route.test.mjs`; `NO_COLOR=1 node --test
+  test/*.mjs` validates the same suite cleanly.
+
 ### 2026-04-27 — Swipe regeneration does not advance turn throttle (commit pending)
 
 **Context:** Fixed phone swipe handling so swiping/regenerating a character

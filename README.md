@@ -140,9 +140,9 @@ Before configuring Nova in the phone, make sure your SillyTavern install has the
 
 ### Quick start
 
-1. **Install the chat-completion preset** — Open the ST extensions panel for Command-X Phone, scroll to **✴︎ Nova Agent**, and click **Install Command-X chat-completion preset**. This downloads the bundled `presets/openai/Command-X.json` and also copies the JSON to your clipboard when the browser allows it; import that file through ST's standard Chat Completion preset import button. The preset gives Nova a known-good starting config (`temperature` 0.85, `stream_openai: true`, `names_behavior: 2`, `wi_format` aligned with ST's defaults). Switch the model to whatever provider you use.
-2. **Pick a connection profile** — In ST, create a connection profile that points at a chat-completion source supporting tool calling (OpenAI, Claude, Gemini, OpenRouter, etc.) and apply the preset above. Then in the phone, tap **Settings → NOVA → Connection profile** and enter the profile name.
-3. **Pick a default tier** — `read` (safe, read-only), `write` (adds file and soul/memory writes, approval-gated; ST-native character/worldbook writes currently fall back to bridge `fs_write` hints), or `full` (also enables shell). Start with `read`.
+1. **Install the chat-completion preset** — Open the ST extensions panel for Command-X Phone, scroll to **✴︎ Nova Agent**, and click **Install Command-X chat-completion preset**. This downloads the bundled `presets/openai/Command-X.json` and also copies the JSON to your clipboard when the browser allows it; import that file through ST's standard Chat Completion preset import button. The preset gives Nova a known-good starting config (`temperature` 0.85, `openai_max_tokens: 1200`, `stream_openai: true`, `function_calling: true`, `names_behavior: 2`, `wi_format` aligned with ST's defaults). Switch the model to whatever provider you use.
+2. **Pick a connection profile** — In ST, create a connection profile that points at a chat-completion source supporting tool calling (OpenAI, Claude, Gemini, OpenRouter, etc.) and apply the preset above. Then in the phone, tap **Settings → NOVA → Connection profile** and enter the profile name. Nova now refuses to swap away from an unsaved/no-profile state, because SillyTavern can only restore a named active profile after the turn.
+3. **Pick a default tier** — `read` (safe, read-only), `write` (adds approval-gated ST-native character/worldbook writes plus soul/memory writes; bridge-backed filesystem writes still require the optional plugin), or `full` (also enables shell). Start with `read`.
 4. **(Optional) Install the bridge plugin** — Make sure `enableServerPlugins: true` is set in your ST `config.yaml` (see [SillyTavern prerequisites](#sillytavern-prerequisites) above), drop `server-plugin/nova-agent-bridge/` into your SillyTavern `plugins/` directory, and restart ST to enable filesystem and shell tools. Without it, Nova still works but only with ST-API tools (characters, worldbooks, slash commands, etc.).
 5. **Open the Nova app** in the phone, type a request, and hit send. Reads run silently; writes and shell calls open an approval modal with a diff preview before executing.
 
@@ -169,7 +169,7 @@ Profile is restored; transcript and audit log are persisted per chat
 | Tier | What's allowed | Approval required? |
 |------|----------------|--------------------|
 | `read` | All `*_read` / `*_list` / `*_stat` / `*_search` tools | No |
-| `write` | Read tools + every `*_write` / `*_delete` / `*_move` / soul-and-memory-edit tool. Character/worldbook write schemas are present, but currently return a clear `not-implemented` fallback that points Nova at the bridge `fs_write` workaround. | **Yes**, per call (or once per session if "Remember approvals this session" is on) |
+| `write` | Read tools + every `*_write` / `*_delete` / `*_move` / soul-and-memory-edit tool. Character/worldbook writes use ST-native APIs; bridge-backed filesystem writes remain optional and require `nova-agent-bridge`. | **Yes**, per call (or once per session if "Remember approvals this session" is on) |
 | `full` | Write tools + `shell_run` (only commands on the bridge's allow-list) | **Yes**, per call |
 
 Toggle **Settings → NOVA → Remember approvals (this session)** to skip the modal for tools you've already approved during this browser session. Reloading the page clears the list.
@@ -210,7 +210,7 @@ For the full status / remaining-work list, see [`docs/nova-agent-plan.md`](docs/
 
 ## Chat-Completion Preset
 
-Command-X ships a chat-completion preset at `presets/openai/Command-X.json` that's tuned for Nova: sensible defaults for `temperature`, `frequency_penalty`, `presence_penalty`, `stream_openai`, `wi_format`, `scenario_format`, and `names_behavior`. The shape is OpenAI-style but provider-agnostic — clone it, change `chat_completion_source` and the corresponding `*_model` field, and you're set up for Claude, Gemini, OpenRouter, etc.
+Command-X ships a chat-completion preset at `presets/openai/Command-X.json` that's tuned for Nova: sensible defaults for `temperature`, `frequency_penalty`, `presence_penalty`, `stream_openai`, `function_calling`, `custom_prompt_post_processing`, `wi_format`, `scenario_format`, and `names_behavior`. The shape is OpenAI-style but provider-agnostic — clone it, change `chat_completion_source` and the corresponding `*_model` field, and you're set up for Claude, Gemini, OpenRouter, etc.
 
 To install:
 - **From the extension settings** — Click **Install Command-X chat-completion preset**. This best-effort path downloads `Command-X.json`, copies the JSON to your clipboard when possible, also logs it to DevTools for users who have console access (optional fallback only), and then shows import instructions.

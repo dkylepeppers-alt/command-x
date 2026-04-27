@@ -139,6 +139,9 @@ async function getActiveNovaProfile({ executeSlash }) {
         return parseNovaProfilePipe(res && res.pipe);
     } catch (_) { return ''; }
 }
+function quoteNovaSlashArg(value) {
+    return `"${String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
 
 // `sendNovaTurn` needs the module-level `novaTurnInFlight` /
 // `novaAbortController` bindings, so we wrap it in a capsule closure
@@ -208,8 +211,21 @@ function makeTurnCapsule() {
             if (typeof executeSlash === 'function') {
                 swappedFrom = await getActiveNovaProfile({ executeSlash });
                 if (swappedFrom !== targetProfile) {
+                    if (!swappedFrom) {
+                        appendNovaAuditLog(state, {
+                            tool: 'profile-swap',
+                            argsSummary: `to=${targetProfile}`,
+                            outcome: 'refused-no-active-profile',
+                        });
+                        saveNovaState(ctx);
+                        return {
+                            ok: false,
+                            reason: 'no-active-profile',
+                            error: 'Nova requires an active restorable connection profile before switching.',
+                        };
+                    }
                     try {
-                        await executeSlash(`/profile ${targetProfile}`);
+                        await executeSlash(`/profile ${quoteNovaSlashArg(targetProfile)}`);
                         swapPerformed = true;
                     } catch (err) {
                         appendNovaAuditLog(state, {
@@ -278,7 +294,7 @@ function makeTurnCapsule() {
             }
             if (swapPerformed && typeof executeSlash === 'function') {
                 try {
-                    if (swappedFrom) await executeSlash(`/profile ${swappedFrom}`);
+                    if (swappedFrom) await executeSlash(`/profile ${quoteNovaSlashArg(swappedFrom)}`);
                 } catch (err) {
                     appendNovaAuditLog(state, {
                         tool: 'profile-restore',
@@ -326,7 +342,11 @@ function makeSlashMock({ initialProfile = 'old-profile', failSwap = false, failR
         const m = cmd.match(/^\/profile(?:\s+(.+))?$/);
         if (m) {
             if (!m[1]) return { pipe: current };
-            const target = m[1].trim();
+            const rawTarget = m[1].trim();
+            let target = rawTarget;
+            if (rawTarget.startsWith('"')) {
+                try { target = JSON.parse(rawTarget); } catch (_) { target = rawTarget; }
+            }
             // `failRestore` should only fail the *restore* step, not the
             // initial swap to Nova — otherwise the turn bails at step 3
             // and the `finally` restore never runs. We detect the restore
@@ -449,8 +469,26 @@ describe('sendNovaTurn — profile snapshot / swap / restore', () => {
         assert.equal(res.ok, true);
         assert.deepEqual(res.swappedProfile, { from: 'user-profile', to: 'nova-profile' });
         // Expected sequence: query → swap to nova → swap back to user
-        assert.deepEqual(slash.calls, ['/profile', '/profile nova-profile', '/profile user-profile']);
+        assert.deepEqual(slash.calls, ['/profile', '/profile "nova-profile"', '/profile "user-profile"']);
         assert.equal(slash.getCurrent(), 'user-profile');
+    });
+
+    it('quotes profile names so spaces and quotes survive slash parsing', async () => {
+        const { sendNovaTurn } = makeTurnCapsule();
+        const slash = makeSlashMock({ initialProfile: 'user profile "A"' });
+        const res = await sendNovaTurn({
+            ctx: makeCtx(), userText: 'hi', profileName: 'Command-X Nova',
+            sendRequest: async () => ({ content: 'ok' }),
+            executeSlash: slash.exec,
+        });
+        assert.equal(res.ok, true);
+        assert.deepEqual(res.swappedProfile, { from: 'user profile "A"', to: 'Command-X Nova' });
+        assert.deepEqual(slash.calls, [
+            '/profile',
+            '/profile "Command-X Nova"',
+            '/profile "user profile \\"A\\""',
+        ]);
+        assert.equal(slash.getCurrent(), 'user profile "A"');
     });
 
     it('skips swap when already on target profile', async () => {
@@ -482,7 +520,7 @@ describe('sendNovaTurn — profile snapshot / swap / restore', () => {
         // Profile must be back to user-profile.
         assert.equal(slash.getCurrent(), 'user-profile');
         // Restore call must have fired.
-        assert.ok(slash.calls.includes('/profile user-profile'));
+        assert.ok(slash.calls.includes('/profile "user-profile"'));
         // Turn state fully cleared.
         assert.deepEqual(snapshot(), { inFlight: false, hasAbort: false, registryVersion: 0 });
         // Audit log captured the failure.
@@ -502,11 +540,29 @@ describe('sendNovaTurn — profile snapshot / swap / restore', () => {
         assert.equal(res.ok, false);
         assert.equal(res.reason, 'profile-swap-failed');
         // Only snapshot + failed swap attempt — no restore because no swap was performed.
-        assert.deepEqual(slash.calls, ['/profile', '/profile nova-profile']);
+        assert.deepEqual(slash.calls, ['/profile', '/profile "nova-profile"']);
         assert.deepEqual(snapshot(), { inFlight: false, hasAbort: false, registryVersion: 0 });
         // Audit log recorded the swap failure.
         const state = getNovaState(ctx);
         assert.ok(state.auditLog.some(e => e.tool === 'profile-swap' && e.outcome.startsWith('error:')));
+    });
+
+    it('refuses to swap when there is no active profile to restore', async () => {
+        const { sendNovaTurn, snapshot } = makeTurnCapsule();
+        const slash = makeSlashMock({ initialProfile: '' });
+        const ctx = makeCtx();
+        const res = await sendNovaTurn({
+            ctx, userText: 'hi', profileName: 'nova-profile',
+            sendRequest: async () => ({ content: 'ok' }),
+            executeSlash: slash.exec,
+        });
+        assert.equal(res.ok, false);
+        assert.equal(res.reason, 'no-active-profile');
+        assert.deepEqual(slash.calls, ['/profile']);
+        assert.equal(slash.getCurrent(), '');
+        assert.deepEqual(snapshot(), { inFlight: false, hasAbort: false, registryVersion: 0 });
+        const state = getNovaState(ctx);
+        assert.ok(state.auditLog.some(e => e.tool === 'profile-swap' && e.outcome === 'refused-no-active-profile'));
     });
 
     it('logs (and swallows) a restore failure rather than masking the happy-path result', async () => {

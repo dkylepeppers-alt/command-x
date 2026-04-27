@@ -15,8 +15,10 @@ the **AI Response Configuration → Chat Completion presets** panel.
 | `top_p` | `1` | Let temperature do the work; `top_p` clamps become redundant. |
 | `frequency_penalty` / `presence_penalty` | `0.1` | Mild anti-repetition; stays out of the tag grammar's way. |
 | `openai_max_context` | `32768` | Comfortable for ongoing RPs with world-info + phone state. |
-| `openai_max_tokens` | `800` | Keeps replies beat-sized; phone bubbles stay short. |
+| `openai_max_tokens` | `1200` | Leaves headroom for concise RP prose plus side-channel tags or Nova tool-call setup. |
 | `stream_openai` | `true` | Visible typing + early cancel. |
+| `function_calling` | `true` | Required for Nova's tool schemas; ST's `isToolCallingSupported()` stays false without this enabled in the active profile. |
+| `custom_prompt_post_processing` | `""` | Keeps tool calls intact; avoid "no tools" post-processing modes for Nova profiles. |
 | `names_behavior` | `2` (completion names) | Preserves `{{char}}` / `{{user}}` attribution across turns. |
 | `wi_format` | `{0}` | Raw WI inserts, no wrapper framing — matches upstream default. |
 | `scenario_format` / `personality_format` | `{{scenario}}` / `{{personality}}` | Bare template expansions — matches upstream default so community cards render identically. |
@@ -29,7 +31,8 @@ model fields, every marker prompt, both `prompt_order` entries for
 `character_id: 100000` single-character default and `100001` group/global
 default, plus `seed`, `n`, `use_sysprompt`, `assistant_prefill`,
 `squash_system_messages`, `continue_prefill`, `continue_postfix`,
-`media_inlining`, `show_external_models`, `max_context_unlocked`,
+`function_calling`, `custom_prompt_post_processing`, `media_inlining`,
+`show_external_models`, `max_context_unlocked`,
 `reverse_proxy`, `proxy_password`, `bias_preset_selected`). Only the Command-X
 tuning knobs (temperature, penalties, context/tokens, `names_behavior`) and the
 Main Prompt body diverge from upstream.
@@ -41,11 +44,14 @@ The Main Prompt teaches the model Command-X's tag grammar:
 - `[sms from="Name" to="user"]…[/sms]` — phone texts
 - `[status][{ … }][/status]` — NPC contact cards
 - `[quests][{ … }][/quests]` — quest tracker updates
-- `[place]…[/place]` — current location
+- `[place][{ … }][/place]` — place registration / current occupants
 
 It explicitly tells the model: **emit tags only when warranted, never narrate
-them, never markdown-fence them, never explain them.** Multiple `[sms]` blocks
-per reply are allowed (different senders / beats).
+them, never markdown-fence them, never explain them, and keep JSON compact and
+valid.** Multiple `[sms]` blocks per reply are allowed (different senders /
+beats). The prompt also separates RP side-channel tags from Nova's dedicated
+tool schemas so models don't try to express tool calls as `[sms]` / `[status]`
+data.
 
 ## Marker prompts
 

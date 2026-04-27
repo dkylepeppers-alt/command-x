@@ -460,6 +460,33 @@ describe('runNovaToolDispatch — gate denies', () => {
         assert.equal(JSON.parse(denied.content).error, 'unknown-tool');
     });
 
+    it('denies tools outside the per-turn registry even when a handler exists', async () => {
+        let ranForbiddenHandler = false;
+        const handlers = {
+            fs_write: async () => {
+                ranForbiddenHandler = true;
+                return 'should-not-run';
+            },
+        };
+        const followups = [{ content: 'done' }];
+        const sendRequest = async () => followups.shift();
+        const messages = [{ role: 'system', content: 's' }];
+        const res = await runNovaToolDispatch({
+            initialResponse: { content: '', tool_calls: [makeCall('c1', 'fs_write', { path: 'x', content: 'y' })] },
+            messages,
+            toolRegistry: TOOL_REGISTRY.filter(t => t.name !== 'fs_write'),
+            handlers,
+            tier: 'full',
+            confirmApproval: async () => true,
+            sendRequest,
+        });
+        assert.equal(res.ok, true);
+        assert.equal(res.toolsDenied, 1);
+        assert.equal(ranForbiddenHandler, false);
+        const denied = res.events.find(e => e.role === 'tool' && e.name === 'fs_write');
+        assert.equal(JSON.parse(denied.content).error, 'unknown-tool');
+    });
+
     it('denies malformed-arguments', async () => {
         const handlers = { st_get_context: async () => 'ok' };
         const followups = [{ content: 'done' }];
@@ -694,5 +721,7 @@ describe('index.js source shape', () => {
         assert.match(block, /rememberedApprovals\s*=/);
         assert.match(block, /toolHandlers\s*=/);
         assert.match(block, /confirmApproval\s*=/);
+        assert.match(js, /toolRegistry:\s*tools/,
+            'sendNovaTurn must pass per-turn filtered tools as the dispatcher registry');
     });
 });

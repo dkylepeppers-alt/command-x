@@ -253,6 +253,8 @@ test('Tool capability filter gates the NOVA_TOOLS registry per turn (plan §4f)'
     // The filtered output must be what gets passed as `tools:`.
     assert.match(novaHandleSend[0], /tools:\s*effectiveTools/,
         'sendNovaTurn must receive the filtered tool list (effectiveTools)');
+    assert.match(novaHandleSend[0], /if\s*\(\s*!textOnlyFallback\s*\)\s*\{[\s\S]*listUnavailableNovaSkillTools/,
+        'skill missing-tool warnings must be skipped in text-only fallback mode');
     // A transcript notice must be emitted when bridge is absent.
     assert.match(novaHandleSend[0], /Nova bridge plugin not detected/,
         'novaHandleSend must warn the user when the bridge is missing');
@@ -308,6 +310,26 @@ test('style.css includes Nova message bubble + picker-modal classes', async () =
     ]) {
         assert.ok(css.includes(cls), `style.css missing ${cls}`);
     }
+});
+
+test('style.css keeps Command-X and Nova transcript text selectable', async () => {
+    const { css } = await loadSources();
+    const selectableBlock = css.match(/\.cx-messages,[\s\S]*?-webkit-touch-callout:\s*default;[\s\S]*?\}/);
+    assert.ok(selectableBlock, 'selectable text override block not found');
+    const block = selectableBlock[0];
+    for (const selector of [
+        '.cx-messages',
+        '.cx-sms',
+        '.cx-sms-body',
+        '.cx-nova-transcript',
+        '.cx-nova-msg',
+        '.cx-nova-msg-body',
+        '.cx-nova-toolcard',
+    ]) {
+        assert.ok(block.includes(selector), `selectable block missing ${selector}`);
+    }
+    assert.match(block, /user-select:\s*text/, 'selectable block must override phone shell user-select:none');
+    assert.match(block, /-webkit-user-select:\s*text/, 'selectable block must support WebKit selection');
 });
 
 test('Nova transcript renderer handles the documented roles', async () => {
