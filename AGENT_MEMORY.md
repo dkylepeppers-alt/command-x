@@ -77,6 +77,26 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-27 — Nova preset/profile hardening (commit pending)
+
+**Context:** Tightened the shipped Command-X preset for Nova/tool use and made
+Nova refuse unsafe profile swaps when ST has no active profile to restore.
+
+**Notes for future agents:**
+- `presets/openai/Command-X.json` now sets `function_calling: true` and keeps
+  `custom_prompt_post_processing: ""`; ST's `isToolCallingSupported()` can stay
+  false if the active profile does not persist function calling as enabled.
+- The preset's `[place]` grammar is JSON (`[{"name":...,"occupants":[...]}]`),
+  not a bare place string. Keep prompt docs/tests aligned with the parser's
+  object/array contract.
+- `sendNovaTurn` now aborts with `reason: 'no-active-profile'` before swapping
+  if `/profile` returns empty/None. This is intentional: SillyTavern has no
+  slash command to restore an unsaved "no active profile" settings state, so
+  swapping anyway would leave the user on Nova's profile.
+- In this sandbox, `node --test test/*.mjs` may colorize child `node -e` stdout
+  under a TTY and trip `nova-shell-route.test.mjs`; `NO_COLOR=1 node --test
+  test/*.mjs` validates the same suite cleanly.
+
 ### 2026-04-27 — Swipe regeneration does not advance turn throttle (commit pending)
 
 **Context:** Fixed phone swipe handling so swiping/regenerating a character
