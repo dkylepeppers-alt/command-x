@@ -1393,6 +1393,11 @@ function consumePendingSwipeRegeneration(mesId) {
     return true;
 }
 
+function clearPendingSwipeRegeneration(mesId) {
+    const id = normalizeSwipeMesId(mesId);
+    if (id != null) _pendingSwipeRegenerations.delete(id);
+}
+
 function applyInjectionThrottle() {
     _turnCounter += 1;
     const contactsN = Math.max(1, Number(settings.contactsInjectEveryN) || 1);
@@ -5712,7 +5717,7 @@ function wireEventListeners() {
             removeMessagesForMesId(deletedId);
             removePrivatePhoneEventsForMesId(deletedId);
             removeTrailForMesId(deletedId);
-            _pendingSwipeRegenerations.delete(deletedId);
+            clearPendingSwipeRegeneration(deletedId);
             const area = phoneContainer?.querySelector('#cx-msg-area');
             if (area && currentContactName) {
                 renderAllBubbles(area, currentContactName, false);
