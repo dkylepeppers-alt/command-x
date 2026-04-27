@@ -77,6 +77,20 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-27 — Copyable phone transcript text (commit pending)
+
+**Context:** Made Command-X SMS bubbles and Nova transcript/tool text
+selectable/copyable despite the phone shell's global no-select styling.
+
+**Notes for future agents:**
+- `.cx-device` intentionally keeps `user-select: none` to preserve phone-app
+  button/tile feel. Copyable text is enabled by a targeted override block in
+  `style.css` for `.cx-messages`, `.cx-sms*`, `.cx-nova-transcript`,
+  `.cx-nova-msg*`, `.cx-nova-toolcard`, and Nova approval pre blocks.
+- `test/nova-ui-wiring.test.mjs` has a CSS source-contract assertion for that
+  override. If new transcript surfaces are added, include them in the selectable
+  block and update the test.
+
 ### 2026-04-27 — Nova preset/profile hardening (commit pending)
 
 **Context:** Tightened the shipped Command-X preset for Nova/tool use and made
