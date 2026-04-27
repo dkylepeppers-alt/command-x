@@ -229,6 +229,8 @@ describe('NOVA_SKILLS — structural invariants', () => {
     });
 
     it('skill prompts include the current safety and quality requirements', () => {
+        // Intentional source-contract test: these prompt phrases are brittle by
+        // design so a future semantic rewrite forces a conscious test update.
         const byId = Object.fromEntries(NOVA_SKILLS.map(s => [s.id, s.systemPrompt]));
         const requirements = {
             'character-creator': ['st_list_characters', 'alternate greetings', 'mes_example', 'avatar_prompt', 'duplicate'],

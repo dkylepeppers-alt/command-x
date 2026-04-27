@@ -4665,11 +4665,10 @@ async function novaPickSkill() {
     const options = NOVA_SKILLS.map(s => ({
         value: s.id,
         label: `${s.icon} ${s.label}`,
-        hint: [
-            s.description || '',
+        hint: (s.description ? [s.description] : []).concat([
             `Default tier: ${_novaTierLabel(s.defaultTier)}`,
             `Tools: ${summariseNovaSkillTools(s)}`,
-        ].filter(Boolean).join('\n'),
+        ]).join('\n'),
     }));
     const chosen = await cxPickList('Skill', options, {
         initial: settings.nova?.activeSkill || 'freeform',
@@ -6147,7 +6146,7 @@ function _novaSkillDefaultToolNames(skill) {
     if (!Array.isArray(skill.defaultTools)) return [];
     return skill.defaultTools
         .map(name => String(name || '').trim())
-        .filter(name => name && NOVA_TOOL_NAMES.has(name));
+        .filter(Boolean);
 }
 
 function filterNovaToolsBySkill({ tools, skill } = {}) {
@@ -6166,11 +6165,12 @@ function listUnavailableNovaSkillTools({ tools, skill } = {}) {
 }
 
 function summariseNovaSkillTools(skill) {
+    const MAX_SUMMARISED_SKILL_TOOLS = 6;
     const names = _novaSkillDefaultToolNames(skill);
     if (!names) return 'all tools allowed by the active permission tier';
     if (!names.length) return 'none';
-    if (names.length <= 6) return names.join(', ');
-    return `${names.slice(0, 6).join(', ')} +${names.length - 6} more`;
+    if (names.length <= MAX_SUMMARISED_SKILL_TOOLS) return names.join(', ');
+    return `${names.slice(0, MAX_SUMMARISED_SKILL_TOOLS).join(', ')} +${names.length - MAX_SUMMARISED_SKILL_TOOLS} more`;
 }
 
 async function probeNovaBridge({
@@ -7811,7 +7811,7 @@ async function sendNovaTurn({
    skill default-tool lists.
    ---------------------------------------------------------------------- */
 
-const SKILLS_VERSION = 3; // bump when any skill prompt changes; v3 expands tool-scoped skills
+const SKILLS_VERSION = 3; // bump when any skill prompt, defaultTools, or defaultTier changes; v3 expands tool-scoped skills
 
 const NOVA_TOOLS = [
     // === 4a. Filesystem (plugin-backed) ===
