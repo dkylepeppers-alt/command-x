@@ -648,7 +648,7 @@ function saveQuests(quests) {
     catch (e) { console.warn('[command-x] quest store save', e); }
 }
 
-function normalizeQuestSubtaskTextKey(value) {
+function questSubtaskMatchKey(value) {
     return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
@@ -663,7 +663,7 @@ function sanitizeQuestSubtasks(value, existing = []) {
     for (const item of Array.isArray(existing) ? existing : []) {
         if (!item || typeof item !== 'object') continue;
         const id = String(item.id || '').trim();
-        const textKey = normalizeQuestSubtaskTextKey(item.text || item.title || item);
+        const textKey = questSubtaskMatchKey(item.text || item.title || item);
         if (id) existingById.set(id, item);
         if (textKey && !existingByText.has(textKey)) existingByText.set(textKey, item);
     }
@@ -674,7 +674,7 @@ function sanitizeQuestSubtasks(value, existing = []) {
     })).filter(item => item.text).map(({ raw, text, index }) => {
         const incomingId = String(raw?.id || '').trim();
         const matched = (incomingId && existingById.get(incomingId))
-            || existingByText.get(normalizeQuestSubtaskTextKey(text))
+            || existingByText.get(questSubtaskMatchKey(text))
             || existing?.[index]
             || null;
         const hasDone = raw && typeof raw === 'object' && Object.prototype.hasOwnProperty.call(raw, 'done');
@@ -1292,7 +1292,7 @@ function getContactCurrentPlaceId(contactName) {
     return trail.length ? trail[trail.length - 1].placeId : null;
 }
 
-function isUserPersonaName(name) {
+function matchesUserPersona(name) {
     const key = normalizeContactName(name);
     if (!key) return false;
     const ctx = getContext();
@@ -1389,7 +1389,7 @@ function applyContactPlaces(contacts, mesId) {
             place = clean;
             placesChanged = true;
         }
-        if (isUserPersonaName(c.name)) {
+        if (matchesUserPersona(c.name)) {
             if (updateUserPersonaPlace(place)) trailChanged = true;
             continue;
         }
@@ -3773,7 +3773,8 @@ function sendPhoneMessage() {
     const area = phoneContainer?.querySelector('#cx-msg-area');
     const rawText = input?.value?.trim() || '';
     const attachment = normalizeSmsAttachment(pendingSmsAttachment);
-    if ((!rawText && !attachment) || !area || !currentContactName) return;
+    if (!area || !currentContactName) return;
+    if (!rawText && !attachment) return;
     if (attachment && neuralMode) {
         cxAlert('Photo attachments can only be sent as normal SMS. Turn off neural mode first.', 'SMS Photo');
         return;
@@ -3784,8 +3785,10 @@ function sendPhoneMessage() {
     // Determine command type: from drawer mode or legacy {{CMD}} syntax
     const CMD_RE = /\{\{(COMMAND|FORGET|BELIEVE|COMPEL)\}\}\s*\{\{(.+?)\}\}/i;
     let cmdType = commandMode; // from drawer (null if no mode active)
-    let displayText = rawText || (attachment ? 'Photo' : '');
-    let chatText = rawText || (attachment ? '[photo]' : '');
+    const displayFallback = attachment ? 'Photo' : '';
+    const chatFallback = attachment ? '[photo]' : '';
+    let displayText = rawText || displayFallback;
+    let chatText = rawText || chatFallback;
     const legacyMatch = CMD_RE.exec(rawText);
 
     if (legacyMatch) {
@@ -3911,7 +3914,9 @@ function triggerSmsImagePicker() {
         try {
             const dataUrl = await safeDataUrlFromFile(file, MAX_SMS_IMAGE_WIDTH, 0.82);
             if (dataUrl.length > MAX_SMS_ATTACHMENT_DATA_URL_SIZE) {
-                throw new Error('Compressed image is still too large for SMS storage. Please choose a smaller image.');
+                const actualKb = Math.round(dataUrl.length / 1024);
+                const limitKb = Math.round(MAX_SMS_ATTACHMENT_DATA_URL_SIZE / 1024);
+                throw new Error(`Compressed image (${actualKb} KB) exceeds the ${limitKb} KB SMS limit. Please choose a smaller image.`);
             }
             pendingSmsAttachment = {
                 type: 'image',
