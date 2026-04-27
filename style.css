@@ -616,6 +616,24 @@
     display: block;
 }
 
+.cx-messages,
+.cx-sms,
+.cx-sms-body,
+.cx-sms-ts,
+.cx-chat-hint,
+.cx-private-status,
+.cx-nova-transcript,
+.cx-nova-empty,
+.cx-nova-msg,
+.cx-nova-msg-body,
+.cx-nova-toolcard,
+.cx-nova-approval-args,
+.cx-nova-approval-diff {
+    user-select: text;
+    -webkit-user-select: text;
+    -webkit-touch-callout: default;
+}
+
 .cx-sms-ts {
     display: block;
     font-size: 9px;

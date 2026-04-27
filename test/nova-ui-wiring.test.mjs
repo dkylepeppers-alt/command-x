@@ -310,6 +310,26 @@ test('style.css includes Nova message bubble + picker-modal classes', async () =
     }
 });
 
+test('style.css keeps Command-X and Nova transcript text selectable', async () => {
+    const { css } = await loadSources();
+    const selectableBlock = css.match(/\.cx-messages,[\s\S]*?-webkit-touch-callout:\s*default;[\s\S]*?\}/);
+    assert.ok(selectableBlock, 'selectable text override block not found');
+    const block = selectableBlock[0];
+    for (const selector of [
+        '.cx-messages',
+        '.cx-sms',
+        '.cx-sms-body',
+        '.cx-nova-transcript',
+        '.cx-nova-msg',
+        '.cx-nova-msg-body',
+        '.cx-nova-toolcard',
+    ]) {
+        assert.ok(block.includes(selector), `selectable block missing ${selector}`);
+    }
+    assert.match(block, /user-select:\s*text/, 'selectable block must override phone shell user-select:none');
+    assert.match(block, /-webkit-user-select:\s*text/, 'selectable block must support WebKit selection');
+});
+
 test('Nova transcript renderer handles the documented roles', async () => {
     const { js } = await loadSources();
     const fn = js.match(/function _novaRenderMessageNode\([\s\S]*?\n\}/);
