@@ -50,6 +50,7 @@ const TOAST_DURATION_MS = 4_000;            // toast auto-dismiss duration
 const MAX_SUMMARISED_SKILL_TOOLS = 6;       // max tool names shown in skill picker
 const MAX_SMS_IMAGE_WIDTH = 768;             // max downscaled width for SMS image attachments
 const MAX_SMS_ATTACHMENT_DATA_URL_SIZE = 512 * 1024; // cap stored SMS image data URLs
+const SMS_IMAGE_DATA_URL_RE = /^data:image\/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=]+$/i;
 
 /**
  * Depth values passed to `setExtensionPrompt` (`extension_prompt_types.IN_CHAT`).
@@ -648,7 +649,7 @@ function saveQuests(quests) {
     catch (e) { console.warn('[command-x] quest store save', e); }
 }
 
-function questSubtaskMatchKey(value) {
+function normalizeQuestSubtaskText(value) {
     return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
@@ -663,18 +664,16 @@ function sanitizeQuestSubtasks(value, existing = []) {
     for (const item of Array.isArray(existing) ? existing : []) {
         if (!item || typeof item !== 'object') continue;
         const id = String(item.id || '').trim();
-        const textKey = questSubtaskMatchKey(item.text || item.title || item);
+        const textKey = normalizeQuestSubtaskText(item.text || item.title || item);
         if (id) existingById.set(id, item);
         if (textKey && !existingByText.has(textKey)) existingByText.set(textKey, item);
     }
-    return list.map((item, index) => ({
-        raw: item,
-        text: String(item?.text || item?.title || item || '').trim(),
-        index,
-    })).filter(item => item.text).map(({ raw, text, index }) => {
+    return list.map((raw, index) => {
+        const text = String(raw?.text || raw?.title || raw || '').trim();
+        if (!text) return null;
         const incomingId = String(raw?.id || '').trim();
         const matched = (incomingId && existingById.get(incomingId))
-            || existingByText.get(questSubtaskMatchKey(text))
+            || existingByText.get(normalizeQuestSubtaskText(text))
             || existing?.[index]
             || null;
         const hasDone = raw && typeof raw === 'object' && Object.prototype.hasOwnProperty.call(raw, 'done');
@@ -683,7 +682,7 @@ function sanitizeQuestSubtasks(value, existing = []) {
             text,
             done: hasDone ? !!raw.done : !!matched?.done,
         };
-    });
+    }).filter(Boolean);
 }
 
 function sanitizeQuestValue(field, value, existing = null) {
@@ -1292,11 +1291,9 @@ function getContactCurrentPlaceId(contactName) {
     return trail.length ? trail[trail.length - 1].placeId : null;
 }
 
-function matchesUserPersona(name) {
+function matchesUserPersona(name, userKey = normalizeContactName(getContext().name1 || '')) {
     const key = normalizeContactName(name);
     if (!key) return false;
-    const ctx = getContext();
-    const userKey = normalizeContactName(ctx.name1 || '');
     return key === 'user' || key === 'me' || key === 'you' || (!!userKey && key === userKey);
 }
 
@@ -1378,6 +1375,7 @@ function applyContactPlaces(contacts, mesId) {
     let placesChanged = false;
     let trailChanged = false;
     const stored = loadPlaces();
+    const userKey = normalizeContactName(getContext().name1 || '');
     for (const c of contacts) {
         if (!c.place) continue;
         let place = findPlaceByNameOrAlias(c.place, stored);
@@ -1389,8 +1387,10 @@ function applyContactPlaces(contacts, mesId) {
             place = clean;
             placesChanged = true;
         }
-        if (matchesUserPersona(c.name)) {
+        if (matchesUserPersona(c.name, userKey)) {
             if (updateUserPersonaPlace(place)) trailChanged = true;
+            // The user's persona is rendered via map metadata (`userPin` /
+            // `userPlaceId`) rather than the contact trail system.
             continue;
         }
         if (pushLocationTrail(c.name, place.id, mesId)) trailChanged = true;
@@ -2031,7 +2031,7 @@ function saveMessages(contactName, msgs) {
 function normalizeSmsAttachment(attachment) {
     if (!attachment || typeof attachment !== 'object') return null;
     const dataUrl = typeof attachment.dataUrl === 'string' ? attachment.dataUrl : '';
-    if (!dataUrl.startsWith('data:image/')) return null;
+    if (!SMS_IMAGE_DATA_URL_RE.test(dataUrl)) return null;
     if (dataUrl.length > MAX_SMS_ATTACHMENT_DATA_URL_SIZE) return null;
     return {
         type: 'image',
@@ -3191,9 +3191,10 @@ function contactRowHTML(c, i, app) {
     const msgs = loadMessages(c.name);
     const last = msgs.length ? msgs[msgs.length - 1] : null;
     const attachmentLabel = last?.attachment ? smsAttachmentLabel(last.attachment) : '';
+    const lastMessageText = last?.text || '';
     const lastText = attachmentLabel
-        ? [attachmentLabel, last?.text].filter(Boolean).join(' · ')
-        : last?.text;
+        ? [attachmentLabel, lastMessageText].filter(Boolean).join(' · ')
+        : lastMessageText;
     const preview = last ? (last.type.startsWith('sent') ? `You: ${lastText}` : lastText) : 'Tap to chat';
     const previewTrunc = preview.length > 38 ? preview.slice(0, 38) + '…' : preview;
     const npcBadge = c.isNpc ? '<span class="cx-npc-badge">NPC</span>' : '';
@@ -3776,7 +3777,7 @@ function sendPhoneMessage() {
     if (!area || !currentContactName) return;
     if (!rawText && !attachment) return;
     if (attachment && neuralMode) {
-        cxAlert('Photo attachments can only be sent as normal SMS. Turn off neural mode first.', 'SMS Photo');
+        cxAlert('Photo attachments can only be sent as normal SMS because neural commands do not produce phone replies. Turn off neural mode to send a photo.', 'SMS Photo');
         return;
     }
 
@@ -3912,6 +3913,10 @@ function triggerSmsImagePicker() {
         const file = input.files?.[0];
         if (!file) { input.remove(); return; }
         try {
+            if (Number.isFinite(file.size) && file.size > MAX_AVATAR_FILE_BYTES) {
+                const mb = (MAX_AVATAR_FILE_BYTES / (1024 * 1024)).toFixed(0);
+                throw new Error(`Image is too large (over ${mb} MB). Please choose a smaller file.`);
+            }
             const dataUrl = await safeDataUrlFromFile(file, MAX_SMS_IMAGE_WIDTH, 0.82);
             if (dataUrl.length > MAX_SMS_ATTACHMENT_DATA_URL_SIZE) {
                 const actualKb = Math.round(dataUrl.length / 1024);
