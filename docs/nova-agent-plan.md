@@ -27,6 +27,21 @@ bottom.
 > §10 starter-file auto-creation (depends on the open question of
 > whether to support no-bridge writes), and the §14 manual-validation
 > walk-through (permanent user checklist, never agent-ticked).
+>
+> **2026-04-26 — ST-native write handlers wired.** `st_write_character`
+> now creates through `/api/characters/create` and updates through
+> `/api/characters/merge-attributes`; `st_write_worldbook` now saves full
+> books through `/api/worldinfo/edit`, with `/api/worldinfo/list` used for
+> overwrite checks. `st_list_worldbooks` and `st_read_worldbook` prefer the
+> native worldinfo endpoints and keep the slash-command fallback for older
+> builds.
+>
+> **2026-04-26 — manual context clear + character tool hardening.** The Nova
+> composer now has a **Clear** control that wipes the active session messages
+> and tool-call history for the current chat while preserving audit entries.
+> `st_write_character` now accepts either a complete nested `card` object or
+> top-level character fields, so models that fail to emit nested JSON can still
+> create cards through the ST API.
 
 Rewrite target: replace the `openclaw` app with **Nova**, an interactive
 tool-calling agent inside the Command-X phone. Nova has full read/write access
@@ -137,7 +152,7 @@ Chat-style agent transcript. Layout (top → bottom):
   status, duration, result preview, Approve/Reject when pending).
   *(Scaffolding: empty-state panel + `aria-live="polite"` region. Bubble /
   tool-card rendering ships in Phase 3.)*
-- [x] **Composer** — textarea, Send, Cancel (while in flight), "+" sheet with
+- [x] **Composer** — textarea, Send, Cancel (while in flight), manual Clear context button, "+" sheet with
   skill picker, tier selector, "Attach current chat context" toggle,
   "Clear transcript"/"New session".
   *(Scaffolding: textarea + Send (disabled) + Cancel (hidden) only. "+" sheet
@@ -160,6 +175,10 @@ Chat-style agent transcript. Layout (top → bottom):
     (later still still) for the full design rationale.
 - [x] Back button exits Nova; transcript is persisted.
   *(Nav footer returns to home. Transcript persistence is Phase 3.)*
+- [x] Manual context clear.
+  *(Shipped as `#cx-nova-clear` in the composer. It confirms with the user,
+  clears active-session `messages` and `toolCalls`, saves Nova state, and
+  keeps the audit log.)*
 
 ### 2c. Modals / sheets
 - [x] `cxConfirm`-based approval modal for any Write/Full tool call, with
@@ -393,13 +412,26 @@ own plugin folder by default.
 
 ### 4d. SillyTavern API tools (no plugin)
 - [x] `st_list_characters`, `st_read_character` — schemas + handlers shipped (read `ctx.characters`).
-- [x] `st_write_character` — schema shipped; handler returns closed-enum `{ error: 'not-implemented', hint }` pointing to `fs_write` at the character JSON path. **Deferred until the correct ST internal HTTP API surface is confirmed** — see AGENT_MEMORY 2026-04-25 (st handlers) for follow-up notes.
-- [x] `st_list_worldbooks`, `st_read_worldbook` — schemas + handlers shipped (slash `/world list` and `/world get name="..."`, with JSON / newline / comma-separated pipe parsing and `fs_list` / `fs_read` fallback hints).
-- [x] `st_write_worldbook` — schema shipped; handler returns closed-enum `{ error: 'not-implemented', hint }` pointing to `fs_write` at the worldbook JSON path. **Deferred for the same reason as `st_write_character`.**
+- [x] `st_write_character` — schema + handler shipped. Creates through
+  `/api/characters/create`; updates existing cards through
+  `/api/characters/merge-attributes` only when `overwrite=true`; refreshes
+  `ctx.getCharacters()` after a successful write when available. Accepts
+  either a complete nested `card` object or top-level fields such as
+  `description`, `personality`, `scenario`, and `first_mes`, then synthesizes
+  a Tavern Card v2 object for the ST create endpoint.
+- [x] `st_list_worldbooks`, `st_read_worldbook` — schemas + handlers shipped.
+  Prefer native `/api/worldinfo/list` and `/api/worldinfo/get`; keep slash
+  `/world list` and `/world get name="..."` fallbacks for older builds, with
+  JSON / newline / comma-separated pipe parsing and `fs_list` / `fs_read`
+  fallback hints.
+- [x] `st_write_worldbook` — schema + handler shipped. Saves complete
+  worldbook objects through `/api/worldinfo/edit`; refuses to replace an
+  existing worldbook unless `overwrite=true`, checking both listed display
+  names and `file_id` identifiers.
 - [x] `st_run_slash({ command })` — schema + handler shipped; handler calls `ctx.executeSlashCommandsWithOptions` and forwards `{ ok: true, pipe }` on success or `{ error: 'slash-failed' | 'slash-unavailable', ... }` otherwise.
 - [x] `st_get_context()` — schema + handler shipped (last N msgs clamped to [1..50] default 10, character, persona, chatId/groupId, per-message text truncated to 4000 chars).
 - [x] `st_list_profiles`, `st_get_profile` — schemas + handlers shipped (`/profile-list` via the existing `listNovaProfiles`, `/profile-get name="..."` for individual profiles).
-- [x] **Factory shipped** — `buildNovaStTools({ ctxImpl?, executeSlashImpl?, listProfilesImpl? })` in `index.js` NOVA AGENT section (immediately after `buildNovaFsHandlers`). Mirrors the contract of the other three Nova handler factories: never throws, closed-enum errors, all deps DI'd. `novaHandleSend` composes the factory into the dispatch `toolHandlers` map alongside `buildNovaSoulMemoryHandlers` / `buildNovaPhoneHandlers` / `buildNovaFsHandlers`. Covered by `test/nova-st-tools.test.mjs` (47 assertions across 12 suites incl. fuzzing, lastN clamping, embedded-quote escaping for slash args, deferred-write closed-enum surface) and a source-contract assertion in `test/nova-ui-wiring.test.mjs`.
+- [x] **Factory shipped** — `buildNovaStTools({ ctxImpl?, executeSlashImpl?, listProfilesImpl?, fetchImpl? })` in `index.js` NOVA AGENT section (immediately after `buildNovaFsHandlers`). Mirrors the contract of the other three Nova handler factories: never throws, closed-enum errors, all deps DI'd. `novaHandleSend` composes the factory into the dispatch `toolHandlers` map alongside `buildNovaSoulMemoryHandlers` / `buildNovaPhoneHandlers` / `buildNovaFsHandlers`. Covered by `test/nova-st-tools.test.mjs` (59 assertions across 12 suites incl. fuzzing, lastN clamping, embedded-quote escaping for slash args, ST-native writes, endpoint failure handling, and overwrite checks) and a source-contract assertion in `test/nova-ui-wiring.test.mjs`.
 
 ### 4e. Phone-internal tools
 - [x] `phone_list_npcs`, `phone_write_npc`, `phone_list_quests`,

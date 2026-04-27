@@ -7,9 +7,8 @@
  * Per AGENT_MEMORY inline-copy convention: when the production helper
  * changes, update this copy.
  *
- * The handlers do NOT touch the network, the plugin, or localStorage —
- * everything routes through `getContext()` + an `executeSlash` function
- * that we mock here. So no fetch harness is needed.
+ * The handlers do NOT touch the plugin or localStorage. ST-native writes
+ * route through an injected fetch harness in these tests.
  */
 
 import { describe, it } from 'node:test';
@@ -21,10 +20,14 @@ function buildNovaStTools({
     ctxImpl,
     executeSlashImpl,
     listProfilesImpl,
+    fetchImpl,
 } = {}) {
     const isObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
     const safeArgs = (v) => (isObject(v) ? v : {});
     const safeName = (v) => (typeof v === 'string' ? v.trim() : '');
+    const getFetch = () => (typeof fetchImpl === 'function'
+        ? fetchImpl
+        : (typeof globalThis.fetch === 'function' ? globalThis.fetch.bind(globalThis) : null));
 
     const getCtx = () => {
         if (ctxImpl !== undefined && ctxImpl !== null) {
@@ -39,6 +42,30 @@ function buildNovaStTools({
     const getListProfiles = () => {
         if (typeof listProfilesImpl === 'function') return listProfilesImpl;
         return null;
+    };
+    const postJson = async (url, body) => {
+        const doFetch = getFetch();
+        if (!doFetch) {
+            return { ok: false, status: 0, data: { error: 'fetch-unavailable' }, message: 'fetch-unavailable' };
+        }
+        const response = await doFetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body ?? {}),
+            cache: 'no-cache',
+        });
+        const text = await response.text();
+        let data = text;
+        if (text) {
+            try { data = JSON.parse(text); } catch (_) { /* keep text */ }
+        }
+        if (!response.ok) {
+            const message = typeof data === 'string'
+                ? data
+                : String(data?.message || data?.error || `HTTP ${response.status}`);
+            return { ok: false, status: response.status, data, message };
+        }
+        return { ok: true, status: response.status, data };
     };
 
     const escSlashArg = (v) => String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
@@ -58,6 +85,109 @@ function buildNovaStTools({
             tags: Array.isArray(c.tags) ? c.tags.slice(0, 16) : [],
             create_date: typeof c.create_date === 'string' ? c.create_date : '',
         };
+    };
+    const findCharacterByName = (ctx, cleanName) => {
+        const list = Array.isArray(ctx?.characters) ? ctx.characters : [];
+        return list.find(c => isObject(c) && c.name === cleanName) || null;
+    };
+    const cardField = (card, data, key, fallback = '') => {
+        const value = data?.[key] ?? card?.[key] ?? fallback;
+        return value === null || value === undefined ? fallback : value;
+    };
+    const characterCreatePayload = (cleanName, card) => {
+        const data = isObject(card?.data) ? card.data : {};
+        const extensions = isObject(data.extensions) ? data.extensions : {};
+        const depthPrompt = isObject(extensions.depth_prompt) ? extensions.depth_prompt : {};
+        const tags = cardField(card, data, 'tags', []);
+        return {
+            ch_name: cleanName,
+            description: cardField(card, data, 'description'),
+            first_mes: cardField(card, data, 'first_mes'),
+            personality: cardField(card, data, 'personality'),
+            scenario: cardField(card, data, 'scenario'),
+            mes_example: cardField(card, data, 'mes_example'),
+            creator_notes: cardField(card, data, 'creator_notes', card?.creatorcomment || ''),
+            system_prompt: cardField(card, data, 'system_prompt'),
+            post_history_instructions: cardField(card, data, 'post_history_instructions'),
+            creator: cardField(card, data, 'creator'),
+            character_version: cardField(card, data, 'character_version'),
+            tags: Array.isArray(tags) ? tags : String(tags || '').split(',').map(t => t.trim()).filter(Boolean),
+            talkativeness: extensions.talkativeness ?? card?.talkativeness ?? 0.5,
+            world: extensions.world ?? '',
+            depth_prompt_prompt: depthPrompt.prompt ?? '',
+            depth_prompt_depth: depthPrompt.depth ?? 4,
+            depth_prompt_role: depthPrompt.role ?? 'system',
+            fav: (extensions.fav ?? card?.fav) ? 'true' : 'false',
+            alternate_greetings: Array.isArray(data.alternate_greetings) ? data.alternate_greetings : [],
+            extensions: JSON.stringify(extensions),
+            json_data: JSON.stringify(card),
+        };
+    };
+    const characterCardFromArgs = (cleanName, args) => {
+        if (isObject(args.card)) return args.card;
+        const fields = [
+            'description',
+            'personality',
+            'scenario',
+            'first_mes',
+            'mes_example',
+            'creator_notes',
+            'system_prompt',
+            'post_history_instructions',
+            'creator',
+            'character_version',
+        ];
+        const hasContent = fields.some(key => typeof args[key] === 'string' && args[key].trim())
+            || (Array.isArray(args.tags) && args.tags.length > 0);
+        if (!hasContent) return null;
+        const data = {
+            name: cleanName,
+            description: String(args.description || ''),
+            personality: String(args.personality || ''),
+            scenario: String(args.scenario || ''),
+            first_mes: String(args.first_mes || ''),
+            mes_example: String(args.mes_example || ''),
+            creator_notes: String(args.creator_notes || ''),
+            system_prompt: String(args.system_prompt || ''),
+            post_history_instructions: String(args.post_history_instructions || ''),
+            alternate_greetings: [],
+            tags: Array.isArray(args.tags) ? args.tags.map(String).filter(Boolean) : [],
+            creator: String(args.creator || ''),
+            character_version: String(args.character_version || ''),
+            extensions: {},
+        };
+        return { spec: 'chara_card_v2', spec_version: '2.0', data };
+    };
+    const refreshCharacters = async () => {
+        const ctx = getCtx();
+        const refresh = ctx && typeof ctx.getCharacters === 'function' ? ctx.getCharacters : null;
+        if (refresh) {
+            try { await refresh(); } catch (_) { /* non-fatal */ }
+        }
+    };
+    const listWorldbooksNative = async () => {
+        const result = await postJson('/api/worldinfo/list', {});
+        if (!result.ok) return result;
+        const rows = Array.isArray(result.data) ? result.data : [];
+        const worldbooks = [];
+        const identifiers = new Set();
+        for (const row of rows) {
+            if (isObject(row)) {
+                const name = String(row.name || '').trim();
+                const fileId = String(row.file_id || '').trim();
+                if (name) worldbooks.push(name);
+                else if (fileId) worldbooks.push(fileId);
+                if (name) identifiers.add(name);
+                if (fileId) identifiers.add(fileId);
+            } else {
+                const name = String(row || '').trim();
+                if (name) {
+                    worldbooks.push(name);
+                    identifiers.add(name);
+                }
+            }
+        }
+        return { ok: true, worldbooks, identifiers, rows };
     };
 
     return {
@@ -80,20 +210,46 @@ function buildNovaStTools({
             return { name: cleanName, card };
         },
         st_write_character: async (rawArgs) => {
-            const { name } = safeArgs(rawArgs);
+            const args = safeArgs(rawArgs);
+            const { name, overwrite } = args;
             const cleanName = safeName(name);
             if (!cleanName) return { error: 'name must be a non-empty string' };
-            return {
-                error: 'not-implemented',
-                tool: 'st_write_character',
-                hint: 'st_write_character is not wired in this build. As a workaround, '
-                    + `use fs_write at SillyTavern/data/<user>/characters/${cleanName}.json `
-                    + 'with the full character-card JSON. Note: this bypasses ST\'s PNG '
-                    + 'metadata re-embed and chat-index update; restart ST or use '
-                    + '/character-list to refresh the UI.',
-            };
+            const card = characterCardFromArgs(cleanName, args);
+            if (!isObject(card)) return { error: 'card must be an object', tool: 'st_write_character' };
+            const ctx = getCtx();
+            const existing = findCharacterByName(ctx, cleanName);
+            if (existing && !overwrite) {
+                return { error: 'exists', name: cleanName, avatar: existing.avatar, hint: 'Set overwrite=true to update this character.' };
+            }
+            if (existing) {
+                const update = { ...card, avatar: existing.avatar };
+                if (isObject(card.data)) update.data = { ...card.data, name: cleanName };
+                update.name = cleanName;
+                let result;
+                try {
+                    result = await postJson('/api/characters/merge-attributes', update);
+                } catch (err) {
+                    return { error: 'write-failed', tool: 'st_write_character', message: String(err?.message || err) };
+                }
+                if (!result.ok) return { error: 'write-failed', tool: 'st_write_character', status: result.status, message: result.message };
+                await refreshCharacters();
+                return { ok: true, action: 'updated', name: cleanName, avatar: existing.avatar };
+            }
+            let result;
+            try {
+                result = await postJson('/api/characters/create', characterCreatePayload(cleanName, card));
+            } catch (err) {
+                return { error: 'write-failed', tool: 'st_write_character', message: String(err?.message || err) };
+            }
+            if (!result.ok) return { error: 'write-failed', tool: 'st_write_character', status: result.status, message: result.message };
+            await refreshCharacters();
+            return { ok: true, action: 'created', name: cleanName, avatar: String(result.data || '') };
         },
         st_list_worldbooks: async () => {
+            try {
+                const native = await listWorldbooksNative();
+                if (native.ok) return { worldbooks: native.worldbooks, count: native.worldbooks.length, rows: native.rows };
+            } catch (_) { /* fall through to slash fallback */ }
             const exec = await getSlash();
             if (typeof exec === 'function') {
                 try {
@@ -123,6 +279,12 @@ function buildNovaStTools({
             const { name } = safeArgs(rawArgs);
             const cleanName = safeName(name);
             if (!cleanName) return { error: 'name must be a non-empty string' };
+            try {
+                const result = await postJson('/api/worldinfo/get', { name: cleanName });
+                if (result.ok && isObject(result.data) && isObject(result.data.entries)) {
+                    return { name: cleanName, book: result.data };
+                }
+            } catch (_) { /* fall through to slash fallback */ }
             const exec = await getSlash();
             if (typeof exec === 'function') {
                 try {
@@ -147,17 +309,28 @@ function buildNovaStTools({
             };
         },
         st_write_worldbook: async (rawArgs) => {
-            const { name } = safeArgs(rawArgs);
+            const args = safeArgs(rawArgs);
+            const { name } = args;
             const cleanName = safeName(name);
             if (!cleanName) return { error: 'name must be a non-empty string' };
-            return {
-                error: 'not-implemented',
-                tool: 'st_write_worldbook',
-                hint: 'st_write_worldbook is not wired in this build. As a workaround, '
-                    + `use fs_write at SillyTavern/data/<user>/worlds/${cleanName}.json `
-                    + 'with the full worldbook JSON. Note: this bypasses ST\'s uid '
-                    + 'normalisation; restart ST or run /world list to refresh the UI.',
-            };
+            if (!isObject(args.book)) return { error: 'missing-book', tool: 'st_write_worldbook' };
+            if (!isObject(args.book.entries)) return { error: 'invalid-book', tool: 'st_write_worldbook', hint: 'Worldbook JSON must include an `entries` object.' };
+            try {
+                const native = await listWorldbooksNative();
+                if (native.ok && native.identifiers?.has(cleanName) && !args.overwrite) {
+                    return { error: 'exists', name: cleanName, hint: 'Set overwrite=true to replace this worldbook.' };
+                }
+            } catch (_) { /* if listing fails, let edit endpoint be authoritative */ }
+            const book = { ...args.book };
+            if (!book.name) book.name = cleanName;
+            let result;
+            try {
+                result = await postJson('/api/worldinfo/edit', { name: cleanName, data: book });
+            } catch (err) {
+                return { error: 'write-failed', tool: 'st_write_worldbook', message: String(err?.message || err) };
+            }
+            if (!result.ok) return { error: 'write-failed', tool: 'st_write_worldbook', status: result.status, message: result.message };
+            return { ok: true, action: 'saved', name: cleanName };
         },
         st_run_slash: async (rawArgs) => {
             const { command } = safeArgs(rawArgs);
@@ -270,6 +443,14 @@ function makeCtx(over = {}) {
     };
 }
 
+function mockResponse(data, status = 200) {
+    return {
+        ok: status >= 200 && status < 300,
+        status,
+        text: async () => typeof data === 'string' ? data : JSON.stringify(data),
+    };
+}
+
 // -------- Tests --------
 
 describe('buildNovaStTools — handler shape', () => {
@@ -362,24 +543,141 @@ describe('st_read_character', () => {
     });
 });
 
-describe('st_write_character — deferred not-implemented surface', () => {
-    it('returns closed-enum not-implemented with fs_write hint when name valid', async () => {
-        const handlers = buildNovaStTools({});
-        const r = await handlers.st_write_character({ name: 'Alice', card: {} });
-        assert.equal(r.error, 'not-implemented');
-        assert.equal(r.tool, 'st_write_character');
-        assert.match(r.hint, /fs_write/);
-        assert.match(r.hint, /Alice\.json/);
+describe('st_write_character', () => {
+    it('creates a new character through the native create endpoint', async () => {
+        const calls = [];
+        const fetchImpl = async (url, init) => {
+            calls.push({ url, body: JSON.parse(init.body) });
+            return mockResponse('Nova.png');
+        };
+        let refreshed = false;
+        const ctx = makeCtx({ getCharacters: async () => { refreshed = true; } });
+        const r = await buildNovaStTools({ ctxImpl: () => ctx, fetchImpl }).st_write_character({
+            name: 'Nova',
+            card: {
+                spec: 'chara_card_v2',
+                data: {
+                    name: 'Nova',
+                    description: 'An agent.',
+                    first_mes: 'Ready.',
+                    tags: ['agent'],
+                    extensions: { talkativeness: 0.7, world: 'Nova Lore' },
+                },
+            },
+        });
+        assert.equal(r.ok, true);
+        assert.equal(r.action, 'created');
+        assert.equal(r.avatar, 'Nova.png');
+        assert.equal(calls[0].url, '/api/characters/create');
+        assert.equal(calls[0].body.ch_name, 'Nova');
+        assert.equal(calls[0].body.description, 'An agent.');
+        assert.deepEqual(calls[0].body.tags, ['agent']);
+        assert.equal(calls[0].body.world, 'Nova Lore');
+        assert.equal(refreshed, true);
     });
 
-    it('rejects empty name BEFORE returning the not-implemented hint', async () => {
+    it('creates a character from top-level fields when no nested card is supplied', async () => {
+        const calls = [];
+        const fetchImpl = async (url, init) => {
+            calls.push({ url, body: JSON.parse(init.body) });
+            return mockResponse('Sisi.png');
+        };
+        const r = await buildNovaStTools({ fetchImpl }).st_write_character({
+            name: 'Sisi',
+            description: 'A precise archive diver.',
+            personality: 'Curious, direct, and stubborn.',
+            scenario: 'Sisi is hired to recover a forbidden record.',
+            first_mes: 'The archive door is already open.',
+            tags: ['investigator', 'archive'],
+            creator: 'Nova',
+        });
+        assert.equal(r.ok, true);
+        assert.equal(r.action, 'created');
+        assert.equal(calls[0].url, '/api/characters/create');
+        assert.equal(calls[0].body.ch_name, 'Sisi');
+        assert.equal(calls[0].body.description, 'A precise archive diver.');
+        assert.equal(calls[0].body.personality, 'Curious, direct, and stubborn.');
+        assert.deepEqual(calls[0].body.tags, ['investigator', 'archive']);
+        const json = JSON.parse(calls[0].body.json_data);
+        assert.equal(json.spec, 'chara_card_v2');
+        assert.equal(json.data.name, 'Sisi');
+    });
+
+    it('refuses to update an existing character unless overwrite=true', async () => {
+        const r = await buildNovaStTools({ ctxImpl: () => makeCtx() }).st_write_character({
+            name: 'Alice',
+            card: { data: { name: 'Alice' } },
+        });
+        assert.equal(r.error, 'exists');
+        assert.equal(r.avatar, 'a.png');
+    });
+
+    it('updates an existing character through merge-attributes when overwrite=true', async () => {
+        const calls = [];
+        const fetchImpl = async (url, init) => {
+            calls.push({ url, body: JSON.parse(init.body) });
+            return mockResponse('');
+        };
+        const r = await buildNovaStTools({ ctxImpl: () => makeCtx(), fetchImpl }).st_write_character({
+            name: 'Alice',
+            overwrite: true,
+            card: { data: { name: 'Alice', description: 'Updated.' } },
+        });
+        assert.equal(r.ok, true);
+        assert.equal(r.action, 'updated');
+        assert.equal(calls[0].url, '/api/characters/merge-attributes');
+        assert.equal(calls[0].body.avatar, 'a.png');
+        assert.equal(calls[0].body.data.description, 'Updated.');
+    });
+
+    it('rejects empty name', async () => {
         const r = await buildNovaStTools({}).st_write_character({ name: '' });
         assert.match(r.error, /non-empty string/);
-        assert.notEqual(r.error, 'not-implemented');
+    });
+
+    it('rejects missing card objects', async () => {
+        const r = await buildNovaStTools({}).st_write_character({ name: 'Nova' });
+        assert.equal(r.error, 'card must be an object');
+    });
+
+    it('returns write-failed when fetch is unavailable', async () => {
+        const originalFetch = globalThis.fetch;
+        try {
+            delete globalThis.fetch;
+            const r = await buildNovaStTools({}).st_write_character({
+                name: 'Nova',
+                card: { data: { name: 'Nova' } },
+            });
+            assert.equal(r.error, 'write-failed');
+            assert.equal(r.message, 'fetch-unavailable');
+        } finally {
+            globalThis.fetch = originalFetch;
+        }
+    });
+
+    it('returns write-failed when the native endpoint rejects the write', async () => {
+        const fetchImpl = async () => mockResponse({ message: 'bad card' }, 400);
+        const r = await buildNovaStTools({ fetchImpl }).st_write_character({
+            name: 'Nova',
+            card: { data: { name: 'Nova' } },
+        });
+        assert.equal(r.error, 'write-failed');
+        assert.equal(r.status, 400);
+        assert.equal(r.message, 'bad card');
     });
 });
 
 describe('st_list_worldbooks', () => {
+    it('uses the native worldinfo list endpoint when available', async () => {
+        const fetchImpl = async (url) => {
+            assert.equal(url, '/api/worldinfo/list');
+            return mockResponse([{ file_id: 'world-a', name: 'World A' }, { file_id: 'world-b' }]);
+        };
+        const r = await buildNovaStTools({ fetchImpl }).st_list_worldbooks();
+        assert.deepEqual(r.worldbooks, ['World A', 'world-b']);
+        assert.equal(r.count, 2);
+    });
+
     it('parses a JSON array pipe', async () => {
         const exec = async () => ({ pipe: JSON.stringify(['World A', 'World B']) });
         const r = await buildNovaStTools({ executeSlashImpl: exec }).st_list_worldbooks();
@@ -422,6 +720,17 @@ describe('st_list_worldbooks', () => {
 });
 
 describe('st_read_worldbook', () => {
+    it('uses the native worldinfo get endpoint when available', async () => {
+        const fetchImpl = async (url, init) => {
+            assert.equal(url, '/api/worldinfo/get');
+            assert.deepEqual(JSON.parse(init.body), { name: 'My World' });
+            return mockResponse({ entries: { 0: { uid: 0, key: ['k'] } } });
+        };
+        const r = await buildNovaStTools({ fetchImpl }).st_read_worldbook({ name: 'My World' });
+        assert.equal(r.name, 'My World');
+        assert.equal(r.book.entries[0].key[0], 'k');
+    });
+
     it('returns parsed JSON when the slash returns JSON', async () => {
         const exec = async (cmd) => {
             assert.match(cmd, /^\/world get name="My World"$/);
@@ -477,13 +786,63 @@ describe('st_read_worldbook', () => {
     });
 });
 
-describe('st_write_worldbook — deferred not-implemented surface', () => {
-    it('returns closed-enum not-implemented with fs_write hint', async () => {
-        const r = await buildNovaStTools({}).st_write_worldbook({ name: 'Lore', book: {} });
-        assert.equal(r.error, 'not-implemented');
-        assert.equal(r.tool, 'st_write_worldbook');
-        assert.match(r.hint, /fs_write/);
-        assert.match(r.hint, /Lore\.json/);
+describe('st_write_worldbook', () => {
+    it('saves a valid worldbook through the native edit endpoint', async () => {
+        const calls = [];
+        const fetchImpl = async (url, init) => {
+            calls.push({ url, body: JSON.parse(init.body) });
+            if (url === '/api/worldinfo/list') return mockResponse([]);
+            if (url === '/api/worldinfo/edit') return mockResponse({ ok: true });
+            throw new Error(`unexpected url ${url}`);
+        };
+        const book = { entries: { 0: { uid: 0, key: ['nova'], content: 'Nova lore' } } };
+        const r = await buildNovaStTools({ fetchImpl }).st_write_worldbook({ name: 'Lore', book });
+        assert.equal(r.ok, true);
+        assert.equal(r.action, 'saved');
+        assert.equal(calls[1].url, '/api/worldinfo/edit');
+        assert.equal(calls[1].body.name, 'Lore');
+        assert.equal(calls[1].body.data.name, 'Lore');
+        assert.equal(calls[1].body.data.entries[0].content, 'Nova lore');
+    });
+
+    it('refuses to replace an existing worldbook unless overwrite=true', async () => {
+        const fetchImpl = async () => mockResponse([{ file_id: 'Lore', name: 'Lore' }]);
+        const r = await buildNovaStTools({ fetchImpl }).st_write_worldbook({
+            name: 'Lore',
+            book: { entries: {} },
+        });
+        assert.equal(r.error, 'exists');
+    });
+
+    it('treats file_id as an existing worldbook identifier even when display name differs', async () => {
+        const fetchImpl = async () => mockResponse([{ file_id: 'lore-file', name: 'Pretty Lore' }]);
+        const r = await buildNovaStTools({ fetchImpl }).st_write_worldbook({
+            name: 'lore-file',
+            book: { entries: {} },
+        });
+        assert.equal(r.error, 'exists');
+    });
+
+    it('rejects missing and invalid books', async () => {
+        const missing = await buildNovaStTools({}).st_write_worldbook({ name: 'Lore' });
+        assert.equal(missing.error, 'missing-book');
+        const invalid = await buildNovaStTools({}).st_write_worldbook({ name: 'Lore', book: {} });
+        assert.equal(invalid.error, 'invalid-book');
+    });
+
+    it('returns write-failed when the native edit endpoint rejects the save', async () => {
+        const fetchImpl = async (url) => {
+            if (url === '/api/worldinfo/list') return mockResponse([]);
+            if (url === '/api/worldinfo/edit') return mockResponse({ error: 'bad world' }, 400);
+            throw new Error(`unexpected url ${url}`);
+        };
+        const r = await buildNovaStTools({ fetchImpl }).st_write_worldbook({
+            name: 'Lore',
+            book: { entries: {} },
+        });
+        assert.equal(r.error, 'write-failed');
+        assert.equal(r.status, 400);
+        assert.equal(r.message, 'bad world');
     });
 });
 

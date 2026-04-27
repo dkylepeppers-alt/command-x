@@ -48,6 +48,7 @@ test('Nova UI wiring functions are declared', async () => {
         'function novaPickTier(',
         'function novaHandleSend(',
         'function novaHandleCancel(',
+        'function novaHandleClearContext(',
         'function setNovaInFlight(',
         'function cxPickList(',
         'function openNovaAuditLogViewer(',
@@ -316,6 +317,15 @@ test('Nova transcript renderer handles the documented roles', async () => {
     for (const role of ['user', 'assistant', 'tool', 'system', 'notice', 'user-preview']) {
         assert.match(fn[0], new RegExp(`'${role}'`), `Missing role handling: ${role}`);
     }
+});
+
+test('Nova context-clear control is wired', async () => {
+    const { js } = await loadSources();
+    assert.ok(js.includes('id="cx-nova-clear"'), 'Nova view missing Clear button');
+    const fn = js.match(/function wireNovaView\([\s\S]*?\n\}/);
+    assert.ok(fn, 'wireNovaView not found');
+    assert.match(fn[0], /#cx-nova-clear/);
+    assert.match(fn[0], /novaHandleClearContext\(\)/);
 });
 
 test('buildNovaSendRequest prefers ConnectionManagerRequestService then generateRaw', async () => {

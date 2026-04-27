@@ -3397,6 +3397,7 @@ function buildPhone() {
                 <div class="cx-nova-composer-actions">
                     <button type="button" class="cx-settings-btn cx-nova-send" id="cx-nova-send" aria-label="Send to Nova">Send</button>
                     <button type="button" class="cx-settings-btn cx-nova-cancel cx-hidden" id="cx-nova-cancel" aria-label="Cancel Nova turn">Cancel</button>
+                    <button type="button" class="cx-settings-btn cx-nova-clear" id="cx-nova-clear" aria-label="Clear Nova context history">Clear</button>
                 </div>
             </div>
             <div class="cx-navbar">
@@ -4955,6 +4956,36 @@ function novaHandleCancel() {
     appendNovaTranscriptLine('🛑 Cancelling turn…', 'notice');
 }
 
+async function novaHandleClearContext() {
+    if (novaTurnInFlight) {
+        await cxAlert('Cancel or wait for the current Nova turn before clearing context.', 'Nova');
+        return;
+    }
+    const ok = await cxConfirm(
+        'Clear Nova context history for this chat? This removes the active Nova transcript from future turns. The audit log is kept.',
+        'Clear Nova context',
+        'Clear',
+        'Cancel',
+    );
+    if (!ok) return;
+    const ctx = getContext();
+    const state = getNovaState(ctx);
+    let session = state.sessions.find(s => s && s.id === state.activeSessionId);
+    if (!session) {
+        session = createNovaSession(state, {
+            skill: settings?.nova?.activeSkill || 'freeform',
+            tier: settings?.nova?.defaultTier || 'read',
+            profileName: settings?.nova?.profileName || '',
+        });
+    }
+    session.messages = [];
+    session.toolCalls = [];
+    session.updatedAt = Date.now();
+    saveNovaState(ctx);
+    renderNovaTranscript();
+    appendNovaTranscriptLine('🧹 Nova context history cleared for this chat.', 'notice');
+}
+
 /**
  * Wire all Nova-view event handlers. Called from `wirePhone()`.
  */
@@ -4975,6 +5006,9 @@ function wireNovaView() {
     });
     novaView.querySelector('#cx-nova-cancel')?.addEventListener('click', () => {
         novaHandleCancel();
+    });
+    novaView.querySelector('#cx-nova-clear')?.addEventListener('click', () => {
+        novaHandleClearContext().catch(err => cxAlert(String(err?.message || err), 'Nova'));
     });
     // Enter submits; Shift+Enter = newline.
     novaView.querySelector('#cx-nova-input')?.addEventListener('keydown', (e) => {
@@ -7824,15 +7858,29 @@ const NOVA_TOOLS = [
     },
     {
         name: 'st_write_character', displayName: 'Write character', permission: 'write', backend: 'st-api',
-        description: 'Create or update a character card. Requires approval.',
+        description: 'Create or update a SillyTavern character card. Provide either a complete chara_card_v2 `card` object or the top-level character fields; do not call with only a name. Requires approval.',
         parameters: {
             type: 'object',
             properties: {
                 name: { type: 'string' },
-                card: { type: 'object' },
+                card: {
+                    type: 'object',
+                    description: 'Complete Tavern card v2 JSON: { spec:"chara_card_v2", spec_version:"2.0", data:{ name, description, personality, scenario, first_mes, mes_example, creator_notes, system_prompt, post_history_instructions, alternate_greetings, tags, creator, character_version, extensions } }.',
+                },
+                description: { type: 'string', description: 'Character description if not sending card.' },
+                personality: { type: 'string', description: 'Personality text if not sending card.' },
+                scenario: { type: 'string', description: 'Scenario text if not sending card.' },
+                first_mes: { type: 'string', description: 'First message if not sending card.' },
+                mes_example: { type: 'string', description: 'Example dialogue if not sending card.' },
+                creator_notes: { type: 'string', description: 'Creator notes if not sending card.' },
+                system_prompt: { type: 'string', description: 'System prompt if not sending card.' },
+                post_history_instructions: { type: 'string', description: 'Post-history instructions if not sending card.' },
+                tags: { type: 'array', items: { type: 'string' }, description: 'Tags if not sending card.' },
+                creator: { type: 'string', description: 'Creator name if not sending card.' },
+                character_version: { type: 'string', description: 'Character version if not sending card.' },
                 overwrite: { type: 'boolean', default: false },
             },
-            required: ['name', 'card'],
+            required: ['name'],
             additionalProperties: false,
         },
     },
@@ -8061,9 +8109,13 @@ const NOVA_SKILLS = [
             '  personality, scenario, first_mes, mes_example, creator_notes,',
             '  system_prompt, post_history_instructions, alternate_greetings,',
             '  character_book, tags, creator, character_version, extensions }.',
-            'Cards live at SillyTavern/data/<user>/characters/<name>.json.',
-            'Prefer st_write_character over fs_write when updating a card — the',
-            'ST API handles PNG embedding and chat index updates for you.',
+            'Use st_write_character for creation and updates; the ST API',
+            'handles PNG embedding and chat index updates for you.',
+            'When calling st_write_character, include either a complete `card`',
+            'object or top-level fields: description, personality, scenario,',
+            'first_mes, mes_example, creator_notes, system_prompt,',
+            'post_history_instructions, tags, creator, character_version.',
+            'Never call st_write_character with only `name`.',
             'Never overwrite an existing card without showing a diff first.',
             'When a user asks you to invent a character, pick opinionated',
             'concrete details; never leave schema fields as "TBD".',
@@ -8088,9 +8140,9 @@ const NOVA_SKILLS = [
             '  excludeRecursion, preventRecursion, probability, useProbability,',
             '  depth, group, groupOverride, groupWeight, scanDepth, caseSensitive,',
             '  matchWholeWords, useGroupScoring, automationId, role, vectorized.',
-            'Worldbooks live at SillyTavern/data/<user>/worlds/<name>.json.',
-            'st_write_worldbook is only for full-worldbook replacement and must include a complete `book` object.',
-            'For a single new entry, read the target file with fs_read, merge the entry into entries, then write the complete JSON back with fs_write.',
+            'Use st_read_worldbook and st_write_worldbook for creation and updates.',
+            'st_write_worldbook is a full-worldbook save and must include a complete `book` object.',
+            'For a single new entry, read the target book, merge the entry into entries, then call st_write_worldbook with overwrite=true.',
             'When building a new world, start with 3–5 foundational entries',
             '(setting, factions, tone) before branching into specifics.',
         ].join('\n'),
@@ -8852,32 +8904,19 @@ function buildNovaShellHandler({ pluginBaseUrl, fetchImpl, headersProvider } = {
 
    `buildNovaStTools` returns the `st_*` tool handlers that read/write
    SillyTavern's own state (characters, worldbooks, chat context,
-   connection profiles, slash commands). No plugin dependency — these
-   handlers go through `getContext()` + `executeSlashCommandsWithOptions`
-   only, so they work even when `nova-agent-bridge` isn't installed.
+   connection profiles, slash commands). These handlers work even when
+   `nova-agent-bridge` isn't installed; however, character and worldbook
+   write paths perform direct ST-native HTTP calls via `fetch`/`postJson`
+   in addition to `getContext()` + `executeSlashCommandsWithOptions`.
 
-   Scope of THIS factory (8 of 10 schemas wired):
+   Scope of THIS factory:
      - `st_list_characters`, `st_read_character`     — read `ctx.characters`
-     - `st_list_worldbooks`, `st_read_worldbook`     — slash `/world` family
+     - `st_write_character`                          — create/update via ST character endpoints
+     - `st_list_worldbooks`, `st_read_worldbook`     — read via ST worldinfo endpoints
+     - `st_write_worldbook`                          — save via ST worldinfo endpoint
      - `st_get_context`                              — synthesise from ctx
      - `st_run_slash`                                — executeSlashCommands
      - `st_list_profiles`, `st_get_profile`          — `/profile-list` etc.
-
-   Deferred (returns closed-enum `{ error: 'not-implemented', hint }`):
-     - `st_write_character`, `st_write_worldbook`
-
-   Why deferred: the documented public surface for editing a character
-   card or worldbook from a third-party extension is unstable. ST has
-   internal HTTP routes (and PNG metadata re-embedding for cards) that
-   are not exposed via `getContext()` and not captured in `st-docs/`. I'd
-   rather ship a closed-enum "not-implemented" surface than a fetch
-   against speculative endpoints that might silently corrupt user data.
-   The hint directs the LLM to the existing fs_write workaround at the
-   relevant JSON path; once the correct ST API surface is known, slot
-   real handlers into the same `buildNovaStTools` factory and the
-   skill-pack guidance ("Prefer st_write_character over fs_write…") will
-   start applying without any other code changes. See AGENT_MEMORY
-   2026-04-25 (st handlers) entry for the follow-up.
 
    Contract — mirrors `buildNovaSoulMemoryHandlers` /
    `buildNovaPhoneHandlers` / `buildNovaFsHandlers`:
@@ -8895,16 +8934,23 @@ function buildNovaShellHandler({ pluginBaseUrl, fetchImpl, headersProvider } = {
                              `novaGetExecuteSlash()` (lazy resolution so a
                              test can pass a fake without ST loaded).
      - `listProfilesImpl`  : default = production `listNovaProfiles`.
+     - `fetchImpl`         : default = `globalThis.fetch` (used for native
+                             character + worldbook HTTP writes). Override
+                             in tests to avoid real network calls.
    ---------------------------------------------------------------------- */
 
 function buildNovaStTools({
     ctxImpl,
     executeSlashImpl,
     listProfilesImpl,
+    fetchImpl,
 } = {}) {
     const isObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
     const safeArgs = (v) => (isObject(v) ? v : {});
     const safeName = (v) => (typeof v === 'string' ? v.trim() : '');
+    const getFetch = () => (typeof fetchImpl === 'function'
+        ? fetchImpl
+        : (typeof globalThis.fetch === 'function' ? globalThis.fetch.bind(globalThis) : null));
 
     // Lazy resolution: each call re-fetches ctx so the handler picks up
     // chat / character changes mid-turn. ctxImpl can also be a function
@@ -8924,6 +8970,33 @@ function buildNovaStTools({
         if (typeof listProfilesImpl === 'function') return listProfilesImpl;
         if (typeof listNovaProfiles === 'function') return listNovaProfiles;
         return null;
+    };
+    const getJsonHeaders = () => (typeof getRequestHeaders === 'function'
+        ? getRequestHeaders()
+        : { 'Content-Type': 'application/json' });
+    const postJson = async (url, body) => {
+        const doFetch = getFetch();
+        if (!doFetch) {
+            return { ok: false, status: 0, data: { error: 'fetch-unavailable' }, message: 'fetch-unavailable' };
+        }
+        const response = await doFetch(url, {
+            method: 'POST',
+            headers: getJsonHeaders(),
+            body: JSON.stringify(body ?? {}),
+            cache: 'no-cache',
+        });
+        const text = await response.text();
+        let data = text;
+        if (text) {
+            try { data = JSON.parse(text); } catch (_) { /* keep text */ }
+        }
+        if (!response.ok) {
+            const message = typeof data === 'string'
+                ? data
+                : String(data?.message || data?.error || `HTTP ${response.status}`);
+            return { ok: false, status: response.status, data, message };
+        }
+        return { ok: true, status: response.status, data };
     };
 
     // Escape a string for embedding inside a `name="…"` slash-command
@@ -8955,6 +9028,109 @@ function buildNovaStTools({
             create_date: typeof c.create_date === 'string' ? c.create_date : '',
         };
     };
+    const findCharacterByName = (ctx, cleanName) => {
+        const list = Array.isArray(ctx?.characters) ? ctx.characters : [];
+        return list.find(c => isObject(c) && c.name === cleanName) || null;
+    };
+    const cardField = (card, data, key, fallback = '') => {
+        const value = data?.[key] ?? card?.[key] ?? fallback;
+        return value === null || value === undefined ? fallback : value;
+    };
+    const characterCreatePayload = (cleanName, card) => {
+        const data = isObject(card?.data) ? card.data : {};
+        const extensions = isObject(data.extensions) ? data.extensions : {};
+        const depthPrompt = isObject(extensions.depth_prompt) ? extensions.depth_prompt : {};
+        const tags = cardField(card, data, 'tags', []);
+        return {
+            ch_name: cleanName,
+            description: cardField(card, data, 'description'),
+            first_mes: cardField(card, data, 'first_mes'),
+            personality: cardField(card, data, 'personality'),
+            scenario: cardField(card, data, 'scenario'),
+            mes_example: cardField(card, data, 'mes_example'),
+            creator_notes: cardField(card, data, 'creator_notes', card?.creatorcomment || ''),
+            system_prompt: cardField(card, data, 'system_prompt'),
+            post_history_instructions: cardField(card, data, 'post_history_instructions'),
+            creator: cardField(card, data, 'creator'),
+            character_version: cardField(card, data, 'character_version'),
+            tags: Array.isArray(tags) ? tags : String(tags || '').split(',').map(t => t.trim()).filter(Boolean),
+            talkativeness: extensions.talkativeness ?? card?.talkativeness ?? 0.5,
+            world: extensions.world ?? '',
+            depth_prompt_prompt: depthPrompt.prompt ?? '',
+            depth_prompt_depth: depthPrompt.depth ?? 4,
+            depth_prompt_role: depthPrompt.role ?? 'system',
+            fav: (extensions.fav ?? card?.fav) ? 'true' : 'false',
+            alternate_greetings: Array.isArray(data.alternate_greetings) ? data.alternate_greetings : [],
+            extensions: JSON.stringify(extensions),
+            json_data: JSON.stringify(card),
+        };
+    };
+    const characterCardFromArgs = (cleanName, args) => {
+        if (isObject(args.card)) return args.card;
+        const fields = [
+            'description',
+            'personality',
+            'scenario',
+            'first_mes',
+            'mes_example',
+            'creator_notes',
+            'system_prompt',
+            'post_history_instructions',
+            'creator',
+            'character_version',
+        ];
+        const hasContent = fields.some(key => typeof args[key] === 'string' && args[key].trim())
+            || (Array.isArray(args.tags) && args.tags.length > 0);
+        if (!hasContent) return null;
+        const data = {
+            name: cleanName,
+            description: String(args.description || ''),
+            personality: String(args.personality || ''),
+            scenario: String(args.scenario || ''),
+            first_mes: String(args.first_mes || ''),
+            mes_example: String(args.mes_example || ''),
+            creator_notes: String(args.creator_notes || ''),
+            system_prompt: String(args.system_prompt || ''),
+            post_history_instructions: String(args.post_history_instructions || ''),
+            alternate_greetings: [],
+            tags: Array.isArray(args.tags) ? args.tags.map(String).filter(Boolean) : [],
+            creator: String(args.creator || ''),
+            character_version: String(args.character_version || ''),
+            extensions: {},
+        };
+        return { spec: 'chara_card_v2', spec_version: '2.0', data };
+    };
+    const refreshCharacters = async () => {
+        const ctx = getCtx();
+        const refresh = ctx && typeof ctx.getCharacters === 'function' ? ctx.getCharacters : null;
+        if (refresh) {
+            try { await refresh(); } catch (_) { /* non-fatal */ }
+        }
+    };
+    const listWorldbooksNative = async () => {
+        const result = await postJson('/api/worldinfo/list', {});
+        if (!result.ok) return result;
+        const rows = Array.isArray(result.data) ? result.data : [];
+        const worldbooks = [];
+        const identifiers = new Set();
+        for (const row of rows) {
+            if (isObject(row)) {
+                const name = String(row.name || '').trim();
+                const fileId = String(row.file_id || '').trim();
+                if (name) worldbooks.push(name);
+                else if (fileId) worldbooks.push(fileId);
+                if (name) identifiers.add(name);
+                if (fileId) identifiers.add(fileId);
+            } else {
+                const name = String(row || '').trim();
+                if (name) {
+                    worldbooks.push(name);
+                    identifiers.add(name);
+                }
+            }
+        }
+        return { ok: true, worldbooks, identifiers, rows };
+    };
 
     return {
         st_list_characters: async () => {
@@ -8982,24 +9158,60 @@ function buildNovaStTools({
         },
 
         st_write_character: async (rawArgs) => {
-            const { name } = safeArgs(rawArgs);
+            const args = safeArgs(rawArgs);
+            const { name, overwrite } = args;
             const cleanName = safeName(name);
-            // Validate args even on the not-implemented path so the LLM
-            // gets a useful error if it sent garbage. The hint always
-            // includes the canonical fs_write workaround.
             if (!cleanName) return { error: 'name must be a non-empty string' };
-            return {
-                error: 'not-implemented',
-                tool: 'st_write_character',
-                hint: 'st_write_character is not wired in this build. As a workaround, '
-                    + `use fs_write at SillyTavern/data/<user>/characters/${cleanName}.json `
-                    + 'with the full character-card JSON. Note: this bypasses ST\'s PNG '
-                    + 'metadata re-embed and chat-index update; restart ST or use '
-                    + '/character-list to refresh the UI.',
-            };
+            const card = characterCardFromArgs(cleanName, args);
+            if (!isObject(card)) {
+                return {
+                    error: 'provide a nested card object or at least one writable top-level character field',
+                    tool: 'st_write_character',
+                    hint: 'Accepted inputs: { name, card: {...} } or { name, description, personality, scenario, first_mes, ... }.',
+                };
+            }
+
+            const ctx = getCtx();
+            const existing = findCharacterByName(ctx, cleanName);
+            if (existing && !overwrite) {
+                return { error: 'exists', name: cleanName, avatar: existing.avatar, hint: 'Set overwrite=true to update this character.' };
+            }
+
+            if (existing) {
+                const update = { ...card, avatar: existing.avatar };
+                if (isObject(card.data)) update.data = { ...card.data, name: cleanName };
+                update.name = cleanName;
+                let result;
+                try {
+                    result = await postJson('/api/characters/merge-attributes', update);
+                } catch (err) {
+                    return { error: 'write-failed', tool: 'st_write_character', message: String(err?.message || err) };
+                }
+                if (!result.ok) {
+                    return { error: 'write-failed', tool: 'st_write_character', status: result.status, message: result.message };
+                }
+                await refreshCharacters();
+                return { ok: true, action: 'updated', name: cleanName, avatar: existing.avatar };
+            }
+
+            let result;
+            try {
+                result = await postJson('/api/characters/create', characterCreatePayload(cleanName, card));
+            } catch (err) {
+                return { error: 'write-failed', tool: 'st_write_character', message: String(err?.message || err) };
+            }
+            if (!result.ok) {
+                return { error: 'write-failed', tool: 'st_write_character', status: result.status, message: result.message };
+            }
+            await refreshCharacters();
+            return { ok: true, action: 'created', name: cleanName, avatar: String(result.data || '') };
         },
 
         st_list_worldbooks: async () => {
+            try {
+                const native = await listWorldbooksNative();
+                if (native.ok) return { worldbooks: native.worldbooks, count: native.worldbooks.length, rows: native.rows };
+            } catch (_) { /* fall through to slash fallback */ }
             // Strategy: try the slash command first. ST's `/world list`
             // (when present) returns a pipe of JSON or newline-separated
             // names. If it's not available, fall back to a safe empty
@@ -9037,6 +9249,12 @@ function buildNovaStTools({
             const { name } = safeArgs(rawArgs);
             const cleanName = safeName(name);
             if (!cleanName) return { error: 'name must be a non-empty string' };
+            try {
+                const result = await postJson('/api/worldinfo/get', { name: cleanName });
+                if (result.ok && isObject(result.data) && isObject(result.data.entries)) {
+                    return { name: cleanName, book: result.data };
+                }
+            } catch (_) { /* fall through to slash fallback */ }
             const exec = await getSlash();
             if (typeof exec === 'function') {
                 try {
@@ -9073,18 +9291,32 @@ function buildNovaStTools({
                     tool: 'st_write_worldbook',
                     receivedKeys: Object.keys(args),
                     hint: 'st_write_worldbook requires a full `book` object, e.g. { entries: ... }. '
-                        + 'For a single new worldbook entry, first read the current file, merge the new entry into `entries`, '
-                        + `then use fs_write at SillyTavern/data/<user>/worlds/${cleanName}.json with the complete JSON.`,
+                        + 'To add or update a single entry: call st_read_worldbook to fetch the current book, '
+                        + 'merge your changes into the `entries` object, then call st_write_worldbook with overwrite=true '
+                        + 'and the complete updated book. Only fall back to fs_* if the native endpoints are unavailable.',
                 };
             }
-            return {
-                error: 'not-implemented',
-                tool: 'st_write_worldbook',
-                hint: 'st_write_worldbook is not wired in this build. As a workaround, '
-                    + `use fs_write at SillyTavern/data/<user>/worlds/${cleanName}.json `
-                    + 'with the full worldbook JSON. Note: this bypasses ST\'s uid '
-                    + 'normalisation; restart ST or run /world list to refresh the UI.',
-            };
+            if (!isObject(args.book.entries)) {
+                return { error: 'invalid-book', tool: 'st_write_worldbook', hint: 'Worldbook JSON must include an `entries` object.' };
+            }
+            try {
+                const native = await listWorldbooksNative();
+                if (native.ok && native.identifiers?.has(cleanName) && !args.overwrite) {
+                    return { error: 'exists', name: cleanName, hint: 'Set overwrite=true to replace this worldbook.' };
+                }
+            } catch (_) { /* if listing fails, let edit endpoint be authoritative */ }
+            const book = { ...args.book };
+            if (!book.name) book.name = cleanName;
+            let result;
+            try {
+                result = await postJson('/api/worldinfo/edit', { name: cleanName, data: book });
+            } catch (err) {
+                return { error: 'write-failed', tool: 'st_write_worldbook', message: String(err?.message || err) };
+            }
+            if (!result.ok) {
+                return { error: 'write-failed', tool: 'st_write_worldbook', status: result.status, message: result.message };
+            }
+            return { ok: true, action: 'saved', name: cleanName };
         },
 
         st_run_slash: async (rawArgs) => {
