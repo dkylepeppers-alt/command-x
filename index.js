@@ -1373,6 +1373,25 @@ function clearMapPrompt() {
    turn. A value of 1 (default) keeps the legacy every-turn behavior.
    ------------------------------------------------------------------ */
 let _turnCounter = 0;
+const _pendingSwipeRegenerations = new Set();
+
+function normalizeSwipeMesId(mesId) {
+    if (mesId == null || mesId === '') return null;
+    const id = Number(mesId);
+    return Number.isInteger(id) && id >= 0 ? id : null;
+}
+
+function markPendingSwipeRegeneration(mesId) {
+    const id = normalizeSwipeMesId(mesId);
+    if (id != null) _pendingSwipeRegenerations.add(id);
+}
+
+function consumePendingSwipeRegeneration(mesId) {
+    const id = normalizeSwipeMesId(mesId);
+    if (id == null || !_pendingSwipeRegenerations.has(id)) return false;
+    _pendingSwipeRegenerations.delete(id);
+    return true;
+}
 
 function applyInjectionThrottle() {
     _turnCounter += 1;
@@ -5552,6 +5571,7 @@ function wireEventListeners() {
             const msg = chat[chat.length - 1];
             if (!msg || msg.is_user || msg.is_system) return;
             const mesId = chat.length - 1;
+            const isSwipeRegeneration = consumePendingSwipeRegeneration(mesId);
 
             // ── [sms] FIRST — must run before [contacts] which can trigger rebuildPhone ──
             const smsBlocks = extractSmsBlocks(msg.mes);
@@ -5668,10 +5688,13 @@ function wireEventListeners() {
                 rebuildPhone();
             }
 
-            applyInjectionThrottle();
+            if (!isSwipeRegeneration) {
+                applyInjectionThrottle();
+            }
         },
         messageSwiped: (mesId) => {
             if (!settings.enabled) return;
+            markPendingSwipeRegeneration(mesId);
             removeMessagesForMesId(mesId);
             removePrivatePhoneEventsForMesId(mesId);
             removeTrailForMesId(mesId);
@@ -5689,6 +5712,7 @@ function wireEventListeners() {
             removeMessagesForMesId(deletedId);
             removePrivatePhoneEventsForMesId(deletedId);
             removeTrailForMesId(deletedId);
+            _pendingSwipeRegenerations.delete(deletedId);
             const area = phoneContainer?.querySelector('#cx-msg-area');
             if (area && currentContactName) {
                 renderAllBubbles(area, currentContactName, false);
@@ -5701,6 +5725,7 @@ function wireEventListeners() {
             awaitingReply = false;
             commandMode = null;
             _turnCounter = 0;
+            _pendingSwipeRegenerations.clear();
             invalidateContactCaches();
             invalidateNovaBridgeProbeCache();
             clearSmsPrompt();
