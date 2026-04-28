@@ -6663,6 +6663,7 @@ async function _novaBridgeReadText({ pluginBaseUrl, path, fetchImpl, headersProv
  *
  * @param {object} [opts]
  * @param {string}   [opts.baseUrl]   - URL folder containing the two files. Default: extension-bundled path.
+ * @param {number}   [opts.soulMemoryMaxBytes] - Bridge read cap per file. Default 256 KiB.
  * @param {function} [opts.fetchImpl] - Test-injectable `fetch` replacement.
  * @param {function} [opts.nowImpl]   - Test-injectable `Date.now` replacement.
  * @param {number}   [opts.ttlMs]     - Cache TTL. Default 5 min.
@@ -6674,6 +6675,7 @@ async function loadNovaSoulMemory({
     pluginBaseUrl,
     soulPath = NOVA_SOUL_BRIDGE_PATH,
     memoryPath = NOVA_MEMORY_BRIDGE_PATH,
+    soulMemoryMaxBytes = 262144,
     fetchImpl,
     headersProvider,
     nowImpl,
@@ -6703,11 +6705,14 @@ async function loadNovaSoulMemory({
         ]);
     } else {
         const [bridgeSoul, bridgeMemory] = await Promise.all([
-            _novaBridgeReadText({ pluginBaseUrl, path: soulPath, fetchImpl, headersProvider }),
-            _novaBridgeReadText({ pluginBaseUrl, path: memoryPath, fetchImpl, headersProvider }),
+            _novaBridgeReadText({ pluginBaseUrl, path: soulPath, fetchImpl, headersProvider, maxBytes: soulMemoryMaxBytes }),
+            _novaBridgeReadText({ pluginBaseUrl, path: memoryPath, fetchImpl, headersProvider, maxBytes: soulMemoryMaxBytes }),
         ]);
         const fallbackReads = [];
         if (bridgeSoul?.ok) {
+            if (bridgeSoul.truncated) {
+                console.warn(`[command-x] Nova soul file was truncated at ${soulMemoryMaxBytes} bytes while loading.`);
+            }
             soul = bridgeSoul.content;
         } else {
             fallbackReads.push({
@@ -6716,6 +6721,9 @@ async function loadNovaSoulMemory({
             });
         }
         if (bridgeMemory?.ok) {
+            if (bridgeMemory.truncated) {
+                console.warn(`[command-x] Nova memory file was truncated at ${soulMemoryMaxBytes} bytes while loading.`);
+            }
             memory = bridgeMemory.content;
         } else {
             fallbackReads.push({
@@ -6727,11 +6735,14 @@ async function loadNovaSoulMemory({
             // The fallback promises were created while building
             // `fallbackReads`; this `Promise.all` awaits any needed bundled
             // template reads together rather than one file at a time.
-            const fallback = await Promise.all(fallbackReads.map(item => item.promise));
-            fallback.forEach((value, idx) => {
-                if (fallbackReads[idx].slot === 'soul') soul = value;
-                if (fallbackReads[idx].slot === 'memory') memory = value;
-            });
+            const fallback = await Promise.all(fallbackReads.map(async item => ({
+                slot: item.slot,
+                value: await item.promise,
+            })));
+            for (const { slot, value } of fallback) {
+                if (slot === 'soul') soul = value;
+                if (slot === 'memory') memory = value;
+            }
         }
     }
 

@@ -108,6 +108,7 @@ function makeCapsule() {
         pluginBaseUrl,
         soulPath = NOVA_SOUL_BRIDGE_PATH,
         memoryPath = NOVA_MEMORY_BRIDGE_PATH,
+        soulMemoryMaxBytes = 262144,
         fetchImpl,
         nowImpl,
         ttlMs = NOVA_SOUL_MEMORY_TTL_MS,
@@ -129,11 +130,14 @@ function makeCapsule() {
             ]);
         } else {
             const [bridgeSoul, bridgeMemory] = await Promise.all([
-                _novaBridgeReadText({ pluginBaseUrl, path: soulPath, fetchImpl }),
-                _novaBridgeReadText({ pluginBaseUrl, path: memoryPath, fetchImpl }),
+                _novaBridgeReadText({ pluginBaseUrl, path: soulPath, fetchImpl, maxBytes: soulMemoryMaxBytes }),
+                _novaBridgeReadText({ pluginBaseUrl, path: memoryPath, fetchImpl, maxBytes: soulMemoryMaxBytes }),
             ]);
             const fallbackReads = [];
             if (bridgeSoul?.ok) {
+                if (bridgeSoul.truncated) {
+                    console.warn(`[command-x] Nova soul file was truncated at ${soulMemoryMaxBytes} bytes while loading.`);
+                }
                 soul = bridgeSoul.content;
             } else {
                 fallbackReads.push({
@@ -142,6 +146,9 @@ function makeCapsule() {
                 });
             }
             if (bridgeMemory?.ok) {
+                if (bridgeMemory.truncated) {
+                    console.warn(`[command-x] Nova memory file was truncated at ${soulMemoryMaxBytes} bytes while loading.`);
+                }
                 memory = bridgeMemory.content;
             } else {
                 fallbackReads.push({
@@ -150,11 +157,14 @@ function makeCapsule() {
                 });
             }
             if (fallbackReads.length) {
-                const fallback = await Promise.all(fallbackReads.map(item => item.promise));
-                fallback.forEach((value, idx) => {
-                    if (fallbackReads[idx].slot === 'soul') soul = value;
-                    if (fallbackReads[idx].slot === 'memory') memory = value;
-                });
+                const fallback = await Promise.all(fallbackReads.map(async item => ({
+                    slot: item.slot,
+                    value: await item.promise,
+                })));
+                for (const { slot, value } of fallback) {
+                    if (slot === 'soul') soul = value;
+                    if (slot === 'memory') memory = value;
+                }
             }
         }
         const result = { soul, memory };
@@ -268,6 +278,30 @@ describe('loadNovaSoulMemory — happy path', () => {
             `/scripts/extensions/third-party/${EXT}/nova/soul.md`,
             `/scripts/extensions/third-party/${EXT}/nova/memory.md`,
         ]);
+    });
+
+    it('surfaces custom bridge maxBytes and warns when live files are truncated', async () => {
+        const cap = makeCapsule();
+        const mock = makeFetchMock({
+            [`${NOVA_DEFAULT_PLUGIN_URL}/fs/read?path=nova%2Fsoul.md&encoding=utf8&maxBytes=7`]: {
+                body: JSON.stringify({ ok: true, path: 'nova/soul.md', content: 'trunc-s', bytes: 7, truncated: true }),
+            },
+            [`${NOVA_DEFAULT_PLUGIN_URL}/fs/read?path=nova%2Fmemory.md&encoding=utf8&maxBytes=7`]: {
+                body: JSON.stringify({ ok: true, path: 'nova/memory.md', content: 'trunc-m', bytes: 7, truncated: true }),
+            },
+        });
+        const warnings = [];
+        const savedWarn = console.warn;
+        try {
+            console.warn = (msg) => { warnings.push(String(msg)); };
+            const out = await cap.loadNovaSoulMemory({ fetchImpl: mock.fn, soulMemoryMaxBytes: 7 });
+            assert.deepEqual(out, { soul: 'trunc-s', memory: 'trunc-m' });
+        } finally {
+            console.warn = savedWarn;
+        }
+        assert.equal(warnings.length, 2);
+        assert.match(warnings[0], /soul file was truncated at 7 bytes/);
+        assert.match(warnings[1], /memory file was truncated at 7 bytes/);
     });
 
     it('strips trailing slashes from baseUrl', async () => {
