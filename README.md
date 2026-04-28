@@ -70,7 +70,7 @@ Messages flow through the RP naturally. The extension uses prompt injection so t
 - **Tool-calling agent inside the phone** — Nova talks to your LLM through a dedicated chat-completion connection profile and runs **approval-gated tool calls** against the SillyTavern frontend, your install directory, and (optionally) a sandboxed shell
 - **Three permission tiers** — `read` (read-only tools), `write` (adds file/character/worldbook writes, every destructive call needs approval), and `full` (also enables the shell allow-list). Configure the default in Settings → NOVA
 - **Approval modal with diff preview** — Every write or shell call opens a modal showing the tool, the parsed arguments, and (for `fs_write`) a unified diff against the current file. Click Approve to execute, Cancel to deny
-- **Skills** — A skill pack (Character Creator, Worldbook Creator, Image Prompter, free-form helper, STscript & Regex) shapes Nova's system prompt for the task at hand
+- **Skills** — A skill pack (Character Creator, Worldbook Creator, Image Prompter, Command-X Diagnostics, free-form helper, STscript & Regex) shapes Nova's system prompt for the task at hand
 - **Soul + memory** — Nova reads `nova/soul.md` (persona) and `nova/memory.md` (running notes) on every turn and can edit them through the same approval gate via the `nova_write_soul`, `nova_append_memory`, and `nova_overwrite_memory` tools
 - **Audit log** — Executed bridge requests append a JSONL line to `<root>/data/_nova-audit.jsonl` (preferred) or `<root>/_nova-audit.jsonl` (fallback) on the server side, including bridge-side refusals/errors. The in-phone Settings → 📜 audit-log viewer (client side) also records approval outcomes such as user approvals/denials before dispatch. Raw `content` / `data` / `payload` is **never** logged
 - **Companion server plugin** — `server-plugin/nova-agent-bridge/` exposes scoped `/fs/*` and `/shell/run` routes. Without the plugin, only ST-API tools are available; a yellow banner in the transcript explains what's filtered.
@@ -185,10 +185,11 @@ Toggle **Settings → NOVA → Remember approvals (this session)** to skip the m
 Pick the active skill from the Nova app's skill pill. Each skill swaps in a tailored system-prompt fragment:
 
 - **Free-form helper** — General assistant, no specialised contract.
-- **Character Creator** — Asks for archetype + traits, returns a complete character JSON, and can use the bridge `fs_write` workaround while the safer ST-native `st_write_character` handler remains deferred.
-- **Worldbook Creator** — Returns a structured worldbook payload with entries + keys + comments, using the same `fs_write` workaround when the ST-native `st_write_worldbook` handler reports `not-implemented`.
+- **Character Creator** — Asks for archetype + traits, returns a complete Tavern Card v2 JSON payload, and saves through ST-native `st_write_character` so the character lands in the proper user characters directory as a Tavern Card PNG.
+- **Worldbook Creator** — Returns structured world-info JSON with entries + keys + comments, and saves through ST-native `st_write_worldbook` so the book lands in the proper user worlds directory as a SillyTavern worldbook JSON file.
 - **Image Prompter** — Produces structured positive/negative prompt pairs for image-gen integrations.
 - **STscript & Regex** — Drafts STscript blocks and regex extension entries with safety notes.
+- **Command-X Diagnostics** — Read-only troubleshooting mode that starts with `phone_diagnose`, inspects Nova/Command-X runtime state, and can search/read source files, tests, docs, presets, and bridge files before recommending fixes.
 
 ### The `nova-agent-bridge` server plugin
 

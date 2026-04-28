@@ -90,9 +90,48 @@ function buildNovaStTools({
         const list = Array.isArray(ctx?.characters) ? ctx.characters : [];
         return list.find(c => isObject(c) && c.name === cleanName) || null;
     };
+    const stringArray = (value) => {
+        if (Array.isArray(value)) return value.map(v => String(v).trim()).filter(Boolean);
+        if (typeof value === 'string') return value.split(',').map(v => v.trim()).filter(Boolean);
+        return [];
+    };
     const cardField = (card, data, key, fallback = '') => {
         const value = data?.[key] ?? card?.[key] ?? fallback;
         return value === null || value === undefined ? fallback : value;
+    };
+    const normalizeTavernCard = (cleanName, card) => {
+        if (!isObject(card)) return null;
+        const srcData = isObject(card.data) ? card.data : {};
+        const data = { ...srcData };
+        for (const key of [
+            'description',
+            'personality',
+            'scenario',
+            'first_mes',
+            'mes_example',
+            'creator_notes',
+            'system_prompt',
+            'post_history_instructions',
+            'creator',
+            'character_version',
+        ]) {
+            const fallback = key === 'creator_notes' ? (card?.creatorcomment || '') : '';
+            data[key] = String(cardField(card, srcData, key, fallback) || '');
+        }
+        data.name = cleanName;
+        data.alternate_greetings = Array.isArray(srcData.alternate_greetings)
+            ? srcData.alternate_greetings.map(v => String(v))
+            : [];
+        data.tags = stringArray(cardField(card, srcData, 'tags', []));
+        data.extensions = isObject(srcData.extensions)
+            ? { ...srcData.extensions }
+            : (isObject(card.extensions) ? { ...card.extensions } : {});
+        return {
+            ...card,
+            spec: 'chara_card_v2',
+            spec_version: String(card.spec_version || '2.0'),
+            data,
+        };
     };
     const characterCreatePayload = (cleanName, card) => {
         const data = isObject(card?.data) ? card.data : {};
@@ -124,7 +163,7 @@ function buildNovaStTools({
         };
     };
     const characterCardFromArgs = (cleanName, args) => {
-        if (isObject(args.card)) return args.card;
+        if (isObject(args.card)) return normalizeTavernCard(cleanName, args.card);
         const fields = [
             'description',
             'personality',
@@ -156,7 +195,57 @@ function buildNovaStTools({
             character_version: String(args.character_version || ''),
             extensions: {},
         };
-        return { spec: 'chara_card_v2', spec_version: '2.0', data };
+        return normalizeTavernCard(cleanName, { spec: 'chara_card_v2', spec_version: '2.0', data });
+    };
+    const normalizeWorldbookEntry = (entry, uid) => {
+        if (!isObject(entry)) return null;
+        const out = { ...entry, uid };
+        out.key = stringArray(out.key);
+        out.keysecondary = stringArray(out.keysecondary);
+        out.comment = typeof out.comment === 'string' ? out.comment : '';
+        out.content = typeof out.content === 'string' ? out.content : '';
+        if (out.constant === undefined) out.constant = false;
+        if (out.selective === undefined) out.selective = false;
+        if (out.selectiveLogic === undefined) out.selectiveLogic = 0;
+        if (out.addMemo === undefined) out.addMemo = true;
+        if (out.order === undefined) out.order = 100;
+        if (out.position === undefined) out.position = 0;
+        if (out.disable === undefined) out.disable = false;
+        if (out.excludeRecursion === undefined) out.excludeRecursion = false;
+        if (out.preventRecursion === undefined) out.preventRecursion = false;
+        if (out.probability === undefined) out.probability = 100;
+        if (out.useProbability === undefined) out.useProbability = true;
+        if (out.vectorized === undefined) out.vectorized = false;
+        return out;
+    };
+    const normalizeWorldbookEntries = (entries) => {
+        const source = Array.isArray(entries)
+            ? entries.map((entry, idx) => [String(isObject(entry) && Number.isFinite(Number(entry.uid)) ? Number(entry.uid) : idx), entry])
+            : (isObject(entries) ? Object.entries(entries) : []);
+        const out = {};
+        const used = new Set();
+        let nextUid = 0;
+        for (const [rawKey, rawEntry] of source) {
+            if (!isObject(rawEntry)) continue;
+            let uid = Number.isFinite(Number(rawEntry.uid)) ? Math.trunc(Number(rawEntry.uid)) : Number(rawKey);
+            if (!Number.isFinite(uid) || used.has(uid)) {
+                while (used.has(nextUid)) nextUid++;
+                uid = nextUid;
+            }
+            used.add(uid);
+            const normalized = normalizeWorldbookEntry(rawEntry, uid);
+            if (normalized) out[String(uid)] = normalized;
+        }
+        return out;
+    };
+    const normalizeWorldbookBook = (cleanName, book) => {
+        if (!isObject(book)) return null;
+        const entries = normalizeWorldbookEntries(book.entries);
+        return {
+            ...book,
+            name: book.name || cleanName,
+            entries,
+        };
     };
     const refreshCharacters = async () => {
         const ctx = getCtx();
@@ -215,7 +304,13 @@ function buildNovaStTools({
             const cleanName = safeName(name);
             if (!cleanName) return { error: 'name must be a non-empty string' };
             const card = characterCardFromArgs(cleanName, args);
-            if (!isObject(card)) return { error: 'card must be an object', tool: 'st_write_character' };
+            if (!isObject(card)) {
+                return {
+                    error: 'provide a nested card object or at least one writable top-level character field',
+                    tool: 'st_write_character',
+                    hint: 'Accepted inputs: { name, card: {...} } or { name, description, personality, scenario, first_mes, ... }.',
+                };
+            }
             const ctx = getCtx();
             const existing = findCharacterByName(ctx, cleanName);
             if (existing && !overwrite) {
@@ -314,15 +409,14 @@ function buildNovaStTools({
             const cleanName = safeName(name);
             if (!cleanName) return { error: 'name must be a non-empty string' };
             if (!isObject(args.book)) return { error: 'missing-book', tool: 'st_write_worldbook' };
-            if (!isObject(args.book.entries)) return { error: 'invalid-book', tool: 'st_write_worldbook', hint: 'Worldbook JSON must include an `entries` object.' };
+            if (!isObject(args.book.entries) && !Array.isArray(args.book.entries)) return { error: 'invalid-book', tool: 'st_write_worldbook', hint: 'Worldbook JSON must include an `entries` object.' };
+            const book = normalizeWorldbookBook(cleanName, args.book);
             try {
                 const native = await listWorldbooksNative();
                 if (native.ok && native.identifiers?.has(cleanName) && !args.overwrite) {
                     return { error: 'exists', name: cleanName, hint: 'Set overwrite=true to replace this worldbook.' };
                 }
             } catch (_) { /* if listing fails, let edit endpoint be authoritative */ }
-            const book = { ...args.book };
-            if (!book.name) book.name = cleanName;
             let result;
             try {
                 result = await postJson('/api/worldinfo/edit', { name: cleanName, data: book });
@@ -573,7 +667,36 @@ describe('st_write_character', () => {
         assert.equal(calls[0].body.description, 'An agent.');
         assert.deepEqual(calls[0].body.tags, ['agent']);
         assert.equal(calls[0].body.world, 'Nova Lore');
+        const json = JSON.parse(calls[0].body.json_data);
+        assert.equal(json.spec, 'chara_card_v2');
+        assert.equal(json.spec_version, '2.0');
+        assert.equal(json.data.name, 'Nova');
         assert.equal(refreshed, true);
+    });
+
+    it('normalizes nested card JSON to Tavern Card v2 before create', async () => {
+        const calls = [];
+        const fetchImpl = async (url, init) => {
+            calls.push({ url, body: JSON.parse(init.body) });
+            return mockResponse('Correct.png');
+        };
+        await buildNovaStTools({ fetchImpl }).st_write_character({
+            name: 'Correct',
+            card: {
+                data: {
+                    name: 'Wrong',
+                    description: 'Uses the requested name on disk.',
+                    tags: 'one, two',
+                },
+            },
+        });
+        const json = JSON.parse(calls[0].body.json_data);
+        assert.equal(json.spec, 'chara_card_v2');
+        assert.equal(json.spec_version, '2.0');
+        assert.equal(json.data.name, 'Correct');
+        assert.deepEqual(json.data.tags, ['one', 'two']);
+        assert.deepEqual(json.data.alternate_greetings, []);
+        assert.equal(calls[0].body.ch_name, 'Correct');
     });
 
     it('creates a character from top-level fields when no nested card is supplied', async () => {
@@ -637,7 +760,7 @@ describe('st_write_character', () => {
 
     it('rejects missing card objects', async () => {
         const r = await buildNovaStTools({}).st_write_character({ name: 'Nova' });
-        assert.equal(r.error, 'card must be an object');
+        assert.match(r.error, /nested card object/);
     });
 
     it('returns write-failed when fetch is unavailable', async () => {
@@ -803,6 +926,32 @@ describe('st_write_worldbook', () => {
         assert.equal(calls[1].body.name, 'Lore');
         assert.equal(calls[1].body.data.name, 'Lore');
         assert.equal(calls[1].body.data.entries[0].content, 'Nova lore');
+    });
+
+    it('normalizes array entries to ST world-info entries keyed by uid', async () => {
+        const calls = [];
+        const fetchImpl = async (url, init) => {
+            calls.push({ url, body: JSON.parse(init.body) });
+            if (url === '/api/worldinfo/list') return mockResponse([]);
+            if (url === '/api/worldinfo/edit') return mockResponse({ ok: true });
+            throw new Error(`unexpected url ${url}`);
+        };
+        const book = {
+            entries: [
+                { key: 'nova, agent', keysecondary: 'bridge', content: 'Nova lore' },
+                { uid: 7, key: ['lore'], content: 'Second entry', disable: true },
+            ],
+        };
+        await buildNovaStTools({ fetchImpl }).st_write_worldbook({ name: 'Lore', book });
+        const saved = calls[1].body.data;
+        assert.equal(saved.name, 'Lore');
+        assert.deepEqual(Object.keys(saved.entries), ['0', '7']);
+        assert.equal(saved.entries[0].uid, 0);
+        assert.deepEqual(saved.entries[0].key, ['nova', 'agent']);
+        assert.deepEqual(saved.entries[0].keysecondary, ['bridge']);
+        assert.equal(saved.entries[0].constant, false);
+        assert.equal(saved.entries[7].uid, 7);
+        assert.equal(saved.entries[7].disable, true);
     });
 
     it('refuses to replace an existing worldbook unless overwrite=true', async () => {

@@ -77,6 +77,58 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-28 — Nova Command-X diagnostics skill (commit pending)
+
+**Context:** Added read-only self-diagnosis support so Nova can inspect its own
+runtime state and troubleshoot Command-X phone systems before recommending fixes.
+
+**Notes for future agents:**
+- `phone_diagnose` is a read-only `phone` backend tool in `NOVA_TOOLS`; it
+  returns a compact snapshot of version/chat context, runtime flags, relevant
+  Command-X settings, store counts/contact names, and prompt depths.
+- New `commandx-diagnostics` skill defaults to read tier and exposes
+  `phone_diagnose`, read-only ST context/profile tools, phone store reads,
+  `nova_read_soul` / `nova_read_memory`, and read-only filesystem tools for
+  source/test/docs/plugin inspection. It intentionally does not expose write or
+  shell tools by default.
+- `SKILLS_VERSION` is now 5; bump it and update `test/nova-tool-args.test.mjs`
+  whenever skill prompts, default tools, or default tiers change.
+
+### 2026-04-28 — Nova creator writes use native ST locations (commit pending)
+
+**Context:** Hardened Nova Character Creator and Worldbook Creator so creation
+claims go through ST-native write handlers instead of raw filesystem writes.
+
+**Notes for future agents:**
+- Character Creator and Worldbook Creator `defaultTools` no longer expose
+  `fs_write`; they use `st_write_character` / `st_write_worldbook` so ST writes
+  Tavern Card PNGs to the user characters directory and world-info JSON files
+  to the user worlds directory.
+- `st_write_character` now normalizes nested or top-level inputs into Tavern
+  Card v2 (`spec: "chara_card_v2"`, `spec_version: "2.0"`, `data.name`
+  matching the requested tool `name`) before calling `/api/characters/create`
+  or `/api/characters/merge-attributes`.
+- `st_write_worldbook` now accepts `entries` as either an object or array and
+  normalizes entries to an object keyed by uid with ST-style key arrays/default
+  fields before calling `/api/worldinfo/edit`.
+
+### 2026-04-28 — Nova soul/memory runtime disk reads (commit pending)
+
+**Context:** Fixed Nova soul/memory self-edits so saved files are the files Nova
+loads on later turns.
+
+**Notes for future agents:**
+- `loadNovaSoulMemory()` now defaults to reading live files through the
+  `nova-agent-bridge` `/fs/read` route at `nova/soul.md` and `nova/memory.md`
+  under the bridge root (normally the SillyTavern install root), then falls
+  back per-file to bundled `public/scripts/extensions/third-party/command-x/nova/*.md`
+  starter templates when the bridge/runtime file is unavailable.
+- The in-phone Soul & Memory editor and `buildNovaSoulMemoryHandlers()` share
+  `NOVA_SOUL_BRIDGE_PATH` / `NOVA_MEMORY_BRIDGE_PATH`; keep read and write
+  paths paired if the runtime storage location changes again.
+- `test/nova-soul-memory.test.mjs` inline-copies the bridge-read loader logic;
+  update that copy when touching `loadNovaSoulMemory()` or `_novaBridgeReadText()`.
+
 ### 2026-04-28 — Chat-completion preset prompt split (commit pending)
 
 **Context:** Enhanced `presets/openai/Command-X.json` after reviewing upstream

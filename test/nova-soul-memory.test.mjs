@@ -15,6 +15,9 @@ const EXT = 'command-x';
 const NOVA_SOUL_MEMORY_TTL_MS = 5 * 60_000;
 const NOVA_SOUL_FILENAME = 'soul.md';
 const NOVA_MEMORY_FILENAME = 'memory.md';
+const NOVA_DEFAULT_PLUGIN_URL = '/api/plugins/nova-agent-bridge';
+const NOVA_SOUL_BRIDGE_PATH = `nova/${NOVA_SOUL_FILENAME}`;
+const NOVA_MEMORY_BRIDGE_PATH = `nova/${NOVA_MEMORY_FILENAME}`;
 
 function defaultNovaSoulMemoryBaseUrl() {
     return `/scripts/extensions/third-party/${EXT}/nova`;
@@ -48,8 +51,67 @@ function makeCapsule() {
         return typeof text === 'string' ? text : '';
     }
 
+    // Inline copy of production `_novaBridgeReadText` from `index.js` for test
+    // isolation. Keep this synchronized with the production bridge-read helper,
+    // except for the ST auth-header fallback noted below.
+    async function _novaBridgeReadText({ pluginBaseUrl, path, fetchImpl, headersProvider, maxBytes = 262144 }) {
+        const doFetch = typeof fetchImpl === 'function'
+            ? fetchImpl
+            : (typeof fetch === 'function' ? fetch : null);
+        if (!doFetch) return { error: 'no-fetch' };
+        const base = String(pluginBaseUrl || NOVA_DEFAULT_PLUGIN_URL).replace(/\/+$/, '');
+        const qs = new URLSearchParams({
+            path: String(path || ''),
+            encoding: 'utf8',
+            maxBytes: String(maxBytes),
+        });
+        // Test isolation: production also falls back to imported
+        // `getRequestHeaders` when no provider is injected. This inline copy
+        // has no ST imports, so only the injected provider branch is mirrored.
+        const authHeaders = {};
+        const provider = (typeof headersProvider === 'function') ? headersProvider : null;
+        if (provider) {
+            try {
+                const h = provider({ omitContentType: true });
+                if (h && typeof h === 'object') Object.assign(authHeaders, h);
+            } catch (_) { /* noop */ }
+        }
+        let resp;
+        try {
+            resp = await doFetch(`${base}/fs/read?${qs.toString()}`, { method: 'GET', headers: authHeaders });
+        } catch (err) {
+            return { error: 'nova-bridge-unreachable', message: String(err?.message || err) };
+        }
+        let raw = '';
+        try { raw = await resp.text(); } catch (_) { /* noop */ }
+        let parsed = null;
+        if (raw) {
+            try { parsed = JSON.parse(raw); } catch (_) { /* noop */ }
+        }
+        if (!resp || !resp.ok) {
+            if (parsed && typeof parsed === 'object' && typeof parsed.error === 'string') {
+                return { ...parsed, status: resp?.status || 0 };
+            }
+            return { error: 'nova-bridge-error', status: resp?.status || 0, body: String(raw).slice(0, 400) };
+        }
+        if (parsed && typeof parsed === 'object' && typeof parsed.content === 'string') {
+            return {
+                ok: true,
+                content: parsed.content,
+                path: typeof parsed.path === 'string' ? parsed.path : path,
+                bytes: Number(parsed.bytes) || parsed.content.length,
+                truncated: Boolean(parsed.truncated),
+            };
+        }
+        return { error: 'invalid-response' };
+    }
+
     async function loadNovaSoulMemory({
         baseUrl,
+        pluginBaseUrl,
+        soulPath = NOVA_SOUL_BRIDGE_PATH,
+        memoryPath = NOVA_MEMORY_BRIDGE_PATH,
+        soulMemoryMaxBytes = 262144,
         fetchImpl,
         nowImpl,
         ttlMs = NOVA_SOUL_MEMORY_TTL_MS,
@@ -62,10 +124,52 @@ function makeCapsule() {
         const root = String(baseUrl || defaultNovaSoulMemoryBaseUrl()).replace(/\/+$/, '');
         const soulUrl = `${root}/${NOVA_SOUL_FILENAME}`;
         const memoryUrl = `${root}/${NOVA_MEMORY_FILENAME}`;
-        const [soul, memory] = await Promise.all([
-            _fetchNovaMarkdown(soulUrl, { fetchImpl }),
-            _fetchNovaMarkdown(memoryUrl, { fetchImpl }),
-        ]);
+        let soul;
+        let memory;
+        if (baseUrl) {
+            [soul, memory] = await Promise.all([
+                _fetchNovaMarkdown(soulUrl, { fetchImpl }),
+                _fetchNovaMarkdown(memoryUrl, { fetchImpl }),
+            ]);
+        } else {
+            const [bridgeSoul, bridgeMemory] = await Promise.all([
+                _novaBridgeReadText({ pluginBaseUrl, path: soulPath, fetchImpl, maxBytes: soulMemoryMaxBytes }),
+                _novaBridgeReadText({ pluginBaseUrl, path: memoryPath, fetchImpl, maxBytes: soulMemoryMaxBytes }),
+            ]);
+            const fallbackReads = [];
+            if (bridgeSoul?.ok) {
+                if (bridgeSoul.truncated) {
+                    console.warn(`[command-x] Nova soul file was truncated at ${soulMemoryMaxBytes} bytes while loading.`);
+                }
+                soul = bridgeSoul.content;
+            } else {
+                fallbackReads.push({
+                    slot: 'soul',
+                    promise: _fetchNovaMarkdown(soulUrl, { fetchImpl }),
+                });
+            }
+            if (bridgeMemory?.ok) {
+                if (bridgeMemory.truncated) {
+                    console.warn(`[command-x] Nova memory file was truncated at ${soulMemoryMaxBytes} bytes while loading.`);
+                }
+                memory = bridgeMemory.content;
+            } else {
+                fallbackReads.push({
+                    slot: 'memory',
+                    promise: _fetchNovaMarkdown(memoryUrl, { fetchImpl }),
+                });
+            }
+            if (fallbackReads.length) {
+                const fallback = await Promise.all(fallbackReads.map(async item => ({
+                    slot: item.slot,
+                    value: await item.promise,
+                })));
+                for (const { slot, value } of fallback) {
+                    if (slot === 'soul') soul = value;
+                    if (slot === 'memory') memory = value;
+                }
+            }
+        }
         const result = { soul, memory };
         _novaSoulMemoryCache = { result, expiresAt: now() + ttlMs };
         return result;
@@ -135,17 +239,72 @@ describe('loadNovaSoulMemory — happy path', () => {
         assert.deepEqual(out, { soul: 'S', memory: 'M' });
     });
 
-    it('defaults baseUrl to the extension-bundled path', async () => {
+    it('defaults to bridge-backed runtime files under nova/*.md', async () => {
         const cap = makeCapsule();
         const mock = makeFetchMock({
-            [`/scripts/extensions/third-party/${EXT}/nova/soul.md`]: { body: 'S' },
-            [`/scripts/extensions/third-party/${EXT}/nova/memory.md`]: { body: 'M' },
+            [`${NOVA_DEFAULT_PLUGIN_URL}/fs/read?path=nova%2Fsoul.md&encoding=utf8&maxBytes=262144`]: {
+                body: JSON.stringify({ ok: true, path: 'nova/soul.md', content: 'S', bytes: 1 }),
+            },
+            [`${NOVA_DEFAULT_PLUGIN_URL}/fs/read?path=nova%2Fmemory.md&encoding=utf8&maxBytes=262144`]: {
+                body: JSON.stringify({ ok: true, path: 'nova/memory.md', content: 'M', bytes: 1 }),
+            },
         });
-        await cap.loadNovaSoulMemory({ fetchImpl: mock.fn });
+        const out = await cap.loadNovaSoulMemory({ fetchImpl: mock.fn });
+        assert.deepEqual(out, { soul: 'S', memory: 'M' });
         assert.deepEqual(mock.calls, [
+            `${NOVA_DEFAULT_PLUGIN_URL}/fs/read?path=nova%2Fsoul.md&encoding=utf8&maxBytes=262144`,
+            `${NOVA_DEFAULT_PLUGIN_URL}/fs/read?path=nova%2Fmemory.md&encoding=utf8&maxBytes=262144`,
+        ]);
+    });
+
+    it('falls back to extension-bundled templates when bridge files are missing', async () => {
+        const cap = makeCapsule();
+        const mock = makeFetchMock({
+            [`${NOVA_DEFAULT_PLUGIN_URL}/fs/read?path=nova%2Fsoul.md&encoding=utf8&maxBytes=262144`]: {
+                ok: false,
+                status: 404,
+                body: JSON.stringify({ error: 'not-found' }),
+            },
+            [`${NOVA_DEFAULT_PLUGIN_URL}/fs/read?path=nova%2Fmemory.md&encoding=utf8&maxBytes=262144`]: {
+                ok: false,
+                status: 404,
+                body: JSON.stringify({ error: 'not-found' }),
+            },
+            [`/scripts/extensions/third-party/${EXT}/nova/soul.md`]: { body: 'starter soul' },
+            [`/scripts/extensions/third-party/${EXT}/nova/memory.md`]: { body: 'starter memory' },
+        });
+        const out = await cap.loadNovaSoulMemory({ fetchImpl: mock.fn });
+        assert.deepEqual(out, { soul: 'starter soul', memory: 'starter memory' });
+        assert.deepEqual(mock.calls, [
+            `${NOVA_DEFAULT_PLUGIN_URL}/fs/read?path=nova%2Fsoul.md&encoding=utf8&maxBytes=262144`,
+            `${NOVA_DEFAULT_PLUGIN_URL}/fs/read?path=nova%2Fmemory.md&encoding=utf8&maxBytes=262144`,
             `/scripts/extensions/third-party/${EXT}/nova/soul.md`,
             `/scripts/extensions/third-party/${EXT}/nova/memory.md`,
         ]);
+    });
+
+    it('surfaces custom bridge maxBytes and warns when live files are truncated', async () => {
+        const cap = makeCapsule();
+        const mock = makeFetchMock({
+            [`${NOVA_DEFAULT_PLUGIN_URL}/fs/read?path=nova%2Fsoul.md&encoding=utf8&maxBytes=7`]: {
+                body: JSON.stringify({ ok: true, path: 'nova/soul.md', content: 'trunc-s', bytes: 7, truncated: true }),
+            },
+            [`${NOVA_DEFAULT_PLUGIN_URL}/fs/read?path=nova%2Fmemory.md&encoding=utf8&maxBytes=7`]: {
+                body: JSON.stringify({ ok: true, path: 'nova/memory.md', content: 'trunc-m', bytes: 7, truncated: true }),
+            },
+        });
+        const warnings = [];
+        const savedWarn = console.warn;
+        try {
+            console.warn = (msg) => { warnings.push(String(msg)); };
+            const out = await cap.loadNovaSoulMemory({ fetchImpl: mock.fn, soulMemoryMaxBytes: 7 });
+            assert.deepEqual(out, { soul: 'trunc-s', memory: 'trunc-m' });
+        } finally {
+            console.warn = savedWarn;
+        }
+        assert.equal(warnings.length, 2);
+        assert.match(warnings[0], /soul file was truncated at 7 bytes/);
+        assert.match(warnings[1], /memory file was truncated at 7 bytes/);
     });
 
     it('strips trailing slashes from baseUrl', async () => {

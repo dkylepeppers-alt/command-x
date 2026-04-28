@@ -4781,13 +4781,13 @@ async function openNovaSoulMemoryEditor() {
     };
 
     saveSoulBtn.addEventListener('click', () => saveOne({
-        path: `nova/${NOVA_SOUL_FILENAME}`,
+        path: NOVA_SOUL_BRIDGE_PATH,
         content: String(soulTa.value || ''),
         label: 'Soul',
         button: saveSoulBtn,
     }));
     saveMemoryBtn.addEventListener('click', () => saveOne({
-        path: `nova/${NOVA_MEMORY_FILENAME}`,
+        path: NOVA_MEMORY_BRIDGE_PATH,
         content: String(memoryTa.value || ''),
         label: 'Memory',
         button: saveMemoryBtn,
@@ -6523,20 +6523,20 @@ async function probeNovaBridge({
    NOVA AGENT — soul.md / memory.md loader (plan §6a, §6b).
 
    Fetches Nova's `soul.md` (persona) and `memory.md` (durable notes)
-   from the extension folder so they can be inlined into the system
-   prompt by `sendNovaTurn`. Both files are served by ST's static
-   handler at `/scripts/extensions/third-party/<EXT>/nova/*.md` — the
-   same path pattern used for `settings.html` at init time — so no
-   plugin is required for the read path. The write path (editing
-   soul/memory via `nova_write_soul` etc.) lands with Phase 6b via
-   the `fs_write` tool or ST's `/api/files/*` fallback; this helper
-   is read-only.
+   so they can be inlined into the system prompt by `sendNovaTurn`.
+   The default live path is the bridge filesystem root (`nova/*.md`,
+   normally `<SillyTavern root>/nova/*.md`) because that is where
+   `nova_write_soul` / `nova_append_memory` persist edits. If the
+   bridge is unavailable or a runtime file is missing, the loader falls
+   back to the bundled starter templates served by ST's static handler
+   at `/scripts/extensions/third-party/<EXT>/nova/*.md`.
 
    Contract:
    - Never throws. A 404, network error, non-text body, or missing
      global `fetch` resolves to an empty string for that file.
-   - Both files are fetched in parallel via `Promise.all`. A failure
-     on one does not take down the other.
+   - Runtime bridge reads are fetched in parallel via `Promise.all`;
+     fallback template reads are also independent. A failure on one
+     file does not take down the other.
    - Result is cached in a module-level cache for
       `NOVA_SOUL_MEMORY_TTL_MS` (5 min). `invalidateNovaSoulMemoryCache()`
       drops the cache; callers should invoke it after a `nova_write_soul`
@@ -6550,11 +6550,14 @@ async function probeNovaBridge({
 const NOVA_SOUL_MEMORY_TTL_MS = 5 * 60_000; // 5 min
 const NOVA_SOUL_FILENAME = 'soul.md';
 const NOVA_MEMORY_FILENAME = 'memory.md';
+const NOVA_SOUL_BRIDGE_PATH = `nova/${NOVA_SOUL_FILENAME}`;
+const NOVA_MEMORY_BRIDGE_PATH = `nova/${NOVA_MEMORY_FILENAME}`;
 
-// Default URL builder — Phase 6b may override `baseUrl` to read from
-// `SillyTavern/data/<user>/user/files/nova/` via `/api/files/*` once
-// the "user-owned soul/memory" flow lands. For the default read path,
-// the extension-bundled copies are served by ST's static handler.
+// Default URL builder for the read-only bundled starter templates. The
+// default runtime read path goes through nova-agent-bridge first so
+// `nova_write_soul` / `nova_append_memory` edits to `<ST root>/nova/*.md`
+// are reflected on the very next turn; this static path is the fallback
+// for fresh installs without the bridge or before the runtime files exist.
 function defaultNovaSoulMemoryBaseUrl() {
     // Mirrors the settings.html path in `jQuery(async () => ...)` — uses
     // the same `EXT` constant so a rename of the extension folder only
@@ -6595,10 +6598,79 @@ async function _fetchNovaMarkdown(url, { fetchImpl }) {
 }
 
 /**
+ * Read one UTF-8 markdown file from the nova-agent-bridge filesystem root.
+ * This is the live runtime location (`<ST root>/nova/*.md`) that the write
+ * tools mutate. Never throws; callers can fall back to bundled templates.
+ *
+ * @param {object} opts
+ * @param {string} opts.pluginBaseUrl - nova-agent-bridge base URL.
+ * @param {string} opts.path - Bridge-relative file path to read.
+ * @param {function} [opts.fetchImpl] - Fetch implementation override for tests.
+ * @param {function} [opts.headersProvider] - Provides ST auth headers for production bridge requests.
+ * @param {number} [opts.maxBytes=262144] - Maximum bytes to request from the bridge.
+ * @returns {Promise<{ok: true, content: string, path: string, bytes: number, truncated: boolean} | {error: string, [key: string]: unknown}>}
+ */
+async function _novaBridgeReadText({ pluginBaseUrl, path, fetchImpl, headersProvider, maxBytes = 262144 }) {
+    const doFetch = typeof fetchImpl === 'function'
+        ? fetchImpl
+        : (typeof fetch === 'function' ? fetch : null);
+    if (!doFetch) return { error: 'no-fetch' };
+    const base = String(pluginBaseUrl || NOVA_DEFAULTS.pluginBaseUrl).replace(/\/+$/, '');
+    const qs = new URLSearchParams({
+        path: String(path || ''),
+        encoding: 'utf8',
+        maxBytes: String(maxBytes),
+    });
+    const authHeaders = {};
+    const provider = (typeof headersProvider === 'function')
+        ? headersProvider
+        : (typeof getRequestHeaders === 'function' ? getRequestHeaders : null);
+    if (provider) {
+        try {
+            const h = provider({ omitContentType: true });
+            if (h && typeof h === 'object') Object.assign(authHeaders, h);
+        } catch (_) { /* noop */ }
+    }
+    let resp;
+    try {
+        resp = await doFetch(`${base}/fs/read?${qs.toString()}`, {
+            method: 'GET',
+            headers: authHeaders,
+        });
+    } catch (err) {
+        return { error: 'nova-bridge-unreachable', message: String(err?.message || err) };
+    }
+    let raw = '';
+    try { raw = await resp.text(); } catch (_) { /* noop */ }
+    let parsed = null;
+    if (raw) {
+        try { parsed = JSON.parse(raw); } catch (_) { /* noop */ }
+    }
+    if (!resp || !resp.ok) {
+        if (parsed && typeof parsed === 'object' && typeof parsed.error === 'string') {
+            return { ...parsed, status: resp?.status || 0 };
+        }
+        return { error: 'nova-bridge-error', status: resp?.status || 0, body: String(raw).slice(0, 400) };
+    }
+    if (parsed && typeof parsed === 'object' && typeof parsed.content === 'string') {
+        return {
+            ok: true,
+            content: parsed.content,
+            path: typeof parsed.path === 'string' ? parsed.path : path,
+            bytes: Number(parsed.bytes) || parsed.content.length,
+            truncated: Boolean(parsed.truncated),
+        };
+    }
+    return { error: 'invalid-response' };
+}
+
+/**
  * Load Nova's `soul.md` + `memory.md`. See header comment for contract.
  *
  * @param {object} [opts]
- * @param {string}   [opts.baseUrl]   - URL folder containing the two files. Default: extension-bundled path.
+ * @param {string}   [opts.baseUrl]   - Optional override for URL-folder reads / fallback templates for the two files.
+ * @param {string}   [opts.pluginBaseUrl] - Optional nova-agent-bridge base URL override for live runtime reads.
+ * @param {number}   [opts.soulMemoryMaxBytes] - Bridge read cap per file. Default 256 KiB.
  * @param {function} [opts.fetchImpl] - Test-injectable `fetch` replacement.
  * @param {function} [opts.nowImpl]   - Test-injectable `Date.now` replacement.
  * @param {number}   [opts.ttlMs]     - Cache TTL. Default 5 min.
@@ -6607,7 +6679,12 @@ async function _fetchNovaMarkdown(url, { fetchImpl }) {
  */
 async function loadNovaSoulMemory({
     baseUrl,
+    pluginBaseUrl,
+    soulPath = NOVA_SOUL_BRIDGE_PATH,
+    memoryPath = NOVA_MEMORY_BRIDGE_PATH,
+    soulMemoryMaxBytes = 262144,
     fetchImpl,
+    headersProvider,
     nowImpl,
     ttlMs = NOVA_SOUL_MEMORY_TTL_MS,
     force = false,
@@ -6622,12 +6699,59 @@ async function loadNovaSoulMemory({
     const soulUrl = `${root}/${NOVA_SOUL_FILENAME}`;
     const memoryUrl = `${root}/${NOVA_MEMORY_FILENAME}`;
 
-    // Fetch in parallel. A failure on one file must not take down the
-    // other — each primitive is independently swallowed.
-    const [soul, memory] = await Promise.all([
-        _fetchNovaMarkdown(soulUrl, { fetchImpl }),
-        _fetchNovaMarkdown(memoryUrl, { fetchImpl }),
-    ]);
+    // Explicit baseUrl callers (mostly tests) request a URL-folder read.
+    // Default callers read the live bridge-backed files first, then fall
+    // back per-file to the bundled starter templates when the bridge is
+    // missing or the runtime file has not been created yet.
+    let soul;
+    let memory;
+    if (baseUrl) {
+        [soul, memory] = await Promise.all([
+            _fetchNovaMarkdown(soulUrl, { fetchImpl }),
+            _fetchNovaMarkdown(memoryUrl, { fetchImpl }),
+        ]);
+    } else {
+        const [bridgeSoul, bridgeMemory] = await Promise.all([
+            _novaBridgeReadText({ pluginBaseUrl, path: soulPath, fetchImpl, headersProvider, maxBytes: soulMemoryMaxBytes }),
+            _novaBridgeReadText({ pluginBaseUrl, path: memoryPath, fetchImpl, headersProvider, maxBytes: soulMemoryMaxBytes }),
+        ]);
+        const fallbackReads = [];
+        if (bridgeSoul?.ok) {
+            if (bridgeSoul.truncated) {
+                console.warn(`[command-x] Nova soul file was truncated at ${soulMemoryMaxBytes} bytes while loading.`);
+            }
+            soul = bridgeSoul.content;
+        } else {
+            fallbackReads.push({
+                slot: 'soul',
+                promise: _fetchNovaMarkdown(soulUrl, { fetchImpl }),
+            });
+        }
+        if (bridgeMemory?.ok) {
+            if (bridgeMemory.truncated) {
+                console.warn(`[command-x] Nova memory file was truncated at ${soulMemoryMaxBytes} bytes while loading.`);
+            }
+            memory = bridgeMemory.content;
+        } else {
+            fallbackReads.push({
+                slot: 'memory',
+                promise: _fetchNovaMarkdown(memoryUrl, { fetchImpl }),
+            });
+        }
+        if (fallbackReads.length) {
+            // The fallback promises were created while building
+            // `fallbackReads`; this `Promise.all` awaits any needed bundled
+            // template reads together rather than one file at a time.
+            const fallback = await Promise.all(fallbackReads.map(async item => ({
+                slot: item.slot,
+                value: await item.promise,
+            })));
+            for (const { slot, value } of fallback) {
+                if (slot === 'soul') soul = value;
+                if (slot === 'memory') memory = value;
+            }
+        }
+    }
 
     const result = { soul, memory };
     _novaSoulMemoryCache = { result, expiresAt: now() + ttlMs };
@@ -8069,7 +8193,7 @@ async function sendNovaTurn({
    skill default-tool lists.
    ---------------------------------------------------------------------- */
 
-const SKILLS_VERSION = 3; // bump when any skill prompt, defaultTools, or defaultTier changes; v3 expands tool-scoped skills
+const SKILLS_VERSION = 5; // bump when any skill prompt, defaultTools, or defaultTier changes
 
 const NOVA_TOOLS = [
     // === 4a. Filesystem (plugin-backed) ===
@@ -8205,7 +8329,7 @@ const NOVA_TOOLS = [
     },
     {
         name: 'st_write_character', displayName: 'Write character', permission: 'write', backend: 'st-api',
-        description: 'Create or update a SillyTavern character card. Provide either a complete chara_card_v2 `card` object or the top-level character fields; do not call with only a name. Requires approval.',
+        description: 'Create or update a SillyTavern character card through ST native character endpoints. The saved file is a Tavern Card v2 PNG in the user characters directory. Never use fs_write for character creation. Provide either a complete chara_card_v2 `card` object or top-level character fields; do not call with only a name. Requires approval.',
         parameters: {
             type: 'object',
             properties: {
@@ -8248,7 +8372,7 @@ const NOVA_TOOLS = [
     },
     {
         name: 'st_write_worldbook', displayName: 'Write worldbook', permission: 'write', backend: 'st-api',
-        description: 'Create or replace an entire worldbook file. Requires name and a full book object with entries; do not use this for a single entry unless you have read and are sending the complete worldbook JSON.',
+        description: 'Create or replace an entire SillyTavern worldbook through ST native worldinfo endpoints. The saved file is a world-info JSON file in the user worlds directory. Never use fs_write for worldbook creation. Requires name and a full book object with entries; do not use this for a single entry unless you have read and are sending the complete worldbook JSON.',
         parameters: {
             type: 'object',
             properties: {
@@ -8377,11 +8501,18 @@ const NOVA_TOOLS = [
             additionalProperties: false,
         },
     },
+    {
+        name: 'phone_diagnose', displayName: 'Diagnose Command-X runtime', permission: 'read', backend: 'phone',
+        description: 'Return a compact read-only health snapshot for Nova and Command-X phone runtime state, settings, stores, prompt depths, and current SillyTavern context.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+    },
     // --- Nova self-edit tools (plan §6b) -----------------------------
-    // Soul + memory live under the extension's `nova/` folder. Reads
-    // re-use `loadNovaSoulMemory` (force-refresh); writes go through the
-    // plugin `fs_write` route under the hood. Every write MUST invalidate
-    // the in-memory soul/memory cache so the next turn sees fresh text.
+    // Soul + memory are live runtime files under the bridge root at
+    // `nova/soul.md` and `nova/memory.md`; the extension-bundled `nova/`
+    // files are fallback starter templates only. Reads re-use
+    // `loadNovaSoulMemory` (force-refresh); writes go through the plugin
+    // `fs_write` route under the hood. Every write MUST invalidate the
+    // in-memory soul/memory cache so the next turn sees fresh text.
     {
         name: 'nova_read_soul', displayName: 'Read Nova soul', permission: 'read', backend: 'phone',
         description: 'Read Nova\'s soul.md verbatim. Soul is Nova\'s voice/persona and persists across chats.',
@@ -8448,7 +8579,6 @@ const NOVA_SKILLS = [
         allowTierEscalation: true,
         defaultTools: [
             'st_list_characters', 'st_read_character', 'st_write_character',
-            'fs_list', 'fs_read', 'fs_stat', 'fs_search', 'fs_write',
         ],
         systemPrompt: [
             'You are the Character Creator skill inside Nova.',
@@ -8461,7 +8591,11 @@ const NOVA_SKILLS = [
             '  system_prompt, post_history_instructions, alternate_greetings,',
             '  character_book, tags, creator, character_version, extensions }.',
             'Use st_write_character for creation and updates; the ST API',
-            'handles PNG embedding and chat index updates for you.',
+            'writes the Tavern Card v2 PNG to the user characters directory,',
+            'handles PNG embedding, and updates the character index for you.',
+            'Never use fs_write to create or update a character card; raw',
+            'filesystem writes can land in the wrong folder or skip PNG/card',
+            'metadata embedding.',
             'When calling st_write_character, include either a complete `card`',
             'object or top-level fields: description, personality, scenario,',
             'first_mes, mes_example, creator_notes, system_prompt,',
@@ -8488,7 +8622,6 @@ const NOVA_SKILLS = [
         allowTierEscalation: true,
         defaultTools: [
             'st_list_worldbooks', 'st_read_worldbook', 'st_write_worldbook',
-            'fs_list', 'fs_read', 'fs_stat', 'fs_search', 'fs_write',
         ],
         systemPrompt: [
             'You are the Worldbook Creator skill inside Nova.',
@@ -8500,6 +8633,9 @@ const NOVA_SKILLS = [
             '  depth, group, groupOverride, groupWeight, scanDepth, caseSensitive,',
             '  matchWholeWords, useGroupScoring, automationId, role, vectorized.',
             'Use st_read_worldbook and st_write_worldbook for creation and updates.',
+            'st_write_worldbook saves ST world-info JSON to the user worlds directory.',
+            'Never use fs_write to create or update worldbooks; raw filesystem',
+            'writes can land in the wrong folder or bypass ST world-info formatting.',
             'st_write_worldbook is a full-worldbook save and must include a complete `book` object.',
             'For a single new entry, read the target book, merge the entry into entries, then call st_write_worldbook with overwrite=true.',
             'For existing books, always use read → merge → validate → write;',
@@ -8754,6 +8890,40 @@ const NOVA_SKILLS = [
         ].join('\n'),
     },
     {
+        id: 'commandx-diagnostics',
+        label: 'Command-X Diagnostics',
+        icon: '🧪',
+        description: 'Self-diagnoses Nova and inspects Command-X phone functions, state, stores, bridge capability, and source files without writing.',
+        defaultTier: 'read',
+        allowTierEscalation: true,
+        defaultTools: [
+            'phone_diagnose',
+            'st_get_context', 'st_list_profiles', 'st_get_profile',
+            'phone_list_npcs', 'phone_list_quests', 'phone_list_places', 'phone_list_messages',
+            'nova_read_soul', 'nova_read_memory',
+            'fs_list', 'fs_read', 'fs_stat', 'fs_search',
+        ],
+        systemPrompt: [
+            'You are the Command-X Diagnostics skill inside Nova.',
+            'Your job is to self-diagnose Nova and diagnose Command-X phone',
+            'functions without changing user data. Start with phone_diagnose',
+            'to inspect runtime state, settings, store counts, prompt depths,',
+            'and the current SillyTavern context. Use st_get_context for chat',
+            'symptoms and the phone_list_* tools for app-specific stores.',
+            'Use nova_read_soul and nova_read_memory when diagnosing Nova',
+            'persona, memory, or self-instruction problems.',
+            'Use fs_search, fs_read, fs_stat, and fs_list to inspect Command-X',
+            'source code, tests, docs, presets, and server-plugin files when',
+            'the symptom points to implementation logic. Prefer narrow searches',
+            'by function name, DOM id, tool name, tag name, or storage key.',
+            'Do not write, delete, move, run shell commands, or use approval-',
+            'gated mutation tools in diagnostics mode unless the user explicitly',
+            'asks you to fix something and escalates the tier.',
+            'Report findings as: observed symptom, evidence, likely cause,',
+            'risk level, and the smallest safe next step.',
+        ].join('\n'),
+    },
+    {
         id: 'freeform',
         label: 'Plain helper',
         icon: '✴︎',
@@ -8851,8 +9021,8 @@ function buildNovaSoulMemoryHandlers({
     loadSoulMemory,
     invalidateCache,
     pluginBaseUrl,
-    soulPath = 'nova/soul.md',
-    memoryPath = 'nova/memory.md',
+    soulPath = NOVA_SOUL_BRIDGE_PATH,
+    memoryPath = NOVA_MEMORY_BRIDGE_PATH,
 } = {}) {
     const load = typeof loadSoulMemory === 'function' ? loadSoulMemory : loadNovaSoulMemory;
     const invalidate = typeof invalidateCache === 'function' ? invalidateCache : invalidateNovaSoulMemoryCache;
@@ -8920,7 +9090,7 @@ function buildNovaSoulMemoryHandlers({
 /* ----------------------------------------------------------------------
    NOVA AGENT — phone-internal tool handlers (plan §4e).
 
-   `buildNovaPhoneHandlers` returns the 8 `phone_*` tool handlers that
+   `buildNovaPhoneHandlers` returns the 9 `phone_*` tool handlers that
    read/write the phone's local stores (NPCs, quests, places, messages).
    All stores are in `localStorage` and scoped to the current chat, so no
    network, no plugin, no approval gate beyond the dispatcher's built-in
@@ -8940,10 +9110,11 @@ function buildNovaSoulMemoryHandlers({
      - `loadQuestsImpl`, `upsertQuestImpl`
      - `loadPlacesImpl`, `upsertPlaceImpl`
      - `loadMessagesImpl`, `pushMessageImpl`
+     - `diagnoseImpl`
    ---------------------------------------------------------------------- */
 
 /**
- * Build the 8 phone_* tool handlers. Returns `{ name: handler }` map
+ * Build the 9 phone_* tool handlers. Returns `{ name: handler }` map
  * compatible with the `toolHandlers` argument of `sendNovaTurn`.
  */
 function buildNovaPhoneHandlers({
@@ -8955,6 +9126,7 @@ function buildNovaPhoneHandlers({
     upsertPlaceImpl,
     loadMessagesImpl,
     pushMessageImpl,
+    diagnoseImpl,
     messageHistoryLimitDefault = 50,
     messageHistoryLimitMax = 200,
 } = {}) {
@@ -8966,6 +9138,69 @@ function buildNovaPhoneHandlers({
     const _upsertPlace = typeof upsertPlaceImpl === 'function' ? upsertPlaceImpl : (typeof upsertPlace === 'function' ? upsertPlace : null);
     const _loadMessages = typeof loadMessagesImpl === 'function' ? loadMessagesImpl : (typeof loadMessages === 'function' ? loadMessages : () => []);
     const _pushMessage = typeof pushMessageImpl === 'function' ? pushMessageImpl : (typeof pushMessage === 'function' ? pushMessage : null);
+    const _diagnose = typeof diagnoseImpl === 'function' ? diagnoseImpl : (() => {
+        const asArray = (v) => (Array.isArray(v) ? v : []);
+        const ctx = typeof getContext === 'function' ? getContext() : null;
+        const contacts = typeof getContactsFromContext === 'function'
+            ? asArray(getContactsFromContext()).map(c => c?.name).filter(Boolean)
+            : [];
+        const npcs = asArray(_loadNpcs());
+        const quests = asArray(_loadQuests());
+        const places = asArray(_loadPlaces());
+        const novaSettings = settings?.nova || NOVA_DEFAULTS;
+        return {
+            ok: true,
+            version: typeof VERSION === 'string' ? VERSION : null,
+            chatKey: typeof chatKey === 'function' ? chatKey() : null,
+            context: {
+                chatId: ctx?.chatId || null,
+                groupId: ctx?.groupId || null,
+                characterName: ctx?.name2 || null,
+                personaName: ctx?.name1 || null,
+                chatLength: Array.isArray(ctx?.chat) ? ctx.chat.length : 0,
+            },
+            runtime: {
+                phoneMounted: !!phoneContainer,
+                currentApp: currentApp || null,
+                currentContactName: currentContactName || null,
+                awaitingReply: !!awaitingReply,
+                composeQueueLength: Array.isArray(composeQueue) ? composeQueue.length : 0,
+                privatePollInFlight: !!privatePollInFlight,
+                questEnrichmentInFlight: !!questEnrichmentInFlight,
+            },
+            settings: {
+                enabled: !!settings?.enabled,
+                panelOpen: !!settings?.panelOpen,
+                batchMode: !!settings?.batchMode,
+                autoDetectNpcs: !!settings?.autoDetectNpcs,
+                manualHybridPrivateTexts: !!settings?.manualHybridPrivateTexts,
+                trackLocations: !!settings?.trackLocations,
+                contactsInjectEveryN: settings?.contactsInjectEveryN ?? null,
+                questsInjectEveryN: settings?.questsInjectEveryN ?? null,
+                mapInjectEveryN: settings?.mapInjectEveryN ?? null,
+                nova: {
+                    enabled: !!novaSettings.enabled,
+                    profileName: novaSettings.profileName || '',
+                    activeSkill: novaSettings.activeSkill || 'freeform',
+                    defaultTier: novaSettings.defaultTier || 'read',
+                    maxToolCalls: novaSettings.maxToolCalls ?? null,
+                    turnTimeoutMs: novaSettings.turnTimeoutMs ?? null,
+                    pluginBaseUrl: novaSettings.pluginBaseUrl || '',
+                    rememberApprovalsSession: !!novaSettings.rememberApprovalsSession,
+                },
+            },
+            stores: {
+                contacts: contacts.length,
+                contactNames: contacts.slice(0, 50),
+                npcs: npcs.length,
+                quests: quests.length,
+                places: places.length,
+            },
+            prompts: {
+                depths: typeof CX_PROMPT_DEPTHS === 'object' ? { ...CX_PROMPT_DEPTHS } : null,
+            },
+        };
+    });
 
     const clampLimit = (raw) => {
         const n = Number(raw);
@@ -9076,6 +9311,15 @@ function buildNovaPhoneHandlers({
                 const type = from === 'user' ? 'sent' : 'received';
                 _pushMessage(cleanName, type, text, null);
                 return { ok: true, contactName: cleanName, from };
+            } catch (err) {
+                return { error: String(err?.message || err) };
+            }
+        },
+        phone_diagnose: async () => {
+            try {
+                const report = _diagnose();
+                if (!isObject(report)) return { error: 'diagnostics unavailable' };
+                return report;
             } catch (err) {
                 return { error: String(err?.message || err) };
             }
@@ -9508,9 +9752,48 @@ function buildNovaStTools({
         const list = Array.isArray(ctx?.characters) ? ctx.characters : [];
         return list.find(c => isObject(c) && c.name === cleanName) || null;
     };
+    const stringArray = (value) => {
+        if (Array.isArray(value)) return value.map(v => String(v).trim()).filter(Boolean);
+        if (typeof value === 'string') return value.split(',').map(v => v.trim()).filter(Boolean);
+        return [];
+    };
     const cardField = (card, data, key, fallback = '') => {
         const value = data?.[key] ?? card?.[key] ?? fallback;
         return value === null || value === undefined ? fallback : value;
+    };
+    const normalizeTavernCard = (cleanName, card) => {
+        if (!isObject(card)) return null;
+        const srcData = isObject(card.data) ? card.data : {};
+        const data = { ...srcData };
+        for (const key of [
+            'description',
+            'personality',
+            'scenario',
+            'first_mes',
+            'mes_example',
+            'creator_notes',
+            'system_prompt',
+            'post_history_instructions',
+            'creator',
+            'character_version',
+        ]) {
+            const fallback = key === 'creator_notes' ? (card?.creatorcomment || '') : '';
+            data[key] = String(cardField(card, srcData, key, fallback) || '');
+        }
+        data.name = cleanName;
+        data.alternate_greetings = Array.isArray(srcData.alternate_greetings)
+            ? srcData.alternate_greetings.map(v => String(v))
+            : [];
+        data.tags = stringArray(cardField(card, srcData, 'tags', []));
+        data.extensions = isObject(srcData.extensions)
+            ? { ...srcData.extensions }
+            : (isObject(card.extensions) ? { ...card.extensions } : {});
+        return {
+            ...card,
+            spec: 'chara_card_v2',
+            spec_version: String(card.spec_version || '2.0'),
+            data,
+        };
     };
     const characterCreatePayload = (cleanName, card) => {
         const data = isObject(card?.data) ? card.data : {};
@@ -9542,7 +9825,7 @@ function buildNovaStTools({
         };
     };
     const characterCardFromArgs = (cleanName, args) => {
-        if (isObject(args.card)) return args.card;
+        if (isObject(args.card)) return normalizeTavernCard(cleanName, args.card);
         const fields = [
             'description',
             'personality',
@@ -9574,7 +9857,57 @@ function buildNovaStTools({
             character_version: String(args.character_version || ''),
             extensions: {},
         };
-        return { spec: 'chara_card_v2', spec_version: '2.0', data };
+        return normalizeTavernCard(cleanName, { spec: 'chara_card_v2', spec_version: '2.0', data });
+    };
+    const normalizeWorldbookEntry = (entry, uid) => {
+        if (!isObject(entry)) return null;
+        const out = { ...entry, uid };
+        out.key = stringArray(out.key);
+        out.keysecondary = stringArray(out.keysecondary);
+        out.comment = typeof out.comment === 'string' ? out.comment : '';
+        out.content = typeof out.content === 'string' ? out.content : '';
+        if (out.constant === undefined) out.constant = false;
+        if (out.selective === undefined) out.selective = false;
+        if (out.selectiveLogic === undefined) out.selectiveLogic = 0;
+        if (out.addMemo === undefined) out.addMemo = true;
+        if (out.order === undefined) out.order = 100;
+        if (out.position === undefined) out.position = 0;
+        if (out.disable === undefined) out.disable = false;
+        if (out.excludeRecursion === undefined) out.excludeRecursion = false;
+        if (out.preventRecursion === undefined) out.preventRecursion = false;
+        if (out.probability === undefined) out.probability = 100;
+        if (out.useProbability === undefined) out.useProbability = true;
+        if (out.vectorized === undefined) out.vectorized = false;
+        return out;
+    };
+    const normalizeWorldbookEntries = (entries) => {
+        const source = Array.isArray(entries)
+            ? entries.map((entry, idx) => [String(isObject(entry) && Number.isFinite(Number(entry.uid)) ? Number(entry.uid) : idx), entry])
+            : (isObject(entries) ? Object.entries(entries) : []);
+        const out = {};
+        const used = new Set();
+        let nextUid = 0;
+        for (const [rawKey, rawEntry] of source) {
+            if (!isObject(rawEntry)) continue;
+            let uid = Number.isFinite(Number(rawEntry.uid)) ? Math.trunc(Number(rawEntry.uid)) : Number(rawKey);
+            if (!Number.isFinite(uid) || used.has(uid)) {
+                while (used.has(nextUid)) nextUid++;
+                uid = nextUid;
+            }
+            used.add(uid);
+            const normalized = normalizeWorldbookEntry(rawEntry, uid);
+            if (normalized) out[String(uid)] = normalized;
+        }
+        return out;
+    };
+    const normalizeWorldbookBook = (cleanName, book) => {
+        if (!isObject(book)) return null;
+        const entries = normalizeWorldbookEntries(book.entries);
+        return {
+            ...book,
+            name: book.name || cleanName,
+            entries,
+        };
     };
     const refreshCharacters = async () => {
         const ctx = getCtx();
@@ -9772,17 +10105,16 @@ function buildNovaStTools({
                         + 'and the complete updated book. Only fall back to fs_* if the native endpoints are unavailable.',
                 };
             }
-            if (!isObject(args.book.entries)) {
+            if (!isObject(args.book.entries) && !Array.isArray(args.book.entries)) {
                 return { error: 'invalid-book', tool: 'st_write_worldbook', hint: 'Worldbook JSON must include an `entries` object.' };
             }
+            const book = normalizeWorldbookBook(cleanName, args.book);
             try {
                 const native = await listWorldbooksNative();
                 if (native.ok && native.identifiers?.has(cleanName) && !args.overwrite) {
                     return { error: 'exists', name: cleanName, hint: 'Set overwrite=true to replace this worldbook.' };
                 }
             } catch (_) { /* if listing fails, let edit endpoint be authoritative */ }
-            const book = { ...args.book };
-            if (!book.name) book.name = cleanName;
             let result;
             try {
                 result = await postJson('/api/worldinfo/edit', { name: cleanName, data: book });

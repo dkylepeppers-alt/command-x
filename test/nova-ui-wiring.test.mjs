@@ -219,6 +219,17 @@ test('bridge requests carry ST auth headers (plan §8c)', async () => {
         '_novaBridgeWrite must accept headersProvider');
     assert.match(writeBody[0], /omitContentType:\s*true/,
         '_novaBridgeWrite must call the headers provider with omitContentType: true');
+    // _novaBridgeReadText (soul/memory live disk reads) must use the same
+    // module-level fallback so read-before-write and editor reload requests
+    // carry ST auth headers in production.
+    const readBody = js.match(/async function _novaBridgeReadText\([\s\S]*?\n\}/);
+    assert.ok(readBody, '_novaBridgeReadText body not found');
+    assert.match(readBody[0], /headersProvider/,
+        '_novaBridgeReadText must accept headersProvider');
+    assert.match(readBody[0], /getRequestHeaders/,
+        '_novaBridgeReadText must fall back to imported getRequestHeaders');
+    assert.match(readBody[0], /omitContentType:\s*true/,
+        '_novaBridgeReadText must call the headers provider with omitContentType: true');
 });
 
 test('Profile-swap helpers are wired to the slash executor', async () => {
