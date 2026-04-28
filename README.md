@@ -185,8 +185,8 @@ Toggle **Settings → NOVA → Remember approvals (this session)** to skip the m
 Pick the active skill from the Nova app's skill pill. Each skill swaps in a tailored system-prompt fragment:
 
 - **Free-form helper** — General assistant, no specialised contract.
-- **Character Creator** — Asks for archetype + traits, returns a complete character JSON, and can use the bridge `fs_write` workaround while the safer ST-native `st_write_character` handler remains deferred.
-- **Worldbook Creator** — Returns a structured worldbook payload with entries + keys + comments, using the same `fs_write` workaround when the ST-native `st_write_worldbook` handler reports `not-implemented`.
+- **Character Creator** — Asks for archetype + traits, returns a complete Tavern Card v2 JSON payload, and saves through ST-native `st_write_character` so the character lands in the proper user characters directory as a Tavern Card PNG.
+- **Worldbook Creator** — Returns structured world-info JSON with entries + keys + comments, and saves through ST-native `st_write_worldbook` so the book lands in the proper user worlds directory as a SillyTavern worldbook JSON file.
 - **Image Prompter** — Produces structured positive/negative prompt pairs for image-gen integrations.
 - **STscript & Regex** — Drafts STscript blocks and regex extension entries with safety notes.
 

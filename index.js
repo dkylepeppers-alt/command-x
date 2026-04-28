@@ -8186,7 +8186,7 @@ async function sendNovaTurn({
    skill default-tool lists.
    ---------------------------------------------------------------------- */
 
-const SKILLS_VERSION = 3; // bump when any skill prompt, defaultTools, or defaultTier changes; v3 expands tool-scoped skills
+const SKILLS_VERSION = 4; // bump when any skill prompt, defaultTools, or defaultTier changes; v4 locks creator writes to ST-native endpoints
 
 const NOVA_TOOLS = [
     // === 4a. Filesystem (plugin-backed) ===
@@ -8322,7 +8322,7 @@ const NOVA_TOOLS = [
     },
     {
         name: 'st_write_character', displayName: 'Write character', permission: 'write', backend: 'st-api',
-        description: 'Create or update a SillyTavern character card. Provide either a complete chara_card_v2 `card` object or the top-level character fields; do not call with only a name. Requires approval.',
+        description: 'Create or update a SillyTavern character card through ST native character endpoints. The saved file is a Tavern Card v2 PNG in the user characters directory; never use fs_write for character creation. Provide either a complete chara_card_v2 `card` object or top-level character fields; do not call with only a name. Requires approval.',
         parameters: {
             type: 'object',
             properties: {
@@ -8365,7 +8365,7 @@ const NOVA_TOOLS = [
     },
     {
         name: 'st_write_worldbook', displayName: 'Write worldbook', permission: 'write', backend: 'st-api',
-        description: 'Create or replace an entire worldbook file. Requires name and a full book object with entries; do not use this for a single entry unless you have read and are sending the complete worldbook JSON.',
+        description: 'Create or replace an entire SillyTavern worldbook through ST native worldinfo endpoints. The saved file is a world-info JSON file in the user worlds directory; never use fs_write for worldbook creation. Requires name and a full book object with entries; do not use this for a single entry unless you have read and are sending the complete worldbook JSON.',
         parameters: {
             type: 'object',
             properties: {
@@ -8565,7 +8565,6 @@ const NOVA_SKILLS = [
         allowTierEscalation: true,
         defaultTools: [
             'st_list_characters', 'st_read_character', 'st_write_character',
-            'fs_list', 'fs_read', 'fs_stat', 'fs_search', 'fs_write',
         ],
         systemPrompt: [
             'You are the Character Creator skill inside Nova.',
@@ -8578,7 +8577,11 @@ const NOVA_SKILLS = [
             '  system_prompt, post_history_instructions, alternate_greetings,',
             '  character_book, tags, creator, character_version, extensions }.',
             'Use st_write_character for creation and updates; the ST API',
-            'handles PNG embedding and chat index updates for you.',
+            'writes the Tavern Card v2 PNG to the user characters directory,',
+            'handles PNG embedding, and updates the character index for you.',
+            'Never use fs_write to create or update a character card; raw',
+            'filesystem writes can land in the wrong folder or skip PNG/card',
+            'metadata embedding.',
             'When calling st_write_character, include either a complete `card`',
             'object or top-level fields: description, personality, scenario,',
             'first_mes, mes_example, creator_notes, system_prompt,',
@@ -8605,7 +8608,6 @@ const NOVA_SKILLS = [
         allowTierEscalation: true,
         defaultTools: [
             'st_list_worldbooks', 'st_read_worldbook', 'st_write_worldbook',
-            'fs_list', 'fs_read', 'fs_stat', 'fs_search', 'fs_write',
         ],
         systemPrompt: [
             'You are the Worldbook Creator skill inside Nova.',
@@ -8617,6 +8619,9 @@ const NOVA_SKILLS = [
             '  depth, group, groupOverride, groupWeight, scanDepth, caseSensitive,',
             '  matchWholeWords, useGroupScoring, automationId, role, vectorized.',
             'Use st_read_worldbook and st_write_worldbook for creation and updates.',
+            'st_write_worldbook saves ST world-info JSON to the user worlds directory.',
+            'Never use fs_write to create or update worldbooks; raw filesystem',
+            'writes can land in the wrong folder or bypass ST world-info formatting.',
             'st_write_worldbook is a full-worldbook save and must include a complete `book` object.',
             'For a single new entry, read the target book, merge the entry into entries, then call st_write_worldbook with overwrite=true.',
             'For existing books, always use read → merge → validate → write;',
@@ -9625,9 +9630,48 @@ function buildNovaStTools({
         const list = Array.isArray(ctx?.characters) ? ctx.characters : [];
         return list.find(c => isObject(c) && c.name === cleanName) || null;
     };
+    const stringArray = (value) => {
+        if (Array.isArray(value)) return value.map(v => String(v).trim()).filter(Boolean);
+        if (typeof value === 'string') return value.split(',').map(v => v.trim()).filter(Boolean);
+        return [];
+    };
     const cardField = (card, data, key, fallback = '') => {
         const value = data?.[key] ?? card?.[key] ?? fallback;
         return value === null || value === undefined ? fallback : value;
+    };
+    const normalizeTavernCard = (cleanName, card) => {
+        if (!isObject(card)) return null;
+        const srcData = isObject(card.data) ? card.data : {};
+        const data = { ...srcData };
+        for (const key of [
+            'description',
+            'personality',
+            'scenario',
+            'first_mes',
+            'mes_example',
+            'creator_notes',
+            'system_prompt',
+            'post_history_instructions',
+            'creator',
+            'character_version',
+        ]) {
+            const fallback = key === 'creator_notes' ? (card?.creatorcomment || '') : '';
+            data[key] = String(cardField(card, srcData, key, fallback) || '');
+        }
+        data.name = cleanName;
+        data.alternate_greetings = Array.isArray(srcData.alternate_greetings)
+            ? srcData.alternate_greetings.map(v => String(v))
+            : [];
+        data.tags = stringArray(cardField(card, srcData, 'tags', []));
+        data.extensions = isObject(srcData.extensions)
+            ? { ...srcData.extensions }
+            : (isObject(card.extensions) ? { ...card.extensions } : {});
+        return {
+            ...card,
+            spec: 'chara_card_v2',
+            spec_version: String(card.spec_version || '2.0'),
+            data,
+        };
     };
     const characterCreatePayload = (cleanName, card) => {
         const data = isObject(card?.data) ? card.data : {};
@@ -9659,7 +9703,7 @@ function buildNovaStTools({
         };
     };
     const characterCardFromArgs = (cleanName, args) => {
-        if (isObject(args.card)) return args.card;
+        if (isObject(args.card)) return normalizeTavernCard(cleanName, args.card);
         const fields = [
             'description',
             'personality',
@@ -9691,7 +9735,57 @@ function buildNovaStTools({
             character_version: String(args.character_version || ''),
             extensions: {},
         };
-        return { spec: 'chara_card_v2', spec_version: '2.0', data };
+        return normalizeTavernCard(cleanName, { spec: 'chara_card_v2', spec_version: '2.0', data });
+    };
+    const normalizeWorldbookEntry = (entry, uid) => {
+        if (!isObject(entry)) return null;
+        const out = { ...entry, uid };
+        out.key = stringArray(out.key);
+        out.keysecondary = stringArray(out.keysecondary);
+        out.comment = typeof out.comment === 'string' ? out.comment : '';
+        out.content = typeof out.content === 'string' ? out.content : '';
+        if (out.constant === undefined) out.constant = false;
+        if (out.selective === undefined) out.selective = false;
+        if (out.selectiveLogic === undefined) out.selectiveLogic = 0;
+        if (out.addMemo === undefined) out.addMemo = true;
+        if (out.order === undefined) out.order = 100;
+        if (out.position === undefined) out.position = 0;
+        if (out.disable === undefined) out.disable = false;
+        if (out.excludeRecursion === undefined) out.excludeRecursion = false;
+        if (out.preventRecursion === undefined) out.preventRecursion = false;
+        if (out.probability === undefined) out.probability = 100;
+        if (out.useProbability === undefined) out.useProbability = true;
+        if (out.vectorized === undefined) out.vectorized = false;
+        return out;
+    };
+    const normalizeWorldbookEntries = (entries) => {
+        const source = Array.isArray(entries)
+            ? entries.map((entry, idx) => [String(isObject(entry) && Number.isFinite(Number(entry.uid)) ? Number(entry.uid) : idx), entry])
+            : (isObject(entries) ? Object.entries(entries) : []);
+        const out = {};
+        const used = new Set();
+        let nextUid = 0;
+        for (const [rawKey, rawEntry] of source) {
+            if (!isObject(rawEntry)) continue;
+            let uid = Number.isFinite(Number(rawEntry.uid)) ? Math.trunc(Number(rawEntry.uid)) : Number(rawKey);
+            if (!Number.isFinite(uid) || used.has(uid)) {
+                while (used.has(nextUid)) nextUid++;
+                uid = nextUid;
+            }
+            used.add(uid);
+            const normalized = normalizeWorldbookEntry(rawEntry, uid);
+            if (normalized) out[String(uid)] = normalized;
+        }
+        return out;
+    };
+    const normalizeWorldbookBook = (cleanName, book) => {
+        if (!isObject(book)) return null;
+        const entries = normalizeWorldbookEntries(book.entries);
+        return {
+            ...book,
+            name: book.name || cleanName,
+            entries,
+        };
     };
     const refreshCharacters = async () => {
         const ctx = getCtx();
@@ -9889,17 +9983,16 @@ function buildNovaStTools({
                         + 'and the complete updated book. Only fall back to fs_* if the native endpoints are unavailable.',
                 };
             }
-            if (!isObject(args.book.entries)) {
+            if (!isObject(args.book.entries) && !Array.isArray(args.book.entries)) {
                 return { error: 'invalid-book', tool: 'st_write_worldbook', hint: 'Worldbook JSON must include an `entries` object.' };
             }
+            const book = normalizeWorldbookBook(cleanName, args.book);
             try {
                 const native = await listWorldbooksNative();
                 if (native.ok && native.identifiers?.has(cleanName) && !args.overwrite) {
                     return { error: 'exists', name: cleanName, hint: 'Set overwrite=true to replace this worldbook.' };
                 }
             } catch (_) { /* if listing fails, let edit endpoint be authoritative */ }
-            const book = { ...args.book };
-            if (!book.name) book.name = cleanName;
             let result;
             try {
                 result = await postJson('/api/worldinfo/edit', { name: cleanName, data: book });
