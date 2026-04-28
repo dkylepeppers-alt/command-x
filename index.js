@@ -8186,7 +8186,7 @@ async function sendNovaTurn({
    skill default-tool lists.
    ---------------------------------------------------------------------- */
 
-const SKILLS_VERSION = 5; // bump when any skill prompt, defaultTools, or defaultTier changes; v4 adds ST-native creator tools, v5 adds read-only diagnostics skill/tool
+const SKILLS_VERSION = 5; // bump when any skill prompt, defaultTools, or defaultTier changes
 
 const NOVA_TOOLS = [
     // === 4a. Filesystem (plugin-backed) ===
