@@ -62,6 +62,9 @@ function makeCapsule() {
             encoding: 'utf8',
             maxBytes: String(maxBytes),
         });
+        // Test isolation: production also falls back to imported
+        // `getRequestHeaders` when no provider is injected. This inline copy
+        // has no ST imports, so only the injected provider branch is mirrored.
         const authHeaders = {};
         const provider = (typeof headersProvider === 'function') ? headersProvider : null;
         if (provider) {

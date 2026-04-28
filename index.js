@@ -6724,6 +6724,9 @@ async function loadNovaSoulMemory({
             });
         }
         if (fallbackReads.length) {
+            // The fallback promises were created while building
+            // `fallbackReads`; this `Promise.all` awaits any needed bundled
+            // template reads together rather than one file at a time.
             const fallback = await Promise.all(fallbackReads.map(item => item.promise));
             fallback.forEach((value, idx) => {
                 if (fallbackReads[idx].slot === 'soul') soul = value;
