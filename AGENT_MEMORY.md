@@ -77,6 +77,23 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-27 — Nova character/worldbook skill access broadened (commit pending)
+
+**Context:** Made the Nova Character Creator and Worldbook Creator skills less
+isolated so authoring either asset type can inspect and, with approval, update
+the other linked ST asset type.
+
+**Notes for future agents:**
+- `character-creator` and `worldbook-creator` now both expose the full ST
+  character/worldbook read+write tool set in `defaultTools`:
+  `st_list_characters`, `st_read_character`, `st_write_character`,
+  `st_list_worldbooks`, `st_read_worldbook`, and `st_write_worldbook`.
+- `SKILLS_VERSION` is now `4`; keep `test/nova-tool-args.test.mjs` in sync
+  whenever skill prompts or `defaultTools` change.
+- The full test suite still has the pre-existing
+  `test/nova-shell-route.test.mjs` ANSI-color stdout mismatch in this runner;
+  the targeted Nova skill schema test passes.
+
 ### 2026-04-27 — SMS attachment storage review follow-up (commit pending)
 
 **Context:** Follow-up to PR review on the non-Nova quest/map/SMS UX update.
