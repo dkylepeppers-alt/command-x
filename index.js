@@ -6601,6 +6601,8 @@ async function _fetchNovaMarkdown(url, { fetchImpl }) {
  * Read one UTF-8 markdown file from the nova-agent-bridge filesystem root.
  * This is the live runtime location (`<ST root>/nova/*.md`) that the write
  * tools mutate. Never throws; callers can fall back to bundled templates.
+ *
+ * @returns {Promise<{ok: true, content: string, path: string, bytes: number, truncated: boolean} | {error: string, [key: string]: unknown}>}
  */
 async function _novaBridgeReadText({ pluginBaseUrl, path, fetchImpl, headersProvider, maxBytes = 262144 }) {
     const doFetch = typeof fetchImpl === 'function'
@@ -6705,24 +6707,27 @@ async function loadNovaSoulMemory({
             _novaBridgeReadText({ pluginBaseUrl, path: memoryPath, fetchImpl, headersProvider }),
         ]);
         const fallbackReads = [];
-        const fallbackSlots = [];
         if (bridgeSoul?.ok) {
             soul = bridgeSoul.content;
         } else {
-            fallbackSlots.push('soul');
-            fallbackReads.push(_fetchNovaMarkdown(soulUrl, { fetchImpl }));
+            fallbackReads.push({
+                slot: 'soul',
+                promise: _fetchNovaMarkdown(soulUrl, { fetchImpl }),
+            });
         }
         if (bridgeMemory?.ok) {
             memory = bridgeMemory.content;
         } else {
-            fallbackSlots.push('memory');
-            fallbackReads.push(_fetchNovaMarkdown(memoryUrl, { fetchImpl }));
+            fallbackReads.push({
+                slot: 'memory',
+                promise: _fetchNovaMarkdown(memoryUrl, { fetchImpl }),
+            });
         }
         if (fallbackReads.length) {
-            const fallback = await Promise.all(fallbackReads);
+            const fallback = await Promise.all(fallbackReads.map(item => item.promise));
             fallback.forEach((value, idx) => {
-                if (fallbackSlots[idx] === 'soul') soul = value;
-                if (fallbackSlots[idx] === 'memory') memory = value;
+                if (fallbackReads[idx].slot === 'soul') soul = value;
+                if (fallbackReads[idx].slot === 'memory') memory = value;
             });
         }
     }

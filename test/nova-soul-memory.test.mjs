@@ -51,7 +51,7 @@ function makeCapsule() {
         return typeof text === 'string' ? text : '';
     }
 
-    async function _novaBridgeReadText({ pluginBaseUrl, path, fetchImpl, maxBytes = 262144 }) {
+    async function _novaBridgeReadText({ pluginBaseUrl, path, fetchImpl, headersProvider, maxBytes = 262144 }) {
         const doFetch = typeof fetchImpl === 'function'
             ? fetchImpl
             : (typeof fetch === 'function' ? fetch : null);
@@ -62,9 +62,17 @@ function makeCapsule() {
             encoding: 'utf8',
             maxBytes: String(maxBytes),
         });
+        const authHeaders = {};
+        const provider = (typeof headersProvider === 'function') ? headersProvider : null;
+        if (provider) {
+            try {
+                const h = provider({ omitContentType: true });
+                if (h && typeof h === 'object') Object.assign(authHeaders, h);
+            } catch (_) { /* noop */ }
+        }
         let resp;
         try {
-            resp = await doFetch(`${base}/fs/read?${qs.toString()}`, { method: 'GET', headers: {} });
+            resp = await doFetch(`${base}/fs/read?${qs.toString()}`, { method: 'GET', headers: authHeaders });
         } catch (err) {
             return { error: 'nova-bridge-unreachable', message: String(err?.message || err) };
         }
@@ -122,24 +130,27 @@ function makeCapsule() {
                 _novaBridgeReadText({ pluginBaseUrl, path: memoryPath, fetchImpl }),
             ]);
             const fallbackReads = [];
-            const fallbackSlots = [];
             if (bridgeSoul?.ok) {
                 soul = bridgeSoul.content;
             } else {
-                fallbackSlots.push('soul');
-                fallbackReads.push(_fetchNovaMarkdown(soulUrl, { fetchImpl }));
+                fallbackReads.push({
+                    slot: 'soul',
+                    promise: _fetchNovaMarkdown(soulUrl, { fetchImpl }),
+                });
             }
             if (bridgeMemory?.ok) {
                 memory = bridgeMemory.content;
             } else {
-                fallbackSlots.push('memory');
-                fallbackReads.push(_fetchNovaMarkdown(memoryUrl, { fetchImpl }));
+                fallbackReads.push({
+                    slot: 'memory',
+                    promise: _fetchNovaMarkdown(memoryUrl, { fetchImpl }),
+                });
             }
             if (fallbackReads.length) {
-                const fallback = await Promise.all(fallbackReads);
+                const fallback = await Promise.all(fallbackReads.map(item => item.promise));
                 fallback.forEach((value, idx) => {
-                    if (fallbackSlots[idx] === 'soul') soul = value;
-                    if (fallbackSlots[idx] === 'memory') memory = value;
+                    if (fallbackReads[idx].slot === 'soul') soul = value;
+                    if (fallbackReads[idx].slot === 'memory') memory = value;
                 });
             }
         }
