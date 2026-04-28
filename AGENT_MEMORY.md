@@ -77,6 +77,30 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-28 — Chat-completion preset prompt split (commit pending)
+
+**Context:** Enhanced `presets/openai/Command-X.json` after reviewing upstream
+SillyTavern preset shape plus external extension/community preset conventions.
+
+**Notes for future agents:**
+- The preset now keeps `main` focused on RP quality/user-agency boundaries and
+  moves Command-X tag grammar into a dedicated `commandXSideChannels` system
+  prompt enabled immediately after `main` in both default `prompt_order` blocks.
+- `jailbreak` / Post-History Instructions is no longer empty; it is a concise
+  final formatting reminder to put visible RP first and optional tags last.
+- `test/nova-preset.test.mjs` now asserts the modular prompt contract, current
+  contact/quest enums, richer quest fields, and side-channel prompt ordering.
+- Review follow-up aligned the preset `[place]` example with the actual map
+  contract (`name`, `emoji`, `near`, `aliases`) and explicitly routes occupancy
+  through `[status].place` / `[status].location`; do not re-add `[place]`
+  occupants/description unless the place store starts persisting those fields.
+- The unrelated Nova Character/Worldbook Creator default-tool broadening was
+  split out of this preset PR by reverting `index.js` and
+  `test/nova-tool-args.test.mjs` back to the pre-`24bfa2b` state.
+- Full `node --test test/*.mjs` still hits the pre-existing
+  `test/nova-shell-route.test.mjs` ANSI-color stdout mismatch in this runner;
+  targeted preset tests and JSON syntax validation pass.
+
 ### 2026-04-27 — SMS attachment storage review follow-up (commit pending)
 
 **Context:** Follow-up to PR review on the non-Nova quest/map/SMS UX update.

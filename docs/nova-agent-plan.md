@@ -892,13 +892,15 @@ on ST's own `default/content/presets/openai/Default.json` schema.
     `gpt-4o-mini` (user can override).
   - `temperature: 0.85`, `top_p: 1`, `frequency_penalty: 0.1`,
     `presence_penalty: 0.1`, `openai_max_context: 32768`,
-    `openai_max_tokens: 800`, `stream_openai: true`,
+    `openai_max_tokens: 1200`, `stream_openai: true`,
     `names_behavior: 2` (completion names).
-  - Main Prompt authored for Command-X RP: tells the model to emit
+  - Main Prompt authored for Command-X RP quality and user-agency boundaries.
+  - Dedicated `commandXSideChannels` prompt tells the model to emit
     `[sms from=… to=…]…[/sms]`, `[status]…[/status]`, `[quests]…[/quests]`,
     `[place]…[/place]` tags when relevant, **to never narrate them**, and to
-    keep phone bubbles short and texty.
-  - Jailbreak / Post-History: empty by default.
+    keep phone bubbles short and texty while documenting current status/quest
+    enums and richer quest fields.
+  - Jailbreak / Post-History: concise final formatting reminder by default.
   - Preserve all marker prompts (`chatHistory`, `worldInfoBefore`, etc.).
 - [x] Preset doubles as the default for Nova: Nova's system prompt is
   layered *on top of* the preset's Main Prompt; tool-use contract is added at
@@ -927,10 +929,11 @@ on ST's own `default/content/presets/openai/Default.json` schema.
 ### 11c. Research basis
 - [x] Modeled on the upstream ST default preset
   (`SillyTavern/SillyTavern@default/content/presets/openai/Default.json`),
-  trimmed for Command-X defaults. Public community presets (e.g. Celia,
-  Marinara, Universal Light) reviewed for conventions around `wi_format`,
-  `scenario_format`, and `names_behavior`; Command-X preset aligns with the
-  "simple, portable, provider-agnostic" end of that spectrum.
+  trimmed for Command-X defaults. Public extension/community presets were
+  reviewed for conventions around schema parity, modular prompts, prompt order,
+  `wi_format`, `scenario_format`, and `names_behavior`; Command-X preset aligns
+  with the "simple, portable, provider-agnostic" end of that spectrum while
+  keeping side-channel instructions in their own prompt.
 
 ### 11d. Docs
 - [x] `presets/openai/README.md` documenting: what each field is tuned for,

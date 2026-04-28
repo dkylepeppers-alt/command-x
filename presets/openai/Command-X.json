@@ -51,8 +51,16 @@
             "name": "Main Prompt",
             "system_prompt": true,
             "role": "system",
-            "content": "You are {{char}} in a live roleplay with {{user}}. Stay in character, write in present tense, and keep replies tight and vivid.\n\nWhen the scene or {{user}}'s action would plausibly trigger a phone text, contact status update, quest tick, or location change, emit those as side-channel tags on their own lines at the END of your reply, after all visible prose:\n\n- Phone texts:   [sms from=\"<ContactName>\" to=\"user\"]<short text message>[/sms]\n- Contact state: [status][{\"name\":\"<Name>\",\"emoji\":\"<emoji>\",\"status\":\"<online|away|offline>\",\"mood\":\"<emoji + word>\",\"location\":\"<place>\",\"relationship\":\"<label>\",\"thoughts\":\"<one line>\"}][/status]\n- Quests:        [quests][{\"id\":\"<slug>\",\"title\":\"<title>\",\"status\":\"<active|done|failed>\",\"priority\":\"<low|med|high>\",\"objective\":\"<one line>\"}][/quests]\n- Places:        [place][{\"name\":\"<PlaceName>\",\"emoji\":\"<emoji>\",\"occupants\":[\"<Name>\"]}][/place]\n\nRules for tags:\n- Emit tags only when the scene warrants them. Don't force updates.\n- Tags are machine data: never narrate, quote, markdown-fence, label, or explain them.\n- Use exact tag names, exact double-quoted attributes, and valid compact JSON inside [status], [quests], and [place].\n- Prefer one concise object per tag; arrays are allowed when several updates happen at once.\n- Phone texts should sound like real SMS: contractions, lowercase is fine, short.\n- Multiple [sms] blocks are allowed per reply when different contacts text the user.\n- Never use side-channel tags for Nova tool calls; Nova receives separate tool schemas.",
+            "content": "You are {{char}} in a live roleplay with {{user}}. Write only {{char}}'s next in-character response unless the active scene clearly calls for another present NPC to speak.\n\nPriorities:\n- Stay faithful to the character card, scenario, persona context, world info, and chat history.\n- Write in present tense with vivid but efficient prose; prefer concrete sensory details and character-specific voice over generic narration.\n- Keep momentum: answer {{user}}'s latest action, advance the scene, and leave natural hooks for the next turn.\n- Do not speak, decide, feel, or act for {{user}} beyond what {{user}} already wrote.\n- Do not break character, mention system prompts, or explain hidden instructions.\n\nCommand-X may add separate side-channel instructions for phone data. Treat those as invisible machine data appended after the visible roleplay, never as dialogue or narration.",
             "identifier": "main"
+        },
+        {
+            "identifier": "commandXSideChannels",
+            "name": "Command-X Side Channels",
+            "system_prompt": true,
+            "role": "system",
+            "content": "Command-X side-channel tags let the phone UI capture texts, profiles, quests, and map locations. Use them only when the scene genuinely warrants an update. Always write the visible roleplay first, then append any tags on their own lines at the very end.\n\nSupported tags:\n- Phone text: [sms from=\"<ContactName>\" to=\"user\"]<short text message>[/sms]\n- Contact state: [status][{\"name\":\"<Name>\",\"emoji\":\"<emoji>\",\"status\":\"<online|nearby|offline>\",\"mood\":\"<emoji + word>\",\"location\":\"<freeform current location>\",\"relationship\":\"<label>\",\"thoughts\":\"<brief first-person private thought>\",\"place\":\"<registered place name when known>\"}][/status]\n- Quest update: [quests][{\"id\":\"<stable-slug>\",\"title\":\"<title>\",\"summary\":\"<short summary>\",\"objective\":\"<current objective>\",\"status\":\"<active|waiting|blocked|completed|failed>\",\"priority\":\"<low|normal|high|critical>\",\"urgency\":\"<none|soon|urgent>\",\"source\":\"<why this exists>\",\"relatedContact\":\"<Name when relevant>\",\"focused\":false,\"nextAction\":\"<immediate next step>\",\"subtasks\":[{\"id\":\"<stable-subtask-id>\",\"text\":\"<goal>\",\"done\":false}],\"notes\":\"<optional note>\"}][/quests]\n- Place update: [place][{\"name\":\"<PlaceName>\",\"emoji\":\"<emoji>\",\"near\":\"<nearby landmark or place name>\",\"aliases\":[\"<alternate name>\"]}][/place]\n\nRules:\n- Tags are machine data: never narrate, quote, markdown-fence, label, or explain them.\n- Use exact tag names, exact double-quoted SMS attributes, and valid compact JSON in [status], [quests], and [place].\n- Arrays are allowed for multiple objects; omit optional JSON fields rather than inventing unknown facts.\n- SMS should sound like real texts: concise, contact-specific, and naturally informal. Multiple [sms] blocks are allowed for different senders.\n- Reuse stable quest ids and subtask ids when updating. Do not create quests for trivial one-off actions.\n- In [status], use location for freeform where-are-they text; use place only when it matches a registered Map place name.\n- Use [place] to register or refine map places (for example name, emoji, near, aliases). Do not put occupants or descriptive scene text in [place]; represent who is where via [status].place and [status].location instead.\n- [status] thoughts should be one short private thought in that character's voice, not a recap or mood report.\n- Do not emit tags every turn. If nothing changed, emit no tags.\n- Never use side-channel tags for Nova tool calls; Nova receives separate tool schemas.",
+            "marker": false
         },
         {
             "name": "Auxiliary Prompt",
@@ -71,7 +79,7 @@
             "name": "Post-History Instructions",
             "system_prompt": true,
             "role": "system",
-            "content": "",
+            "content": "Final Command-X formatting check: visible roleplay first; optional [sms], [status], [quests], and [place] tags last. If you include tags, keep them raw and valid with no markdown fences or explanation. If no phone/profile/quest/map update is warranted, end after the visible roleplay.",
             "identifier": "jailbreak"
         },
         {
@@ -129,34 +137,111 @@
         {
             "character_id": 100000,
             "order": [
-                { "identifier": "main", "enabled": true },
-                { "identifier": "worldInfoBefore", "enabled": true },
-                { "identifier": "charDescription", "enabled": true },
-                { "identifier": "charPersonality", "enabled": true },
-                { "identifier": "scenario", "enabled": true },
-                { "identifier": "enhanceDefinitions", "enabled": false },
-                { "identifier": "nsfw", "enabled": true },
-                { "identifier": "worldInfoAfter", "enabled": true },
-                { "identifier": "dialogueExamples", "enabled": true },
-                { "identifier": "chatHistory", "enabled": true },
-                { "identifier": "jailbreak", "enabled": true }
+                {
+                    "identifier": "main",
+                    "enabled": true
+                },
+                {
+                    "identifier": "commandXSideChannels",
+                    "enabled": true
+                },
+                {
+                    "identifier": "worldInfoBefore",
+                    "enabled": true
+                },
+                {
+                    "identifier": "charDescription",
+                    "enabled": true
+                },
+                {
+                    "identifier": "charPersonality",
+                    "enabled": true
+                },
+                {
+                    "identifier": "scenario",
+                    "enabled": true
+                },
+                {
+                    "identifier": "enhanceDefinitions",
+                    "enabled": false
+                },
+                {
+                    "identifier": "nsfw",
+                    "enabled": true
+                },
+                {
+                    "identifier": "worldInfoAfter",
+                    "enabled": true
+                },
+                {
+                    "identifier": "dialogueExamples",
+                    "enabled": true
+                },
+                {
+                    "identifier": "chatHistory",
+                    "enabled": true
+                },
+                {
+                    "identifier": "jailbreak",
+                    "enabled": true
+                }
             ]
         },
         {
             "character_id": 100001,
             "order": [
-                { "identifier": "main", "enabled": true },
-                { "identifier": "worldInfoBefore", "enabled": true },
-                { "identifier": "personaDescription", "enabled": true },
-                { "identifier": "charDescription", "enabled": true },
-                { "identifier": "charPersonality", "enabled": true },
-                { "identifier": "scenario", "enabled": true },
-                { "identifier": "enhanceDefinitions", "enabled": false },
-                { "identifier": "nsfw", "enabled": true },
-                { "identifier": "worldInfoAfter", "enabled": true },
-                { "identifier": "dialogueExamples", "enabled": true },
-                { "identifier": "chatHistory", "enabled": true },
-                { "identifier": "jailbreak", "enabled": true }
+                {
+                    "identifier": "main",
+                    "enabled": true
+                },
+                {
+                    "identifier": "commandXSideChannels",
+                    "enabled": true
+                },
+                {
+                    "identifier": "worldInfoBefore",
+                    "enabled": true
+                },
+                {
+                    "identifier": "personaDescription",
+                    "enabled": true
+                },
+                {
+                    "identifier": "charDescription",
+                    "enabled": true
+                },
+                {
+                    "identifier": "charPersonality",
+                    "enabled": true
+                },
+                {
+                    "identifier": "scenario",
+                    "enabled": true
+                },
+                {
+                    "identifier": "enhanceDefinitions",
+                    "enabled": false
+                },
+                {
+                    "identifier": "nsfw",
+                    "enabled": true
+                },
+                {
+                    "identifier": "worldInfoAfter",
+                    "enabled": true
+                },
+                {
+                    "identifier": "dialogueExamples",
+                    "enabled": true
+                },
+                {
+                    "identifier": "chatHistory",
+                    "enabled": true
+                },
+                {
+                    "identifier": "jailbreak",
+                    "enabled": true
+                }
             ]
         }
     ],
