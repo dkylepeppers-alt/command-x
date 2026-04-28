@@ -77,6 +77,18 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-28 — Image Prompter visual-only prompt guidance (commit pending)
+
+**Context:** Tightened Nova's Image Prompter skill so it produces dense,
+image-generation-focused prompts grounded in the current RP scene.
+
+**Notes for future agents:**
+- `NOVA_SKILLS.image-prompter.systemPrompt` now explicitly excludes story
+  narration, inner thoughts, dialogue, symbolism, backstory, and filler; keep it
+  focused on directly visible details that affect the generated image.
+- `SKILLS_VERSION` is now 6; update `test/nova-tool-args.test.mjs` whenever
+  skill prompt wording, default tools, or default tiers change.
+
 ### 2026-04-28 — Nova Command-X diagnostics skill (commit pending)
 
 **Context:** Added read-only self-diagnosis support so Nova can inspect its own
