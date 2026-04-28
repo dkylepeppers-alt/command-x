@@ -8186,7 +8186,7 @@ async function sendNovaTurn({
    skill default-tool lists.
    ---------------------------------------------------------------------- */
 
-const SKILLS_VERSION = 4; // bump when any skill prompt, defaultTools, or defaultTier changes; v4 locks creator writes to ST-native endpoints
+const SKILLS_VERSION = 5; // bump when any skill prompt, defaultTools, or defaultTier changes; v5 adds read-only diagnostics skill/tool
 
 const NOVA_TOOLS = [
     // === 4a. Filesystem (plugin-backed) ===
@@ -8493,6 +8493,11 @@ const NOVA_TOOLS = [
             required: ['contactName', 'from', 'text'],
             additionalProperties: false,
         },
+    },
+    {
+        name: 'phone_diagnose', displayName: 'Diagnose Command-X runtime', permission: 'read', backend: 'phone',
+        description: 'Return a compact read-only health snapshot for Nova and Command-X phone runtime state, settings, stores, prompt depths, and current SillyTavern context.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
     },
     // --- Nova self-edit tools (plan §6b) -----------------------------
     // Soul + memory live under the extension's `nova/` folder. Reads
@@ -8876,6 +8881,40 @@ const NOVA_SKILLS = [
         ].join('\n'),
     },
     {
+        id: 'commandx-diagnostics',
+        label: 'Command-X Diagnostics',
+        icon: '🧪',
+        description: 'Self-diagnoses Nova and inspects Command-X phone functions, state, stores, bridge capability, and source files without writing.',
+        defaultTier: 'read',
+        allowTierEscalation: true,
+        defaultTools: [
+            'phone_diagnose',
+            'st_get_context', 'st_list_profiles', 'st_get_profile',
+            'phone_list_npcs', 'phone_list_quests', 'phone_list_places', 'phone_list_messages',
+            'nova_read_soul', 'nova_read_memory',
+            'fs_list', 'fs_read', 'fs_stat', 'fs_search',
+        ],
+        systemPrompt: [
+            'You are the Command-X Diagnostics skill inside Nova.',
+            'Your job is to self-diagnose Nova and diagnose Command-X phone',
+            'functions without changing user data. Start with phone_diagnose',
+            'to inspect runtime state, settings, store counts, prompt depths,',
+            'and the current SillyTavern context. Use st_get_context for chat',
+            'symptoms and the phone_list_* tools for app-specific stores.',
+            'Use nova_read_soul and nova_read_memory when diagnosing Nova',
+            'persona, memory, or self-instruction problems.',
+            'Use fs_search, fs_read, fs_stat, and fs_list to inspect Command-X',
+            'source code, tests, docs, presets, and server-plugin files when',
+            'the symptom points to implementation logic. Prefer narrow searches',
+            'by function name, DOM id, tool name, tag name, or storage key.',
+            'Do not write, delete, move, run shell commands, or use approval-',
+            'gated mutation tools in diagnostics mode unless the user explicitly',
+            'asks you to fix something and escalates the tier.',
+            'Report findings as: observed symptom, evidence, likely cause,',
+            'risk level, and the smallest safe next step.',
+        ].join('\n'),
+    },
+    {
         id: 'freeform',
         label: 'Plain helper',
         icon: '✴︎',
@@ -9042,7 +9081,7 @@ function buildNovaSoulMemoryHandlers({
 /* ----------------------------------------------------------------------
    NOVA AGENT — phone-internal tool handlers (plan §4e).
 
-   `buildNovaPhoneHandlers` returns the 8 `phone_*` tool handlers that
+   `buildNovaPhoneHandlers` returns the 9 `phone_*` tool handlers that
    read/write the phone's local stores (NPCs, quests, places, messages).
    All stores are in `localStorage` and scoped to the current chat, so no
    network, no plugin, no approval gate beyond the dispatcher's built-in
@@ -9062,10 +9101,11 @@ function buildNovaSoulMemoryHandlers({
      - `loadQuestsImpl`, `upsertQuestImpl`
      - `loadPlacesImpl`, `upsertPlaceImpl`
      - `loadMessagesImpl`, `pushMessageImpl`
+     - `diagnoseImpl`
    ---------------------------------------------------------------------- */
 
 /**
- * Build the 8 phone_* tool handlers. Returns `{ name: handler }` map
+ * Build the 9 phone_* tool handlers. Returns `{ name: handler }` map
  * compatible with the `toolHandlers` argument of `sendNovaTurn`.
  */
 function buildNovaPhoneHandlers({
@@ -9077,6 +9117,7 @@ function buildNovaPhoneHandlers({
     upsertPlaceImpl,
     loadMessagesImpl,
     pushMessageImpl,
+    diagnoseImpl,
     messageHistoryLimitDefault = 50,
     messageHistoryLimitMax = 200,
 } = {}) {
@@ -9088,6 +9129,69 @@ function buildNovaPhoneHandlers({
     const _upsertPlace = typeof upsertPlaceImpl === 'function' ? upsertPlaceImpl : (typeof upsertPlace === 'function' ? upsertPlace : null);
     const _loadMessages = typeof loadMessagesImpl === 'function' ? loadMessagesImpl : (typeof loadMessages === 'function' ? loadMessages : () => []);
     const _pushMessage = typeof pushMessageImpl === 'function' ? pushMessageImpl : (typeof pushMessage === 'function' ? pushMessage : null);
+    const _diagnose = typeof diagnoseImpl === 'function' ? diagnoseImpl : (() => {
+        const asArray = (v) => (Array.isArray(v) ? v : []);
+        const ctx = typeof getContext === 'function' ? getContext() : null;
+        const contacts = typeof getContactsFromContext === 'function'
+            ? asArray(getContactsFromContext()).map(c => c?.name).filter(Boolean)
+            : [];
+        const npcs = asArray(_loadNpcs());
+        const quests = asArray(_loadQuests());
+        const places = asArray(_loadPlaces());
+        const novaSettings = settings?.nova || NOVA_DEFAULTS;
+        return {
+            ok: true,
+            version: typeof VERSION === 'string' ? VERSION : null,
+            chatKey: typeof chatKey === 'function' ? chatKey() : null,
+            context: {
+                chatId: ctx?.chatId || null,
+                groupId: ctx?.groupId || null,
+                characterName: ctx?.name2 || null,
+                personaName: ctx?.name1 || null,
+                chatLength: Array.isArray(ctx?.chat) ? ctx.chat.length : 0,
+            },
+            runtime: {
+                phoneMounted: !!phoneContainer,
+                currentApp: currentApp || null,
+                currentContactName: currentContactName || null,
+                awaitingReply: !!awaitingReply,
+                composeQueueLength: Array.isArray(composeQueue) ? composeQueue.length : 0,
+                privatePollInFlight: !!privatePollInFlight,
+                questEnrichmentInFlight: !!questEnrichmentInFlight,
+            },
+            settings: {
+                enabled: !!settings?.enabled,
+                panelOpen: !!settings?.panelOpen,
+                batchMode: !!settings?.batchMode,
+                autoDetectNpcs: !!settings?.autoDetectNpcs,
+                manualHybridPrivateTexts: !!settings?.manualHybridPrivateTexts,
+                trackLocations: !!settings?.trackLocations,
+                contactsInjectEveryN: settings?.contactsInjectEveryN ?? null,
+                questsInjectEveryN: settings?.questsInjectEveryN ?? null,
+                mapInjectEveryN: settings?.mapInjectEveryN ?? null,
+                nova: {
+                    enabled: !!novaSettings.enabled,
+                    profileName: novaSettings.profileName || '',
+                    activeSkill: novaSettings.activeSkill || 'freeform',
+                    defaultTier: novaSettings.defaultTier || 'read',
+                    maxToolCalls: novaSettings.maxToolCalls ?? null,
+                    turnTimeoutMs: novaSettings.turnTimeoutMs ?? null,
+                    pluginBaseUrl: novaSettings.pluginBaseUrl || '',
+                    rememberApprovalsSession: !!novaSettings.rememberApprovalsSession,
+                },
+            },
+            stores: {
+                contacts: contacts.length,
+                contactNames: contacts.slice(0, 50),
+                npcs: npcs.length,
+                quests: quests.length,
+                places: places.length,
+            },
+            prompts: {
+                depths: typeof CX_PROMPT_DEPTHS === 'object' ? { ...CX_PROMPT_DEPTHS } : null,
+            },
+        };
+    });
 
     const clampLimit = (raw) => {
         const n = Number(raw);
@@ -9198,6 +9302,15 @@ function buildNovaPhoneHandlers({
                 const type = from === 'user' ? 'sent' : 'received';
                 _pushMessage(cleanName, type, text, null);
                 return { ok: true, contactName: cleanName, from };
+            } catch (err) {
+                return { error: String(err?.message || err) };
+            }
+        },
+        phone_diagnose: async () => {
+            try {
+                const report = _diagnose();
+                if (!isObject(report)) return { error: 'diagnostics unavailable' };
+                return report;
             } catch (err) {
                 return { error: String(err?.message || err) };
             }

@@ -204,6 +204,7 @@ describe('NOVA_SKILLS — structural invariants', () => {
             'map-location-designer',
             'lore-auditor',
             'prompt-doctor',
+            'commandx-diagnostics',
             'freeform',
         ]) {
             assert.ok(ids.has(required), `missing required skill: ${required}`);
@@ -252,6 +253,7 @@ describe('NOVA_SKILLS — structural invariants', () => {
             'map-location-designer': ['phone_list_places', 'phone_write_place', 'occupants'],
             'lore-auditor': ['contradictions', 'worldbooks', 'Do not write'],
             'prompt-doctor': ['conflicting instructions', 'smallest safe improvement', 'approval diff'],
+            'commandx-diagnostics': ['phone_diagnose', 'self-diagnose Nova', 'Command-X phone', 'Do not write'],
         };
         for (const [id, needles] of Object.entries(requirements)) {
             assert.ok(byId[id], `missing skill prompt for ${id}`);
@@ -268,6 +270,6 @@ describe('SKILLS_VERSION', () => {
         assert.ok(m, 'SKILLS_VERSION constant not found');
         const v = Number(m[1]);
         assert.ok(Number.isInteger(v) && v > 0);
-        assert.equal(v, 4, 'bump SKILLS_VERSION when skill prompts, defaultTools, or defaultTier change');
+        assert.equal(v, 5, 'bump SKILLS_VERSION when skill prompts, defaultTools, or defaultTier change');
     });
 });

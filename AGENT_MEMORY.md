@@ -77,6 +77,23 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-28 — Nova Command-X diagnostics skill (commit pending)
+
+**Context:** Added read-only self-diagnosis support so Nova can inspect its own
+runtime state and troubleshoot Command-X phone systems before recommending fixes.
+
+**Notes for future agents:**
+- `phone_diagnose` is a read-only `phone` backend tool in `NOVA_TOOLS`; it
+  returns a compact snapshot of version/chat context, runtime flags, relevant
+  Command-X settings, store counts/contact names, and prompt depths.
+- New `commandx-diagnostics` skill defaults to read tier and exposes
+  `phone_diagnose`, read-only ST context/profile tools, phone store reads,
+  `nova_read_soul` / `nova_read_memory`, and read-only filesystem tools for
+  source/test/docs/plugin inspection. It intentionally does not expose write or
+  shell tools by default.
+- `SKILLS_VERSION` is now 5; bump it and update `test/nova-tool-args.test.mjs`
+  whenever skill prompts, default tools, or default tiers change.
+
 ### 2026-04-28 — Nova creator writes use native ST locations (commit pending)
 
 **Context:** Hardened Nova Character Creator and Worldbook Creator so creation

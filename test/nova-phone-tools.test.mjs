@@ -22,6 +22,7 @@ function buildNovaPhoneHandlers({
     upsertPlaceImpl,
     loadMessagesImpl,
     pushMessageImpl,
+    diagnoseImpl,
     messageHistoryLimitDefault = 50,
     messageHistoryLimitMax = 200,
 } = {}) {
@@ -33,6 +34,7 @@ function buildNovaPhoneHandlers({
     const _upsertPlace = typeof upsertPlaceImpl === 'function' ? upsertPlaceImpl : null;
     const _loadMessages = typeof loadMessagesImpl === 'function' ? loadMessagesImpl : () => [];
     const _pushMessage = typeof pushMessageImpl === 'function' ? pushMessageImpl : null;
+    const _diagnose = typeof diagnoseImpl === 'function' ? diagnoseImpl : (() => ({ ok: true }));
 
     const clampLimit = (raw) => {
         const n = Number(raw);
@@ -139,6 +141,15 @@ function buildNovaPhoneHandlers({
                 return { error: String(err?.message || err) };
             }
         },
+        phone_diagnose: async () => {
+            try {
+                const report = _diagnose();
+                if (!isObject(report)) return { error: 'diagnostics unavailable' };
+                return report;
+            } catch (err) {
+                return { error: String(err?.message || err) };
+            }
+        },
     };
 }
 
@@ -167,6 +178,7 @@ function makeHarness(overrides = {}) {
         upsertQuestCalls: [],
         upsertPlaceCalls: [],
         pushMessageCalls: [],
+        diagnoseCalls: 0,
     };
     const handlers = buildNovaPhoneHandlers({
         loadNpcsImpl: overrides.loadNpcsImpl || (() => state.npcs),
@@ -201,6 +213,17 @@ function makeHarness(overrides = {}) {
             arr.push({ type, text, mesId });
             state.messagesByContact.set(name, arr);
         })),
+        diagnoseImpl: overrides.diagnoseImpl || (() => {
+            state.diagnoseCalls += 1;
+            return {
+                ok: true,
+                stores: {
+                    npcs: state.npcs.length,
+                    quests: state.quests.length,
+                    places: state.places.length,
+                },
+            };
+        }),
         ...(overrides.factoryOpts || {}),
     });
     return { state, handlers };
@@ -209,13 +232,14 @@ function makeHarness(overrides = {}) {
 // -------- Tests --------
 
 describe('buildNovaPhoneHandlers — factory shape', () => {
-    it('returns all 8 phone_* handlers as async functions', () => {
+    it('returns all 9 phone_* handlers as async functions', () => {
         const { handlers } = makeHarness();
         const expected = [
             'phone_list_npcs', 'phone_write_npc',
             'phone_list_quests', 'phone_write_quest',
             'phone_list_places', 'phone_write_place',
             'phone_list_messages', 'phone_inject_message',
+            'phone_diagnose',
         ];
         for (const name of expected) {
             assert.equal(typeof handlers[name], 'function', `${name} is a function`);
@@ -227,6 +251,34 @@ describe('buildNovaPhoneHandlers — factory shape', () => {
     it('factory with no opts does not throw and returns handlers', () => {
         const h = buildNovaPhoneHandlers();
         assert.equal(typeof h.phone_list_npcs, 'function');
+    });
+});
+
+describe('phone_diagnose', () => {
+    it('returns the diagnostic report from the injected implementation', async () => {
+        const { state, handlers } = makeHarness({
+            npcs: [{ name: 'Aria' }],
+            quests: [{ id: 'q1' }],
+            places: [{ name: 'Cafe' }, { name: 'Library' }],
+        });
+        const result = await handlers.phone_diagnose();
+        assert.equal(state.diagnoseCalls, 1);
+        assert.deepEqual(result, {
+            ok: true,
+            stores: { npcs: 1, quests: 1, places: 2 },
+        });
+    });
+
+    it('returns an error instead of throwing when diagnostics throw', async () => {
+        const { handlers } = makeHarness({ diagnoseImpl: () => { throw new Error('diagnose boom'); } });
+        const result = await handlers.phone_diagnose();
+        assert.equal(result.error, 'diagnose boom');
+    });
+
+    it('rejects non-object diagnostic reports', async () => {
+        const { handlers } = makeHarness({ diagnoseImpl: () => null });
+        const result = await handlers.phone_diagnose();
+        assert.equal(result.error, 'diagnostics unavailable');
     });
 });
 
@@ -530,6 +582,7 @@ describe('source-shape integration (guardrails against drift from index.js)', ()
             'phone_list_quests', 'phone_write_quest',
             'phone_list_places', 'phone_write_place',
             'phone_list_messages', 'phone_inject_message',
+            'phone_diagnose',
         ]);
         const { handlers } = makeHarness();
         const actual = new Set(Object.keys(handlers));
