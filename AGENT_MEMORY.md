@@ -77,6 +77,26 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-28 — Nova creator writes use native ST locations (commit pending)
+
+**Context:** Hardened Nova Character Creator and Worldbook Creator so creation
+claims go through ST-native write handlers instead of raw filesystem writes.
+
+**Notes for future agents:**
+- Character Creator and Worldbook Creator `defaultTools` no longer expose
+  `fs_write`; they use `st_write_character` / `st_write_worldbook` so ST writes
+  Tavern Card PNGs to the user characters directory and world-info JSON files
+  to the user worlds directory.
+- `st_write_character` now normalizes nested or top-level inputs into Tavern
+  Card v2 (`spec: "chara_card_v2"`, `spec_version: "2.0"`, `data.name`
+  matching the requested tool `name`) before calling `/api/characters/create`
+  or `/api/characters/merge-attributes`.
+- `st_write_worldbook` now accepts `entries` as either an object or array and
+  normalizes entries to an object keyed by uid with ST-style key arrays/default
+  fields before calling `/api/worldinfo/edit`.
+- `SKILLS_VERSION` is now 4; bump it and update `test/nova-tool-args.test.mjs`
+  whenever skill prompts, default tools, or default tiers change.
+
 ### 2026-04-28 — Nova soul/memory runtime disk reads (commit pending)
 
 **Context:** Fixed Nova soul/memory self-edits so saved files are the files Nova
