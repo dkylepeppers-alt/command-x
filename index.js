@@ -8186,7 +8186,7 @@ async function sendNovaTurn({
    skill default-tool lists.
    ---------------------------------------------------------------------- */
 
-const SKILLS_VERSION = 5; // bump when any skill prompt, defaultTools, or defaultTier changes; v5 adds read-only diagnostics skill/tool
+const SKILLS_VERSION = 5; // bump when any skill prompt, defaultTools, or defaultTier changes; v4 adds ST-native creator tools, v5 adds read-only diagnostics skill/tool
 
 const NOVA_TOOLS = [
     // === 4a. Filesystem (plugin-backed) ===
@@ -8322,7 +8322,7 @@ const NOVA_TOOLS = [
     },
     {
         name: 'st_write_character', displayName: 'Write character', permission: 'write', backend: 'st-api',
-        description: 'Create or update a SillyTavern character card through ST native character endpoints. The saved file is a Tavern Card v2 PNG in the user characters directory; never use fs_write for character creation. Provide either a complete chara_card_v2 `card` object or top-level character fields; do not call with only a name. Requires approval.',
+        description: 'Create or update a SillyTavern character card through ST native character endpoints. The saved file is a Tavern Card v2 PNG in the user characters directory. Never use fs_write for character creation. Provide either a complete chara_card_v2 `card` object or top-level character fields; do not call with only a name. Requires approval.',
         parameters: {
             type: 'object',
             properties: {
@@ -8365,7 +8365,7 @@ const NOVA_TOOLS = [
     },
     {
         name: 'st_write_worldbook', displayName: 'Write worldbook', permission: 'write', backend: 'st-api',
-        description: 'Create or replace an entire SillyTavern worldbook through ST native worldinfo endpoints. The saved file is a world-info JSON file in the user worlds directory; never use fs_write for worldbook creation. Requires name and a full book object with entries; do not use this for a single entry unless you have read and are sending the complete worldbook JSON.',
+        description: 'Create or replace an entire SillyTavern worldbook through ST native worldinfo endpoints. The saved file is a world-info JSON file in the user worlds directory. Never use fs_write for worldbook creation. Requires name and a full book object with entries; do not use this for a single entry unless you have read and are sending the complete worldbook JSON.',
         parameters: {
             type: 'object',
             properties: {
