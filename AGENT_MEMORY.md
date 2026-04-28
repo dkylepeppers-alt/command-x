@@ -77,6 +77,23 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-28 — Nova soul/memory runtime disk reads (commit pending)
+
+**Context:** Fixed Nova soul/memory self-edits so saved files are the files Nova
+loads on later turns.
+
+**Notes for future agents:**
+- `loadNovaSoulMemory()` now defaults to reading live files through the
+  `nova-agent-bridge` `/fs/read` route at `nova/soul.md` and `nova/memory.md`
+  under the bridge root (normally the SillyTavern install root), then falls
+  back per-file to bundled `public/scripts/extensions/third-party/command-x/nova/*.md`
+  starter templates when the bridge/runtime file is unavailable.
+- The in-phone Soul & Memory editor and `buildNovaSoulMemoryHandlers()` share
+  `NOVA_SOUL_BRIDGE_PATH` / `NOVA_MEMORY_BRIDGE_PATH`; keep read and write
+  paths paired if the runtime storage location changes again.
+- `test/nova-soul-memory.test.mjs` inline-copies the bridge-read loader logic;
+  update that copy when touching `loadNovaSoulMemory()` or `_novaBridgeReadText()`.
+
 ### 2026-04-28 — Chat-completion preset prompt split (commit pending)
 
 **Context:** Enhanced `presets/openai/Command-X.json` after reviewing upstream
