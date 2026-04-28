@@ -67,10 +67,10 @@ test('preset ships all required marker prompts', async () => {
     }
 });
 
-test('preset ships main/nsfw/jailbreak system prompts', async () => {
+test('preset ships main/side-channel/nsfw/jailbreak system prompts', async () => {
     const { preset } = await loadPreset();
     const byId = new Map(preset.prompts.map(p => [p.identifier, p]));
-    for (const id of ['main', 'nsfw', 'jailbreak']) {
+    for (const id of ['main', 'commandXSideChannels', 'nsfw', 'jailbreak']) {
         const p = byId.get(id);
         assert.ok(p, `missing system prompt: ${id}`);
         assert.equal(p.system_prompt, true);
@@ -78,11 +78,23 @@ test('preset ships main/nsfw/jailbreak system prompts', async () => {
     }
 });
 
-test('Main Prompt teaches all four Command-X tag grammars', async () => {
+test('Main Prompt focuses roleplay style and delegates hidden phone data to side-channel instructions', async () => {
     const { preset } = await loadPreset();
     const main = preset.prompts.find(p => p.identifier === 'main');
     assert.ok(main, 'Main Prompt missing');
     const c = main.content;
+    assert.match(c, /live roleplay/, 'main prompt should establish RP mode');
+    assert.match(c, /Do not speak, decide, feel, or act for \{\{user\}\}/,
+        'main prompt should avoid controlling the user');
+    assert.match(c, /Command-X may add separate side-channel instructions/,
+        'main prompt should delegate machine data to the dedicated prompt');
+});
+
+test('Command-X side-channel prompt teaches all four tag grammars', async () => {
+    const { preset } = await loadPreset();
+    const side = preset.prompts.find(p => p.identifier === 'commandXSideChannels');
+    assert.ok(side, 'Command-X Side Channels prompt missing');
+    const c = side.content;
     // Each of the four side-channel tag families must be documented.
     assert.match(c, /\[sms from=/, 'main prompt missing [sms from=...] grammar');
     assert.match(c, /\[\/sms\]/);
@@ -93,7 +105,19 @@ test('Main Prompt teaches all four Command-X tag grammars', async () => {
     assert.match(c, /\[place\]/);
     assert.match(c, /\[\/place\]/);
     assert.match(c, /valid compact JSON/, 'main prompt should require strict JSON payloads');
+    assert.match(c, /<online\|nearby\|offline>/, 'status enum must match extension sanitizer');
+    assert.match(c, /<active\|waiting\|blocked\|completed\|failed>/, 'quest status enum should be documented');
+    assert.match(c, /subtasks/, 'quest prompt should document richer quest fields');
     assert.match(c, /Never use side-channel tags for Nova tool calls/, 'main prompt should keep RP tags separate from Nova tools');
+});
+
+test('Post-History Instructions reinforce final Command-X formatting without changing schema', async () => {
+    const { preset } = await loadPreset();
+    const post = preset.prompts.find(p => p.identifier === 'jailbreak');
+    assert.ok(post, 'Post-History Instructions prompt missing');
+    assert.match(post.content, /visible roleplay first/);
+    assert.match(post.content, /tags last/);
+    assert.match(post.content, /no markdown fences/);
 });
 
 test('prompt_order references only defined prompt identifiers', async () => {
@@ -108,6 +132,18 @@ test('prompt_order references only defined prompt identifiers', async () => {
                 `prompt_order references undefined identifier: ${entry.identifier}`);
             assert.equal(typeof entry.enabled, 'boolean');
         }
+    }
+});
+
+test('prompt_order enables Command-X side-channel prompt immediately after Main Prompt', async () => {
+    const { preset } = await loadPreset();
+    for (const block of preset.prompt_order) {
+        const ids = block.order.map(e => e.identifier);
+        const mainIdx = ids.indexOf('main');
+        assert.ok(mainIdx >= 0, `prompt_order ${block.character_id} missing main`);
+        assert.equal(ids[mainIdx + 1], 'commandXSideChannels',
+            `prompt_order ${block.character_id} should place Command-X side-channel prompt after main`);
+        assert.equal(block.order[mainIdx + 1].enabled, true);
     }
 });
 
