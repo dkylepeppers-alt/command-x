@@ -111,8 +111,6 @@ claims go through ST-native write handlers instead of raw filesystem writes.
 - `st_write_worldbook` now accepts `entries` as either an object or array and
   normalizes entries to an object keyed by uid with ST-style key arrays/default
   fields before calling `/api/worldinfo/edit`.
-- `SKILLS_VERSION` is now 4; bump it and update `test/nova-tool-args.test.mjs`
-  whenever skill prompts, default tools, or default tiers change.
 
 ### 2026-04-28 — Nova soul/memory runtime disk reads (commit pending)
 

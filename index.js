@@ -6668,7 +6668,8 @@ async function _novaBridgeReadText({ pluginBaseUrl, path, fetchImpl, headersProv
  * Load Nova's `soul.md` + `memory.md`. See header comment for contract.
  *
  * @param {object} [opts]
- * @param {string}   [opts.baseUrl]   - URL folder containing the two files. Default: extension-bundled path.
+ * @param {string}   [opts.baseUrl]   - Optional override for URL-folder reads / fallback templates for the two files.
+ * @param {string}   [opts.pluginBaseUrl] - Optional nova-agent-bridge base URL override for live runtime reads.
  * @param {number}   [opts.soulMemoryMaxBytes] - Bridge read cap per file. Default 256 KiB.
  * @param {function} [opts.fetchImpl] - Test-injectable `fetch` replacement.
  * @param {function} [opts.nowImpl]   - Test-injectable `Date.now` replacement.
@@ -8506,10 +8507,12 @@ const NOVA_TOOLS = [
         parameters: { type: 'object', properties: {}, additionalProperties: false },
     },
     // --- Nova self-edit tools (plan §6b) -----------------------------
-    // Soul + memory live under the extension's `nova/` folder. Reads
-    // re-use `loadNovaSoulMemory` (force-refresh); writes go through the
-    // plugin `fs_write` route under the hood. Every write MUST invalidate
-    // the in-memory soul/memory cache so the next turn sees fresh text.
+    // Soul + memory are live runtime files under the bridge root at
+    // `nova/soul.md` and `nova/memory.md`; the extension-bundled `nova/`
+    // files are fallback starter templates only. Reads re-use
+    // `loadNovaSoulMemory` (force-refresh); writes go through the plugin
+    // `fs_write` route under the hood. Every write MUST invalidate the
+    // in-memory soul/memory cache so the next turn sees fresh text.
     {
         name: 'nova_read_soul', displayName: 'Read Nova soul', permission: 'read', backend: 'phone',
         description: 'Read Nova\'s soul.md verbatim. Soul is Nova\'s voice/persona and persists across chats.',
