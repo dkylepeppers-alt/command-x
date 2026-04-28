@@ -247,7 +247,7 @@ describe('NOVA_SKILLS — structural invariants', () => {
             'character-creator': ['st_list_characters', 'alternate greetings', 'mes_example', 'avatar_prompt', 'duplicate', 'Never use fs_write'],
             'worldbook-creator': ['read → merge → validate → write', 'keysecondary', 'token budget', 'constant entries', 'selective', 'Never use fs_write'],
             'stscript-regex': ['mandatory before any save', 'Quick Reply', 'lookarounds', 'catastrophically backtrack'],
-            'image-prompter': ['scene_summary', 'SDXL', 'Flux', 'Illustrious', 'negative'],
+            'image-prompter': ['scene_summary', 'SDXL', 'Flux', 'Illustrious', 'negative', 'story narration', 'visually descriptive'],
             'quest-designer': ['phone_list_quests', 'phone_write_quest', 'subtasks'],
             'npc-contact-manager': ['phone_list_npcs', 'phone_write_npc', 'phone_inject_message'],
             'map-location-designer': ['phone_list_places', 'phone_write_place', 'occupants'],
@@ -270,6 +270,6 @@ describe('SKILLS_VERSION', () => {
         assert.ok(m, 'SKILLS_VERSION constant not found');
         const v = Number(m[1]);
         assert.ok(Number.isInteger(v) && v > 0);
-        assert.equal(v, 5, 'bump SKILLS_VERSION when skill prompts, defaultTools, or defaultTier change');
+        assert.equal(v, 6, 'bump SKILLS_VERSION when skill prompts, defaultTools, or defaultTier change');
     });
 });
