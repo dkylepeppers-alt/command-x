@@ -4781,13 +4781,13 @@ async function openNovaSoulMemoryEditor() {
     };
 
     saveSoulBtn.addEventListener('click', () => saveOne({
-        path: `nova/${NOVA_SOUL_FILENAME}`,
+        path: NOVA_SOUL_BRIDGE_PATH,
         content: String(soulTa.value || ''),
         label: 'Soul',
         button: saveSoulBtn,
     }));
     saveMemoryBtn.addEventListener('click', () => saveOne({
-        path: `nova/${NOVA_MEMORY_FILENAME}`,
+        path: NOVA_MEMORY_BRIDGE_PATH,
         content: String(memoryTa.value || ''),
         label: 'Memory',
         button: saveMemoryBtn,
@@ -6523,20 +6523,20 @@ async function probeNovaBridge({
    NOVA AGENT — soul.md / memory.md loader (plan §6a, §6b).
 
    Fetches Nova's `soul.md` (persona) and `memory.md` (durable notes)
-   from the extension folder so they can be inlined into the system
-   prompt by `sendNovaTurn`. Both files are served by ST's static
-   handler at `/scripts/extensions/third-party/<EXT>/nova/*.md` — the
-   same path pattern used for `settings.html` at init time — so no
-   plugin is required for the read path. The write path (editing
-   soul/memory via `nova_write_soul` etc.) lands with Phase 6b via
-   the `fs_write` tool or ST's `/api/files/*` fallback; this helper
-   is read-only.
+   so they can be inlined into the system prompt by `sendNovaTurn`.
+   The default live path is the bridge filesystem root (`nova/*.md`,
+   normally `<SillyTavern root>/nova/*.md`) because that is where
+   `nova_write_soul` / `nova_append_memory` persist edits. If the
+   bridge is unavailable or a runtime file is missing, the loader falls
+   back to the bundled starter templates served by ST's static handler
+   at `/scripts/extensions/third-party/<EXT>/nova/*.md`.
 
    Contract:
    - Never throws. A 404, network error, non-text body, or missing
      global `fetch` resolves to an empty string for that file.
-   - Both files are fetched in parallel via `Promise.all`. A failure
-     on one does not take down the other.
+   - Runtime bridge reads are fetched in parallel via `Promise.all`;
+     fallback template reads are also independent. A failure on one
+     file does not take down the other.
    - Result is cached in a module-level cache for
       `NOVA_SOUL_MEMORY_TTL_MS` (5 min). `invalidateNovaSoulMemoryCache()`
       drops the cache; callers should invoke it after a `nova_write_soul`
@@ -6550,11 +6550,14 @@ async function probeNovaBridge({
 const NOVA_SOUL_MEMORY_TTL_MS = 5 * 60_000; // 5 min
 const NOVA_SOUL_FILENAME = 'soul.md';
 const NOVA_MEMORY_FILENAME = 'memory.md';
+const NOVA_SOUL_BRIDGE_PATH = `nova/${NOVA_SOUL_FILENAME}`;
+const NOVA_MEMORY_BRIDGE_PATH = `nova/${NOVA_MEMORY_FILENAME}`;
 
-// Default URL builder — Phase 6b may override `baseUrl` to read from
-// `SillyTavern/data/<user>/user/files/nova/` via `/api/files/*` once
-// the "user-owned soul/memory" flow lands. For the default read path,
-// the extension-bundled copies are served by ST's static handler.
+// Default URL builder for the read-only bundled starter templates. The
+// default runtime read path goes through nova-agent-bridge first so
+// `nova_write_soul` / `nova_append_memory` edits to `<ST root>/nova/*.md`
+// are reflected on the very next turn; this static path is the fallback
+// for fresh installs without the bridge or before the runtime files exist.
 function defaultNovaSoulMemoryBaseUrl() {
     // Mirrors the settings.html path in `jQuery(async () => ...)` — uses
     // the same `EXT` constant so a rename of the extension folder only
@@ -6595,6 +6598,65 @@ async function _fetchNovaMarkdown(url, { fetchImpl }) {
 }
 
 /**
+ * Read one UTF-8 markdown file from the nova-agent-bridge filesystem root.
+ * This is the live runtime location (`<ST root>/nova/*.md`) that the write
+ * tools mutate. Never throws; callers can fall back to bundled templates.
+ */
+async function _novaBridgeReadText({ pluginBaseUrl, path, fetchImpl, headersProvider, maxBytes = 262144 }) {
+    const doFetch = typeof fetchImpl === 'function'
+        ? fetchImpl
+        : (typeof fetch === 'function' ? fetch : null);
+    if (!doFetch) return { error: 'no-fetch' };
+    const base = String(pluginBaseUrl || NOVA_DEFAULTS.pluginBaseUrl).replace(/\/+$/, '');
+    const qs = new URLSearchParams({
+        path: String(path || ''),
+        encoding: 'utf8',
+        maxBytes: String(maxBytes),
+    });
+    const authHeaders = {};
+    const provider = (typeof headersProvider === 'function')
+        ? headersProvider
+        : (typeof getRequestHeaders === 'function' ? getRequestHeaders : null);
+    if (provider) {
+        try {
+            const h = provider({ omitContentType: true });
+            if (h && typeof h === 'object') Object.assign(authHeaders, h);
+        } catch (_) { /* noop */ }
+    }
+    let resp;
+    try {
+        resp = await doFetch(`${base}/fs/read?${qs.toString()}`, {
+            method: 'GET',
+            headers: authHeaders,
+        });
+    } catch (err) {
+        return { error: 'nova-bridge-unreachable', message: String(err?.message || err) };
+    }
+    let raw = '';
+    try { raw = await resp.text(); } catch (_) { /* noop */ }
+    let parsed = null;
+    if (raw) {
+        try { parsed = JSON.parse(raw); } catch (_) { /* noop */ }
+    }
+    if (!resp || !resp.ok) {
+        if (parsed && typeof parsed === 'object' && typeof parsed.error === 'string') {
+            return { ...parsed, status: resp?.status || 0 };
+        }
+        return { error: 'nova-bridge-error', status: resp?.status || 0, body: String(raw).slice(0, 400) };
+    }
+    if (parsed && typeof parsed === 'object' && typeof parsed.content === 'string') {
+        return {
+            ok: true,
+            content: parsed.content,
+            path: typeof parsed.path === 'string' ? parsed.path : path,
+            bytes: Number(parsed.bytes) || parsed.content.length,
+            truncated: Boolean(parsed.truncated),
+        };
+    }
+    return { error: 'invalid-response' };
+}
+
+/**
  * Load Nova's `soul.md` + `memory.md`. See header comment for contract.
  *
  * @param {object} [opts]
@@ -6607,7 +6669,11 @@ async function _fetchNovaMarkdown(url, { fetchImpl }) {
  */
 async function loadNovaSoulMemory({
     baseUrl,
+    pluginBaseUrl,
+    soulPath = NOVA_SOUL_BRIDGE_PATH,
+    memoryPath = NOVA_MEMORY_BRIDGE_PATH,
     fetchImpl,
+    headersProvider,
     nowImpl,
     ttlMs = NOVA_SOUL_MEMORY_TTL_MS,
     force = false,
@@ -6622,12 +6688,44 @@ async function loadNovaSoulMemory({
     const soulUrl = `${root}/${NOVA_SOUL_FILENAME}`;
     const memoryUrl = `${root}/${NOVA_MEMORY_FILENAME}`;
 
-    // Fetch in parallel. A failure on one file must not take down the
-    // other — each primitive is independently swallowed.
-    const [soul, memory] = await Promise.all([
-        _fetchNovaMarkdown(soulUrl, { fetchImpl }),
-        _fetchNovaMarkdown(memoryUrl, { fetchImpl }),
-    ]);
+    // Explicit baseUrl callers (mostly tests) request a URL-folder read.
+    // Default callers read the live bridge-backed files first, then fall
+    // back per-file to the bundled starter templates when the bridge is
+    // missing or the runtime file has not been created yet.
+    let soul;
+    let memory;
+    if (baseUrl) {
+        [soul, memory] = await Promise.all([
+            _fetchNovaMarkdown(soulUrl, { fetchImpl }),
+            _fetchNovaMarkdown(memoryUrl, { fetchImpl }),
+        ]);
+    } else {
+        const [bridgeSoul, bridgeMemory] = await Promise.all([
+            _novaBridgeReadText({ pluginBaseUrl, path: soulPath, fetchImpl, headersProvider }),
+            _novaBridgeReadText({ pluginBaseUrl, path: memoryPath, fetchImpl, headersProvider }),
+        ]);
+        const fallbackReads = [];
+        const fallbackSlots = [];
+        if (bridgeSoul?.ok) {
+            soul = bridgeSoul.content;
+        } else {
+            fallbackSlots.push('soul');
+            fallbackReads.push(_fetchNovaMarkdown(soulUrl, { fetchImpl }));
+        }
+        if (bridgeMemory?.ok) {
+            memory = bridgeMemory.content;
+        } else {
+            fallbackSlots.push('memory');
+            fallbackReads.push(_fetchNovaMarkdown(memoryUrl, { fetchImpl }));
+        }
+        if (fallbackReads.length) {
+            const fallback = await Promise.all(fallbackReads);
+            fallback.forEach((value, idx) => {
+                if (fallbackSlots[idx] === 'soul') soul = value;
+                if (fallbackSlots[idx] === 'memory') memory = value;
+            });
+        }
+    }
 
     const result = { soul, memory };
     _novaSoulMemoryCache = { result, expiresAt: now() + ttlMs };
@@ -8851,8 +8949,8 @@ function buildNovaSoulMemoryHandlers({
     loadSoulMemory,
     invalidateCache,
     pluginBaseUrl,
-    soulPath = 'nova/soul.md',
-    memoryPath = 'nova/memory.md',
+    soulPath = NOVA_SOUL_BRIDGE_PATH,
+    memoryPath = NOVA_MEMORY_BRIDGE_PATH,
 } = {}) {
     const load = typeof loadSoulMemory === 'function' ? loadSoulMemory : loadNovaSoulMemory;
     const invalidate = typeof invalidateCache === 'function' ? invalidateCache : invalidateNovaSoulMemoryCache;

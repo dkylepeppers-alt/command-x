@@ -15,6 +15,9 @@ const EXT = 'command-x';
 const NOVA_SOUL_MEMORY_TTL_MS = 5 * 60_000;
 const NOVA_SOUL_FILENAME = 'soul.md';
 const NOVA_MEMORY_FILENAME = 'memory.md';
+const NOVA_DEFAULT_PLUGIN_URL = '/api/plugins/nova-agent-bridge';
+const NOVA_SOUL_BRIDGE_PATH = `nova/${NOVA_SOUL_FILENAME}`;
+const NOVA_MEMORY_BRIDGE_PATH = `nova/${NOVA_MEMORY_FILENAME}`;
 
 function defaultNovaSoulMemoryBaseUrl() {
     return `/scripts/extensions/third-party/${EXT}/nova`;
@@ -48,8 +51,52 @@ function makeCapsule() {
         return typeof text === 'string' ? text : '';
     }
 
+    async function _novaBridgeReadText({ pluginBaseUrl, path, fetchImpl, maxBytes = 262144 }) {
+        const doFetch = typeof fetchImpl === 'function'
+            ? fetchImpl
+            : (typeof fetch === 'function' ? fetch : null);
+        if (!doFetch) return { error: 'no-fetch' };
+        const base = String(pluginBaseUrl || NOVA_DEFAULT_PLUGIN_URL).replace(/\/+$/, '');
+        const qs = new URLSearchParams({
+            path: String(path || ''),
+            encoding: 'utf8',
+            maxBytes: String(maxBytes),
+        });
+        let resp;
+        try {
+            resp = await doFetch(`${base}/fs/read?${qs.toString()}`, { method: 'GET', headers: {} });
+        } catch (err) {
+            return { error: 'nova-bridge-unreachable', message: String(err?.message || err) };
+        }
+        let raw = '';
+        try { raw = await resp.text(); } catch (_) { /* noop */ }
+        let parsed = null;
+        if (raw) {
+            try { parsed = JSON.parse(raw); } catch (_) { /* noop */ }
+        }
+        if (!resp || !resp.ok) {
+            if (parsed && typeof parsed === 'object' && typeof parsed.error === 'string') {
+                return { ...parsed, status: resp?.status || 0 };
+            }
+            return { error: 'nova-bridge-error', status: resp?.status || 0, body: String(raw).slice(0, 400) };
+        }
+        if (parsed && typeof parsed === 'object' && typeof parsed.content === 'string') {
+            return {
+                ok: true,
+                content: parsed.content,
+                path: typeof parsed.path === 'string' ? parsed.path : path,
+                bytes: Number(parsed.bytes) || parsed.content.length,
+                truncated: Boolean(parsed.truncated),
+            };
+        }
+        return { error: 'invalid-response' };
+    }
+
     async function loadNovaSoulMemory({
         baseUrl,
+        pluginBaseUrl,
+        soulPath = NOVA_SOUL_BRIDGE_PATH,
+        memoryPath = NOVA_MEMORY_BRIDGE_PATH,
         fetchImpl,
         nowImpl,
         ttlMs = NOVA_SOUL_MEMORY_TTL_MS,
@@ -62,10 +109,40 @@ function makeCapsule() {
         const root = String(baseUrl || defaultNovaSoulMemoryBaseUrl()).replace(/\/+$/, '');
         const soulUrl = `${root}/${NOVA_SOUL_FILENAME}`;
         const memoryUrl = `${root}/${NOVA_MEMORY_FILENAME}`;
-        const [soul, memory] = await Promise.all([
-            _fetchNovaMarkdown(soulUrl, { fetchImpl }),
-            _fetchNovaMarkdown(memoryUrl, { fetchImpl }),
-        ]);
+        let soul;
+        let memory;
+        if (baseUrl) {
+            [soul, memory] = await Promise.all([
+                _fetchNovaMarkdown(soulUrl, { fetchImpl }),
+                _fetchNovaMarkdown(memoryUrl, { fetchImpl }),
+            ]);
+        } else {
+            const [bridgeSoul, bridgeMemory] = await Promise.all([
+                _novaBridgeReadText({ pluginBaseUrl, path: soulPath, fetchImpl }),
+                _novaBridgeReadText({ pluginBaseUrl, path: memoryPath, fetchImpl }),
+            ]);
+            const fallbackReads = [];
+            const fallbackSlots = [];
+            if (bridgeSoul?.ok) {
+                soul = bridgeSoul.content;
+            } else {
+                fallbackSlots.push('soul');
+                fallbackReads.push(_fetchNovaMarkdown(soulUrl, { fetchImpl }));
+            }
+            if (bridgeMemory?.ok) {
+                memory = bridgeMemory.content;
+            } else {
+                fallbackSlots.push('memory');
+                fallbackReads.push(_fetchNovaMarkdown(memoryUrl, { fetchImpl }));
+            }
+            if (fallbackReads.length) {
+                const fallback = await Promise.all(fallbackReads);
+                fallback.forEach((value, idx) => {
+                    if (fallbackSlots[idx] === 'soul') soul = value;
+                    if (fallbackSlots[idx] === 'memory') memory = value;
+                });
+            }
+        }
         const result = { soul, memory };
         _novaSoulMemoryCache = { result, expiresAt: now() + ttlMs };
         return result;
@@ -135,14 +212,45 @@ describe('loadNovaSoulMemory — happy path', () => {
         assert.deepEqual(out, { soul: 'S', memory: 'M' });
     });
 
-    it('defaults baseUrl to the extension-bundled path', async () => {
+    it('defaults to bridge-backed runtime files under nova/*.md', async () => {
         const cap = makeCapsule();
         const mock = makeFetchMock({
-            [`/scripts/extensions/third-party/${EXT}/nova/soul.md`]: { body: 'S' },
-            [`/scripts/extensions/third-party/${EXT}/nova/memory.md`]: { body: 'M' },
+            [`${NOVA_DEFAULT_PLUGIN_URL}/fs/read?path=nova%2Fsoul.md&encoding=utf8&maxBytes=262144`]: {
+                body: JSON.stringify({ ok: true, path: 'nova/soul.md', content: 'S', bytes: 1 }),
+            },
+            [`${NOVA_DEFAULT_PLUGIN_URL}/fs/read?path=nova%2Fmemory.md&encoding=utf8&maxBytes=262144`]: {
+                body: JSON.stringify({ ok: true, path: 'nova/memory.md', content: 'M', bytes: 1 }),
+            },
         });
-        await cap.loadNovaSoulMemory({ fetchImpl: mock.fn });
+        const out = await cap.loadNovaSoulMemory({ fetchImpl: mock.fn });
+        assert.deepEqual(out, { soul: 'S', memory: 'M' });
         assert.deepEqual(mock.calls, [
+            `${NOVA_DEFAULT_PLUGIN_URL}/fs/read?path=nova%2Fsoul.md&encoding=utf8&maxBytes=262144`,
+            `${NOVA_DEFAULT_PLUGIN_URL}/fs/read?path=nova%2Fmemory.md&encoding=utf8&maxBytes=262144`,
+        ]);
+    });
+
+    it('falls back to extension-bundled templates when bridge files are missing', async () => {
+        const cap = makeCapsule();
+        const mock = makeFetchMock({
+            [`${NOVA_DEFAULT_PLUGIN_URL}/fs/read?path=nova%2Fsoul.md&encoding=utf8&maxBytes=262144`]: {
+                ok: false,
+                status: 404,
+                body: JSON.stringify({ error: 'not-found' }),
+            },
+            [`${NOVA_DEFAULT_PLUGIN_URL}/fs/read?path=nova%2Fmemory.md&encoding=utf8&maxBytes=262144`]: {
+                ok: false,
+                status: 404,
+                body: JSON.stringify({ error: 'not-found' }),
+            },
+            [`/scripts/extensions/third-party/${EXT}/nova/soul.md`]: { body: 'starter soul' },
+            [`/scripts/extensions/third-party/${EXT}/nova/memory.md`]: { body: 'starter memory' },
+        });
+        const out = await cap.loadNovaSoulMemory({ fetchImpl: mock.fn });
+        assert.deepEqual(out, { soul: 'starter soul', memory: 'starter memory' });
+        assert.deepEqual(mock.calls, [
+            `${NOVA_DEFAULT_PLUGIN_URL}/fs/read?path=nova%2Fsoul.md&encoding=utf8&maxBytes=262144`,
+            `${NOVA_DEFAULT_PLUGIN_URL}/fs/read?path=nova%2Fmemory.md&encoding=utf8&maxBytes=262144`,
             `/scripts/extensions/third-party/${EXT}/nova/soul.md`,
             `/scripts/extensions/third-party/${EXT}/nova/memory.md`,
         ]);
