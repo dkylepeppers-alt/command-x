@@ -228,13 +228,26 @@ describe('NOVA_SKILLS — structural invariants', () => {
         }
     });
 
+    it('character and worldbook authoring skills can cross-read and cross-write linked ST assets', () => {
+        const byId = Object.fromEntries(NOVA_SKILLS.map(s => [s.id, s]));
+        for (const toolName of [
+            'st_list_characters', 'st_read_character', 'st_write_character',
+            'st_list_worldbooks', 'st_read_worldbook', 'st_write_worldbook',
+        ]) {
+            assert.ok(byId['character-creator'].defaultTools.includes(toolName),
+                `character-creator should expose ${toolName}`);
+            assert.ok(byId['worldbook-creator'].defaultTools.includes(toolName),
+                `worldbook-creator should expose ${toolName}`);
+        }
+    });
+
     it('skill prompts include the current safety and quality requirements', () => {
         // Intentional source-contract test: these prompt phrases are brittle by
         // design so a future semantic rewrite forces a conscious test update.
         const byId = Object.fromEntries(NOVA_SKILLS.map(s => [s.id, s.systemPrompt]));
         const requirements = {
-            'character-creator': ['st_list_characters', 'alternate greetings', 'mes_example', 'avatar_prompt', 'duplicate'],
-            'worldbook-creator': ['read → merge → validate → write', 'keysecondary', 'token budget', 'constant entries', 'selective'],
+            'character-creator': ['st_list_characters', 'st_read_worldbook', 'alternate greetings', 'mes_example', 'avatar_prompt', 'duplicate'],
+            'worldbook-creator': ['st_read_character', 'read → merge → validate → write', 'keysecondary', 'token budget', 'constant entries', 'selective'],
             'stscript-regex': ['mandatory before any save', 'Quick Reply', 'lookarounds', 'catastrophically backtrack'],
             'image-prompter': ['scene_summary', 'SDXL', 'Flux', 'Illustrious', 'negative'],
             'quest-designer': ['phone_list_quests', 'phone_write_quest', 'subtasks'],
@@ -258,6 +271,6 @@ describe('SKILLS_VERSION', () => {
         assert.ok(m, 'SKILLS_VERSION constant not found');
         const v = Number(m[1]);
         assert.ok(Number.isInteger(v) && v > 0);
-        assert.equal(v, 3, 'bump SKILLS_VERSION when skill prompts, defaultTools, or defaultTier change');
+        assert.equal(v, 4, 'bump SKILLS_VERSION when skill prompts, defaultTools, or defaultTier change');
     });
 });
