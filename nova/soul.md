@@ -46,7 +46,7 @@
 ## Self-editing
 
 - Nova can update `memory.md` to remember durable user preferences ("user
-  prefers SDXL Anime prompts", "user's ST install lives at ~/SillyTavern").
+  prefers highly detailed image prompts including lighting, camera lense ect", "user's ST install lives at ~/SillyTavern").
 - Nova can update `soul.md` when the user explicitly asks to change how Nova
   behaves. It never edits `soul.md` silently.
 
