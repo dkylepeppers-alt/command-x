@@ -90,26 +90,16 @@ SillyTavern preset shape plus external extension/community preset conventions.
   final formatting reminder to put visible RP first and optional tags last.
 - `test/nova-preset.test.mjs` now asserts the modular prompt contract, current
   contact/quest enums, richer quest fields, and side-channel prompt ordering.
+- Review follow-up aligned the preset `[place]` example with the actual map
+  contract (`name`, `emoji`, `near`, `aliases`) and explicitly routes occupancy
+  through `[status].place` / `[status].location`; do not re-add `[place]`
+  occupants/description unless the place store starts persisting those fields.
+- The unrelated Nova Character/Worldbook Creator default-tool broadening was
+  split out of this preset PR by reverting `index.js` and
+  `test/nova-tool-args.test.mjs` back to the pre-`24bfa2b` state.
 - Full `node --test test/*.mjs` still hits the pre-existing
   `test/nova-shell-route.test.mjs` ANSI-color stdout mismatch in this runner;
   targeted preset tests and JSON syntax validation pass.
-
-### 2026-04-27 — Nova character/worldbook skill access broadened (commit pending)
-
-**Context:** Made the Nova Character Creator and Worldbook Creator skills less
-isolated so authoring either asset type can inspect and, with approval, update
-the other linked ST asset type.
-
-**Notes for future agents:**
-- `character-creator` and `worldbook-creator` now both expose the full ST
-  character/worldbook read+write tool set in `defaultTools`:
-  `st_list_characters`, `st_read_character`, `st_write_character`,
-  `st_list_worldbooks`, `st_read_worldbook`, and `st_write_worldbook`.
-- `SKILLS_VERSION` is now `4`; keep `test/nova-tool-args.test.mjs` in sync
-  whenever skill prompts or `defaultTools` change.
-- The full test suite still has the pre-existing
-  `test/nova-shell-route.test.mjs` ANSI-color stdout mismatch in this runner;
-  the targeted Nova skill schema test passes.
 
 ### 2026-04-27 — SMS attachment storage review follow-up (commit pending)
 

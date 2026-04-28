@@ -50,7 +50,7 @@ extension's tag grammar:
 - `[sms from="Name" to="user"]…[/sms]` — phone texts
 - `[status][{ … }][/status]` — NPC contact cards
 - `[quests][{ … }][/quests]` — quest tracker updates
-- `[place][{ … }][/place]` — place registration / current occupants
+- `[place][{ … }][/place]` — place registration / map-place aliases
 
 It explicitly tells the model: **emit tags only when warranted, append them
 after visible prose, never narrate them, never markdown-fence them, never
@@ -60,6 +60,9 @@ documents the richer quest fields used by the current Quests app (`summary`,
 `urgency`, `relatedContact`, `nextAction`, stable `subtasks`) and the exact
 status enums accepted by the extension (`online` / `nearby` / `offline` for
 contacts, `active` / `waiting` / `blocked` / `completed` / `failed` for quests).
+Map-place registration follows the extension's `[place]` contract (`name`,
+`emoji`, `near`, `aliases`); character occupancy belongs in `[status].place` and
+`[status].location` instead.
 
 The **Post-History Instructions** prompt is intentionally short and enabled at
 the end of the prompt stack as a final formatting reminder: visible roleplay

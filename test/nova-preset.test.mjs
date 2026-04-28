@@ -108,6 +108,12 @@ test('Command-X side-channel prompt teaches all four tag grammars', async () => 
     assert.match(c, /<online\|nearby\|offline>/, 'status enum must match extension sanitizer');
     assert.match(c, /<active\|waiting\|blocked\|completed\|failed>/, 'quest status enum should be documented');
     assert.match(c, /subtasks/, 'quest prompt should document richer quest fields');
+    assert.match(c, /"near":"<nearby landmark or place name>"/, 'place prompt should use map registration fields');
+    assert.match(c, /"aliases":\["<alternate name>"\]/, 'place prompt should document aliases');
+    assert.doesNotMatch(c, /"occupants"/, 'place prompt should not ask for dropped occupants data');
+    assert.doesNotMatch(c, /"description":"<short description>"/, 'place prompt should not ask for dropped description data');
+    assert.match(c, /represent who is where via \[status\]\.place and \[status\]\.location/,
+        'place prompt should route occupant/location updates through status');
     assert.match(c, /Never use side-channel tags for Nova tool calls/, 'main prompt should keep RP tags separate from Nova tools');
 });
 

@@ -8069,7 +8069,7 @@ async function sendNovaTurn({
    skill default-tool lists.
    ---------------------------------------------------------------------- */
 
-const SKILLS_VERSION = 4; // bump when any skill prompt, defaultTools, or defaultTier changes; v4 broadens character/worldbook skill access
+const SKILLS_VERSION = 3; // bump when any skill prompt, defaultTools, or defaultTier changes; v3 expands tool-scoped skills
 
 const NOVA_TOOLS = [
     // === 4a. Filesystem (plugin-backed) ===
@@ -8448,7 +8448,6 @@ const NOVA_SKILLS = [
         allowTierEscalation: true,
         defaultTools: [
             'st_list_characters', 'st_read_character', 'st_write_character',
-            'st_list_worldbooks', 'st_read_worldbook', 'st_write_worldbook',
             'fs_list', 'fs_read', 'fs_stat', 'fs_search', 'fs_write',
         ],
         systemPrompt: [
@@ -8456,10 +8455,6 @@ const NOVA_SKILLS = [
             'Before creating, call st_list_characters and check for duplicate',
             'or near-duplicate names. If updating an existing card, read it',
             'first and preserve useful fields unless the user says otherwise.',
-            'When a character depends on setting lore, call st_read_worldbook',
-            'to read the relevant worldbook before drafting.',
-            'Update linked worldbook entries only when the user explicitly',
-            'asks you to keep lore in sync.',
             'You are an expert on the SillyTavern character-card v2 schema:',
             "  spec: 'chara_card_v2', spec_version: '2.0', data: { name, description,",
             '  personality, scenario, first_mes, mes_example, creator_notes,',
@@ -8492,16 +8487,11 @@ const NOVA_SKILLS = [
         defaultTier: 'write',
         allowTierEscalation: true,
         defaultTools: [
-            'st_list_characters', 'st_read_character', 'st_write_character',
             'st_list_worldbooks', 'st_read_worldbook', 'st_write_worldbook',
             'fs_list', 'fs_read', 'fs_stat', 'fs_search', 'fs_write',
         ],
         systemPrompt: [
             'You are the Worldbook Creator skill inside Nova.',
-            'Use st_list_characters and st_read_character when world lore',
-            'needs to align with existing character cards; you may use',
-            'st_write_character when the user explicitly asks to keep a',
-            'character card synchronized with worldbook changes.',
             'You are an expert on the SillyTavern worldbook (world info) schema:',
             '  an `entries` object keyed by integer uid, each with key[],',
             '  keysecondary[], comment, content, constant, selective,',
