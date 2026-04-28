@@ -6602,6 +6602,12 @@ async function _fetchNovaMarkdown(url, { fetchImpl }) {
  * This is the live runtime location (`<ST root>/nova/*.md`) that the write
  * tools mutate. Never throws; callers can fall back to bundled templates.
  *
+ * @param {object} opts
+ * @param {string} opts.pluginBaseUrl - nova-agent-bridge base URL.
+ * @param {string} opts.path - Bridge-relative file path to read.
+ * @param {function} [opts.fetchImpl] - Fetch implementation override for tests.
+ * @param {function} [opts.headersProvider] - Provides ST auth headers for production bridge requests.
+ * @param {number} [opts.maxBytes=262144] - Maximum bytes to request from the bridge.
  * @returns {Promise<{ok: true, content: string, path: string, bytes: number, truncated: boolean} | {error: string, [key: string]: unknown}>}
  */
 async function _novaBridgeReadText({ pluginBaseUrl, path, fetchImpl, headersProvider, maxBytes = 262144 }) {

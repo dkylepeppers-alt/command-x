@@ -51,6 +51,9 @@ function makeCapsule() {
         return typeof text === 'string' ? text : '';
     }
 
+    // Inline copy of production `_novaBridgeReadText` from `index.js` for test
+    // isolation. Keep this synchronized with the production bridge-read helper,
+    // except for the ST auth-header fallback noted below.
     async function _novaBridgeReadText({ pluginBaseUrl, path, fetchImpl, headersProvider, maxBytes = 262144 }) {
         const doFetch = typeof fetchImpl === 'function'
             ? fetchImpl
