@@ -9314,6 +9314,8 @@ function buildNovaPhoneHandlers({
         }
         return out;
     };
+    const contactWriteFields = ['emoji', 'status', 'mood', 'location', 'relationship', 'thoughts', 'avatarUrl'];
+    const questWriteFields = ['title', 'summary', 'objective', 'priority', 'urgency', 'source', 'relatedContact', 'status', 'focused', 'nextAction', 'subtasks', 'notes'];
 
     return {
         phone_list_npcs: async () => {
@@ -9332,7 +9334,7 @@ function buildNovaPhoneHandlers({
             if (args.fields !== undefined && !isObject(args.fields)) return { error: 'fields must be an object' };
             if (!_mergeNpcs) return { error: 'mergeNpcs unavailable' };
             try {
-                const fields = collectWriteFields(args, CONTACT_FIELDS);
+                const fields = collectWriteFields(args, contactWriteFields);
                 // Merge input is `{ name, ...fields }`; production `mergeNpcs`
                 // handles both new-insert and update-by-name paths.
                 _mergeNpcs([{ ...fields, name: cleanName, isManual: true }]);
@@ -9354,7 +9356,7 @@ function buildNovaPhoneHandlers({
             const { id } = args;
             const cleanId = safeName(id);
             if (args.fields !== undefined && !isObject(args.fields)) return { error: 'fields must be an object' };
-            const fields = collectWriteFields(args, QUEST_FIELDS);
+            const fields = collectWriteFields(args, questWriteFields);
             if (!cleanId && !safeName(fields.title)) return { error: 'id or title must be a non-empty string' };
             if (!_upsertQuest) return { error: 'upsertQuest unavailable' };
             try {
