@@ -77,6 +77,23 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-30 — SMS photos save to SillyTavern character galleries (commit pending)
+
+**Context:** Replaced the localStorage data-URL SMS photo path with SillyTavern's
+`/api/images/upload` gallery upload flow.
+
+**Notes for future agents:**
+- SMS photo selection now uploads the original image file to
+  `user/images/<contact>/` via `/api/images/upload` with `ch_name` set to the
+  current SMS contact. Phone message history stores only the returned gallery
+  URL, avoiding the old 96 KB local data-URL limit.
+- `normalizeSmsAttachment()` now accepts gallery URLs (`user/images/...`) and
+  legacy data URLs. Message bubbles and the generation interceptor read
+  `attachment.url`, not `attachment.dataUrl`.
+- The one-shot multimodal interceptor attaches the gallery URL to
+  `extra.media[]` / legacy `extra.image`, matching SillyTavern's normal
+  media-reference shape instead of injecting base64.
+
 ### 2026-04-30 — SMS photo attachments now reach multimodal prompt input (commit pending)
 
 **Context:** Updated Command-X SMS send flow so attached photos are injected into the next user generation message payload, allowing vision-capable models to actually “see” image attachments sent from the phone app.
