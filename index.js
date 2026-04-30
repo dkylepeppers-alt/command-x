@@ -113,6 +113,7 @@ let scanContactsInFlight = false;
 const SCAN_CONTACTS_LABEL = '🔍 Scan Contacts';
 let questEnrichmentInFlight = false;
 let pendingSmsAttachment = null; // { type:'image', dataUrl, name, alt } | null
+let pendingSmsVisionAttachment = null; // one-shot image injected into the next user generation message
 let lastMessageSaveFailureNoticeAt = 0;
 
 
@@ -3141,15 +3142,17 @@ async function promptDeleteContact(contactName) {
    ====================================================================== */
 
 async function sendToChat(text, contactName, isCommand, attachment = null) {
+    const cleanAttachment = normalizeSmsAttachment(attachment);
     let formatted;
     if (isCommand) {
         formatted = `*opens Command-X on phone and sends a neural command to ${contactName}:*\n${text}`;
-    } else if (attachment) {
+    } else if (cleanAttachment) {
         const caption = text && text !== '[photo]' ? `\n"${text}"` : '';
-        formatted = `*texts ${contactName} on phone and sends a picture (${attachment.name || 'image'}):*${caption}`;
+        formatted = `*texts ${contactName} on phone and sends a picture (${cleanAttachment.name || 'image'}):*${caption}`;
     } else {
         formatted = `*texts ${contactName} on phone:*\n"${text}"`;
     }
+    pendingSmsVisionAttachment = (!isCommand && cleanAttachment) ? cleanAttachment : null;
     const textarea = document.querySelector('#send_textarea');
     if (textarea) {
         textarea.value = formatted;
@@ -3165,6 +3168,38 @@ async function sendToChat(text, contactName, isCommand, attachment = null) {
         inPhoneSend.setAttribute('aria-disabled', 'true');
     }
 }
+
+/**
+ * One-shot generation interceptor used to make SMS photo attachments visible to
+ * multimodal models the same way normal ST image attachments are.
+ *
+ * We clone/replace the last user message in the outbound `chat` prompt array
+ * and attach image data via ST's supported `extra.media[]` shape when available
+ * or legacy `extra.image` on older builds.
+ */
+globalThis.commandXSmsAttachmentInterceptor = async function(chat, _contextSize, _abort, type) {
+    if (type === 'quiet') return;
+    const pendingAttachment = pendingSmsVisionAttachment;
+    if (!pendingAttachment) return;
+    try {
+        const attachment = normalizeSmsAttachment(pendingAttachment);
+        if (!attachment) return;
+        if (!Array.isArray(chat) || chat.length === 0) return;
+        const last = structuredClone(chat[chat.length - 1]);
+        if (!last?.is_user) return;
+        last.extra = (last.extra && typeof last.extra === 'object') ? last.extra : {};
+        const supportsMediaArrays = typeof getContext()?.ensureMessageMediaIsArray === 'function';
+        if (supportsMediaArrays) {
+            if (!Array.isArray(last.extra.media)) last.extra.media = [];
+            last.extra.media.push({ type: 'image', url: attachment.dataUrl });
+        } else if (!last.extra.image) {
+            last.extra.image = attachment.dataUrl;
+        }
+        chat[chat.length - 1] = last;
+    } finally {
+        pendingSmsVisionAttachment = null;
+    }
+};
 
 /** Send immediately (instant mode) — single target */
 function sendImmediate(contactName, chatText, isNeural, cmdType, attachment = null) {

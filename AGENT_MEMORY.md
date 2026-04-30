@@ -77,6 +77,15 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-30 — SMS photo attachments now reach multimodal prompt input (commit pending)
+
+**Context:** Updated Command-X SMS send flow so attached photos are injected into the next user generation message payload, allowing vision-capable models to actually “see” image attachments sent from the phone app.
+
+**Notes for future agents:**
+- `manifest.json` now declares `generate_interceptor: "commandXSmsAttachmentInterceptor"` so ST calls Command-X on generation requests.
+- `index.js` adds a one-shot interceptor (`globalThis.commandXSmsAttachmentInterceptor`) that clones the outbound last user message and appends the SMS attachment as `extra.media[]` when available, with legacy fallback to `extra.image`.
+- The interceptor consumes `pendingSmsVisionAttachment`, which is set in `sendToChat()` only for non-command SMS sends with a valid attachment and cleared after injection.
+
 ### 2026-04-30 — Preset now enforces strict SMS tags for character-initiated texts (commit pending)
 
 **Context:** Follow-up to SMS-format hardening: ensured the chat-completion preset also tells the model to use strict `[sms]` syntax when phone messages are character-initiated, not only when replying to a user-initiated text.
