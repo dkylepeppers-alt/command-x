@@ -4,6 +4,7 @@
     "requires": [],
     "optional": [],
     "js": "index.js",
+    "generate_interceptor": "commandXSmsAttachmentInterceptor",
     "css": "style.css",
     "version": "0.13.1",
     "homePage": "https://github.com/dkylepeppers-alt/command-x",
