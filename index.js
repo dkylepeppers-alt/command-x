@@ -384,6 +384,10 @@ function hideSmsTagsInDom(mesId) {
    ====================================================================== */
 
 const CONTACTS_TAG_RE = /\[(?:contacts|status)\]([\s\S]*?)\[\/(?:contacts|status)\]/gi;
+// Removes malformed status/contact blocks that never received their closing
+// tag, stopping before the next Command-X structured tag so each tag hider can
+// still process its own block.
+const UNTERMINATED_CONTACT_TAG_RE = /\[(?:contacts|status)\][\s\S]*?(?=\[(?:sms\b[^\]]*|contacts|status|quests|place)\]|\s*$)/gi;
 
 function npcStoreKey() {
     return `cx-npcs-${chatKey()}`;
@@ -493,10 +497,7 @@ function stripJsonFence(value) {
     return fence ? fence[1].trim() : text;
 }
 
-function extractLeadingJsonPayload(value) {
-    const text = stripJsonFence(value);
-    const start = text.search(/[\[{]/);
-    if (start < 0) return text;
+function readBalancedJsonPayloadAt(text, start) {
     const opener = text[start];
     const expectedRootClose = opener === '[' ? ']' : '}';
     const stack = [expectedRootClose];
@@ -526,11 +527,24 @@ function extractLeadingJsonPayload(value) {
             if (!stack.length) return text.slice(start, i + 1).trim();
         }
     }
-    return text;
+    return null;
 }
 
 function parseTaggedJsonPayload(value) {
-    return JSON.parse(extractLeadingJsonPayload(value));
+    const text = stripJsonFence(value);
+    let offset = 0;
+    while (offset < text.length) {
+        const relativeStart = text.slice(offset).search(/[\[{]/);
+        if (relativeStart < 0) break;
+        const start = offset + relativeStart;
+        const candidate = readBalancedJsonPayloadAt(text, start);
+        if (candidate) {
+            try { return JSON.parse(candidate); }
+            catch (_) { /* try the next balanced bracketed payload */ }
+        }
+        offset = start + 1;
+    }
+    return JSON.parse(text);
 }
 
 function contactPayloadToArray(parsed) {
@@ -669,10 +683,7 @@ function hideContactsTagsInDom(mesId) {
         CONTACTS_TAG_RE.lastIndex = 0;
         el.innerHTML = el.innerHTML.replace(CONTACTS_TAG_RE, '');
     }
-    el.innerHTML = el.innerHTML.replace(
-        /\[(?:contacts|status)\][\s\S]*?(?=\[(?:sms\b[^\]]*|contacts|status|quests|place)\]|\s*$)/gi,
-        '',
-    );
+    el.innerHTML = el.innerHTML.replace(UNTERMINATED_CONTACT_TAG_RE, '');
 }
 
 /**

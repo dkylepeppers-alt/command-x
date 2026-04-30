@@ -98,10 +98,7 @@ function stripJsonFence(value) {
     return fence ? fence[1].trim() : text;
 }
 
-function extractLeadingJsonPayload(value) {
-    const text = stripJsonFence(value);
-    const start = text.search(/[\[{]/);
-    if (start < 0) return text;
+function readBalancedJsonPayloadAt(text, start) {
     const opener = text[start];
     const expectedRootClose = opener === '[' ? ']' : '}';
     const stack = [expectedRootClose];
@@ -131,11 +128,24 @@ function extractLeadingJsonPayload(value) {
             if (!stack.length) return text.slice(start, i + 1).trim();
         }
     }
-    return text;
+    return null;
 }
 
 function parseTaggedJsonPayload(value) {
-    return JSON.parse(extractLeadingJsonPayload(value));
+    const text = stripJsonFence(value);
+    let offset = 0;
+    while (offset < text.length) {
+        const relativeStart = text.slice(offset).search(/[\[{]/);
+        if (relativeStart < 0) break;
+        const start = offset + relativeStart;
+        const candidate = readBalancedJsonPayloadAt(text, start);
+        if (candidate) {
+            try { return JSON.parse(candidate); }
+            catch (_) { /* try the next balanced bracketed payload */ }
+        }
+        offset = start + 1;
+    }
+    return JSON.parse(text);
 }
 
 function contactPayloadToArray(parsed) {
@@ -439,6 +449,10 @@ describe('extractContacts', () => {
     it('does not duplicate contacts when a valid closed status tag is present', () => {
         const result = extractContacts('[status][{"name":"Once"}][/status]');
         assert.deepEqual(result?.map(c => c.name), ['Once']);
+    });
+    it('skips non-json bracketed text before the contact JSON payload', () => {
+        const result = extractContacts('[status]note [not json] [{"name":"Late"}]');
+        assert.deepEqual(result?.map(c => c.name), ['Late']);
     });
     it('continues after an invalid block and combines multiple valid blocks', () => {
         const raw = '[status]not-json[/status] text [status][{"name":"A"}][/status] [contacts][{"name":"B"}][/contacts]';
