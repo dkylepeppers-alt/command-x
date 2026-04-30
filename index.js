@@ -8193,7 +8193,7 @@ async function sendNovaTurn({
    skill default-tool lists.
    ---------------------------------------------------------------------- */
 
-const SKILLS_VERSION = 6; // bump when any skill prompt, defaultTools, or defaultTier changes
+const SKILLS_VERSION = 7; // bump when any skill prompt, defaultTools, or defaultTier changes
 
 const NOVA_TOOLS = [
     // === 4a. Filesystem (plugin-backed) ===
@@ -8773,10 +8773,17 @@ const NOVA_SKILLS = [
         // to copy. fs_write would force tier escalation on every turn; drop it from
         // the default set and let the user escalate + pick it manually if they want
         // prompts written to disk.
-        defaultTools: ['st_get_context', 'phone_list_npcs'],
+        defaultTools: ['st_get_context', 'st_read_character', 'st_list_worldbooks', 'st_read_worldbook', 'phone_list_npcs'],
         systemPrompt: [
             'You are the Image Prompter skill inside Nova.',
             'First use st_get_context to extract the current roleplay scene.',
+            'Use st_read_character for active/visible characters to capture',
+            'base visual descriptions from their character cards. Use',
+            'st_list_worldbooks and st_read_worldbook to inspect associated',
+            'worldbook entries for canonical visual details when available.',
+            'Use chat context for current clothing, setting, pose, visible',
+            'actions, lighting, camera framing, and mood; let current scene',
+            'details override stale defaults only for transient visuals.',
             'Write dense, image-generation-focused prompts based on that',
             'current scene context.',
             '',

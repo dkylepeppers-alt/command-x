@@ -239,6 +239,16 @@ describe('NOVA_SKILLS — structural invariants', () => {
         assert.ok(byId['worldbook-creator'].defaultTools.includes('st_write_worldbook'));
     });
 
+    it('image prompter exposes read-only visual canon sources', () => {
+        const byId = Object.fromEntries(NOVA_SKILLS.map(s => [s.id, s]));
+        const skill = byId['image-prompter'];
+        assert.ok(skill, 'missing image-prompter skill');
+        for (const tool of ['st_get_context', 'st_read_character', 'st_list_worldbooks', 'st_read_worldbook']) {
+            assert.ok(skill.defaultTools.includes(tool), `image-prompter must expose ${tool}`);
+        }
+        assert.ok(!skill.defaultTools.some(tool => tool.startsWith('fs_')), 'image-prompter must stay read-only/no filesystem defaults');
+    });
+
     it('skill prompts include the current safety and quality requirements', () => {
         // Intentional source-contract test: these prompt phrases are brittle by
         // design so a future semantic rewrite forces a conscious test update.
@@ -247,7 +257,7 @@ describe('NOVA_SKILLS — structural invariants', () => {
             'character-creator': ['st_list_characters', 'alternate greetings', 'mes_example', 'avatar_prompt', 'duplicate', 'Never use fs_write'],
             'worldbook-creator': ['read → merge → validate → write', 'keysecondary', 'token budget', 'constant entries', 'selective', 'Never use fs_write'],
             'stscript-regex': ['mandatory before any save', 'Quick Reply', 'lookarounds', 'catastrophically backtrack'],
-            'image-prompter': ['scene_summary', 'SDXL', 'Flux', 'Illustrious', 'negative', 'story narration', 'visually descriptive'],
+            'image-prompter': ['scene_summary', 'SDXL', 'Flux', 'Illustrious', 'negative', 'story narration', 'visually descriptive', 'character cards', 'worldbook entries', 'current clothing'],
             'quest-designer': ['phone_list_quests', 'phone_write_quest', 'subtasks'],
             'npc-contact-manager': ['phone_list_npcs', 'phone_write_npc', 'phone_inject_message'],
             'map-location-designer': ['phone_list_places', 'phone_write_place', 'occupants'],
@@ -270,6 +280,6 @@ describe('SKILLS_VERSION', () => {
         assert.ok(m, 'SKILLS_VERSION constant not found');
         const v = Number(m[1]);
         assert.ok(Number.isInteger(v) && v > 0);
-        assert.equal(v, 6, 'bump SKILLS_VERSION when skill prompts, defaultTools, or defaultTier change');
+        assert.equal(v, 7, 'bump SKILLS_VERSION when skill prompts, defaultTools, or defaultTier change');
     });
 });
