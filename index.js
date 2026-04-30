@@ -8230,7 +8230,7 @@ async function sendNovaTurn({
    skill default-tool lists.
    ---------------------------------------------------------------------- */
 
-const SKILLS_VERSION = 7; // bump when any skill prompt, defaultTools, or defaultTier changes
+const SKILLS_VERSION = 8; // bump when any skill prompt, defaultTools, or defaultTier changes
 
 const NOVA_TOOLS = [
     // === 4a. Filesystem (plugin-backed) ===
@@ -8469,9 +8469,16 @@ const NOVA_TOOLS = [
             type: 'object',
             properties: {
                 name: { type: 'string' },
-                fields: { type: 'object' },
+                fields: { type: 'object', description: 'Optional object containing any profile fields; flat top-level fields are also accepted.' },
+                emoji: { type: 'string' },
+                status: { type: 'string', enum: ['online', 'offline', 'nearby'], default: 'nearby' },
+                mood: { type: 'string' },
+                location: { type: 'string' },
+                relationship: { type: 'string' },
+                thoughts: { type: 'string' },
+                avatarUrl: { type: 'string' },
             },
-            required: ['name', 'fields'],
+            required: ['name'],
             additionalProperties: false,
         },
     },
@@ -8487,9 +8494,21 @@ const NOVA_TOOLS = [
             type: 'object',
             properties: {
                 id: { type: 'string' },
-                fields: { type: 'object' },
+                fields: { type: 'object', description: 'Optional object containing any quest fields; flat top-level fields are also accepted.' },
+                title: { type: 'string' },
+                summary: { type: 'string' },
+                objective: { type: 'string' },
+                status: { type: 'string', enum: ['active', 'waiting', 'blocked', 'completed', 'failed'], default: 'active' },
+                priority: { type: 'string', enum: ['low', 'normal', 'high', 'critical'], default: 'normal' },
+                urgency: { type: 'string', enum: ['none', 'soon', 'urgent'], default: 'none' },
+                source: { type: 'string' },
+                relatedContact: { type: 'string' },
+                focused: { type: 'boolean' },
+                nextAction: { type: 'string' },
+                subtasks: { type: 'array' },
+                notes: { type: 'string' },
             },
-            required: ['id', 'fields'],
+            required: [],
             additionalProperties: false,
         },
     },
@@ -8505,9 +8524,14 @@ const NOVA_TOOLS = [
             type: 'object',
             properties: {
                 name: { type: 'string' },
-                fields: { type: 'object' },
+                fields: { type: 'object', description: 'Optional object containing place fields; flat top-level fields are also accepted.' },
+                emoji: { type: 'string' },
+                aliases: { type: 'array' },
+                x: { type: 'number' },
+                y: { type: 'number' },
+                userPinned: { type: 'boolean' },
             },
-            required: ['name', 'fields'],
+            required: ['name'],
             additionalProperties: false,
         },
     },
@@ -8865,6 +8889,9 @@ const NOVA_SKILLS = [
             'You are the Quest Designer skill inside Nova.',
             'Use st_get_context and phone_list_quests before changing quests.',
             'Use phone_write_quest for approved quest creates and updates.',
+            'phone_write_quest accepts either nested `fields` or flat top-level',
+            'quest fields; for new quests, provide a clear `title` even if no',
+            '`id` exists yet.',
             'Create compact, actionable quest entries with title, status,',
             'priority, objective, next_action, subtasks, involved NPCs, and',
             'recent evidence from the chat. Preserve manual user edits and',
@@ -8884,6 +8911,9 @@ const NOVA_SKILLS = [
             'You are the NPC / Contact Manager skill inside Nova.',
             'Use st_get_context and phone_list_npcs before editing profiles.',
             'Use phone_write_npc for approved profile updates.',
+            'phone_write_npc accepts a minimal `{ name }` to add a contact,',
+            'or flat top-level profile fields such as emoji/status/mood/location',
+            'instead of requiring a nested `fields` object.',
             'Maintain concise NPC profile fields: name, emoji, status, mood,',
             'location, relationship, thoughts, notes, and last-known intent.',
             'Preserve existing user-authored details. Only use phone_inject_message',
@@ -8902,6 +8932,8 @@ const NOVA_SKILLS = [
             'You are the Map / Location Designer skill inside Nova.',
             'Use st_get_context, phone_list_places, and phone_list_npcs before',
             'editing places. Use phone_write_place for approved place updates.',
+            'phone_write_place accepts either nested `fields` or flat top-level',
+            'place fields such as emoji, aliases, x, y, and userPinned.',
             'Create distinct, reusable places with name, emoji,',
             'description, occupants, and story relevance. Preserve manually',
             'placed pins and avoid inventing locations that contradict the scene.',
@@ -9273,6 +9305,15 @@ function buildNovaPhoneHandlers({
     // not `null`. The dispatch loop already validates tool args against the
     // JSON schema, but third-party callers + fuzzing shouldn't crash us.
     const safeArgs = (v) => (isObject(v) ? v : {});
+    const collectWriteFields = (args, allowedFields) => {
+        const out = isObject(args?.fields) ? { ...args.fields } : {};
+        for (const field of allowedFields) {
+            if (Object.prototype.hasOwnProperty.call(args, field) && args[field] !== undefined) {
+                out[field] = args[field];
+            }
+        }
+        return out;
+    };
 
     return {
         phone_list_npcs: async () => {
@@ -9284,15 +9325,17 @@ function buildNovaPhoneHandlers({
             }
         },
         phone_write_npc: async (rawArgs) => {
-            const { name, fields } = safeArgs(rawArgs);
+            const args = safeArgs(rawArgs);
+            const { name } = args;
             const cleanName = safeName(name);
             if (!cleanName) return { error: 'name must be a non-empty string' };
-            if (!isObject(fields)) return { error: 'fields must be an object' };
+            if (args.fields !== undefined && !isObject(args.fields)) return { error: 'fields must be an object' };
             if (!_mergeNpcs) return { error: 'mergeNpcs unavailable' };
             try {
+                const fields = collectWriteFields(args, CONTACT_FIELDS);
                 // Merge input is `{ name, ...fields }`; production `mergeNpcs`
                 // handles both new-insert and update-by-name paths.
-                _mergeNpcs([{ ...fields, name: cleanName }]);
+                _mergeNpcs([{ ...fields, name: cleanName, isManual: true }]);
                 return { ok: true, name: cleanName };
             } catch (err) {
                 return { error: String(err?.message || err) };
@@ -9307,14 +9350,16 @@ function buildNovaPhoneHandlers({
             }
         },
         phone_write_quest: async (rawArgs) => {
-            const { id, fields } = safeArgs(rawArgs);
+            const args = safeArgs(rawArgs);
+            const { id } = args;
             const cleanId = safeName(id);
-            if (!cleanId) return { error: 'id must be a non-empty string' };
-            if (!isObject(fields)) return { error: 'fields must be an object' };
+            if (args.fields !== undefined && !isObject(args.fields)) return { error: 'fields must be an object' };
+            const fields = collectWriteFields(args, QUEST_FIELDS);
+            if (!cleanId && !safeName(fields.title)) return { error: 'id or title must be a non-empty string' };
             if (!_upsertQuest) return { error: 'upsertQuest unavailable' };
             try {
-                const clean = _upsertQuest({ ...fields, id: cleanId });
-                return { ok: true, id: cleanId, quest: clean || null };
+                const clean = _upsertQuest({ ...fields, ...(cleanId ? { id: cleanId } : {}) });
+                return { ok: true, id: clean?.id || cleanId || null, quest: clean || null };
             } catch (err) {
                 return { error: String(err?.message || err) };
             }
@@ -9328,12 +9373,14 @@ function buildNovaPhoneHandlers({
             }
         },
         phone_write_place: async (rawArgs) => {
-            const { name, fields } = safeArgs(rawArgs);
+            const args = safeArgs(rawArgs);
+            const { name } = args;
             const cleanName = safeName(name);
             if (!cleanName) return { error: 'name must be a non-empty string' };
-            if (!isObject(fields)) return { error: 'fields must be an object' };
+            if (args.fields !== undefined && !isObject(args.fields)) return { error: 'fields must be an object' };
             if (!_upsertPlace) return { error: 'upsertPlace unavailable' };
             try {
+                const fields = collectWriteFields(args, ['emoji', 'aliases', 'x', 'y', 'userPinned']);
                 const clean = _upsertPlace({ ...fields, name: cleanName });
                 if (!clean) return { error: 'upsert rejected (invalid place)' };
                 return { ok: true, place: clean };

@@ -45,6 +45,17 @@ function buildNovaPhoneHandlers({
     const safeName = (v) => (typeof v === 'string' ? v.trim() : '');
     const isObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
     const safeArgs = (v) => (isObject(v) ? v : {});
+    const collectWriteFields = (args, allowedFields) => {
+        const out = isObject(args?.fields) ? { ...args.fields } : {};
+        for (const field of allowedFields) {
+            if (Object.prototype.hasOwnProperty.call(args, field) && args[field] !== undefined) {
+                out[field] = args[field];
+            }
+        }
+        return out;
+    };
+    const contactFields = ['emoji', 'status', 'mood', 'location', 'relationship', 'thoughts', 'avatarUrl'];
+    const questFields = ['title', 'summary', 'objective', 'priority', 'urgency', 'source', 'relatedContact', 'status', 'focused', 'nextAction', 'subtasks', 'notes'];
 
     return {
         phone_list_npcs: async () => {
@@ -56,13 +67,15 @@ function buildNovaPhoneHandlers({
             }
         },
         phone_write_npc: async (rawArgs) => {
-            const { name, fields } = safeArgs(rawArgs);
+            const args = safeArgs(rawArgs);
+            const { name } = args;
             const cleanName = safeName(name);
             if (!cleanName) return { error: 'name must be a non-empty string' };
-            if (!isObject(fields)) return { error: 'fields must be an object' };
+            if (args.fields !== undefined && !isObject(args.fields)) return { error: 'fields must be an object' };
             if (!_mergeNpcs) return { error: 'mergeNpcs unavailable' };
             try {
-                _mergeNpcs([{ ...fields, name: cleanName }]);
+                const fields = collectWriteFields(args, contactFields);
+                _mergeNpcs([{ ...fields, name: cleanName, isManual: true }]);
                 return { ok: true, name: cleanName };
             } catch (err) {
                 return { error: String(err?.message || err) };
@@ -77,14 +90,16 @@ function buildNovaPhoneHandlers({
             }
         },
         phone_write_quest: async (rawArgs) => {
-            const { id, fields } = safeArgs(rawArgs);
+            const args = safeArgs(rawArgs);
+            const { id } = args;
             const cleanId = safeName(id);
-            if (!cleanId) return { error: 'id must be a non-empty string' };
-            if (!isObject(fields)) return { error: 'fields must be an object' };
+            if (args.fields !== undefined && !isObject(args.fields)) return { error: 'fields must be an object' };
+            const fields = collectWriteFields(args, questFields);
+            if (!cleanId && !safeName(fields.title)) return { error: 'id or title must be a non-empty string' };
             if (!_upsertQuest) return { error: 'upsertQuest unavailable' };
             try {
-                const clean = _upsertQuest({ ...fields, id: cleanId });
-                return { ok: true, id: cleanId, quest: clean || null };
+                const clean = _upsertQuest({ ...fields, ...(cleanId ? { id: cleanId } : {}) });
+                return { ok: true, id: clean?.id || cleanId || null, quest: clean || null };
             } catch (err) {
                 return { error: String(err?.message || err) };
             }
@@ -98,12 +113,14 @@ function buildNovaPhoneHandlers({
             }
         },
         phone_write_place: async (rawArgs) => {
-            const { name, fields } = safeArgs(rawArgs);
+            const args = safeArgs(rawArgs);
+            const { name } = args;
             const cleanName = safeName(name);
             if (!cleanName) return { error: 'name must be a non-empty string' };
-            if (!isObject(fields)) return { error: 'fields must be an object' };
+            if (args.fields !== undefined && !isObject(args.fields)) return { error: 'fields must be an object' };
             if (!_upsertPlace) return { error: 'upsertPlace unavailable' };
             try {
+                const fields = collectWriteFields(args, ['emoji', 'aliases', 'x', 'y', 'userPinned']);
                 const clean = _upsertPlace({ ...fields, name: cleanName });
                 if (!clean) return { error: 'upsert rejected (invalid place)' };
                 return { ok: true, place: clean };
@@ -314,7 +331,21 @@ describe('phone_write_npc', () => {
         const result = await handlers.phone_write_npc({ name: 'Aria', fields: { mood: '😊', status: 'online' } });
         assert.deepEqual(result, { ok: true, name: 'Aria' });
         assert.equal(state.mergeCalls.length, 1);
-        assert.deepEqual(state.mergeCalls[0], [{ name: 'Aria', mood: '😊', status: 'online' }]);
+        assert.deepEqual(state.mergeCalls[0], [{ name: 'Aria', mood: '😊', status: 'online', isManual: true }]);
+    });
+
+    it('accepts a minimal name-only contact add request', async () => {
+        const { state, handlers } = makeHarness();
+        const result = await handlers.phone_write_npc({ name: 'Bren' });
+        assert.deepEqual(result, { ok: true, name: 'Bren' });
+        assert.deepEqual(state.mergeCalls[0], [{ name: 'Bren', isManual: true }]);
+    });
+
+    it('accepts flat top-level profile fields without nested fields', async () => {
+        const { state, handlers } = makeHarness();
+        const result = await handlers.phone_write_npc({ name: 'Cato', mood: 'wary', location: 'docks' });
+        assert.deepEqual(result, { ok: true, name: 'Cato' });
+        assert.deepEqual(state.mergeCalls[0], [{ name: 'Cato', mood: 'wary', location: 'docks', isManual: true }]);
     });
 
     it('passes name from the top-level arg even if fields.name differs (name is authoritative)', async () => {
@@ -332,7 +363,6 @@ describe('phone_write_npc', () => {
 
     it('rejects non-object fields', async () => {
         const { handlers } = makeHarness();
-        assert.match((await handlers.phone_write_npc({ name: 'A' })).error, /fields must be/);
         assert.match((await handlers.phone_write_npc({ name: 'A', fields: 'nope' })).error, /fields must be/);
         assert.match((await handlers.phone_write_npc({ name: 'A', fields: [] })).error, /fields must be/);
         assert.match((await handlers.phone_write_npc({ name: 'A', fields: null })).error, /fields must be/);
@@ -391,9 +421,21 @@ describe('phone_write_quest', () => {
 
     it('rejects empty id and non-object fields', async () => {
         const { handlers } = makeHarness();
-        assert.match((await handlers.phone_write_quest({ id: '', fields: {} })).error, /id must be/);
-        assert.match((await handlers.phone_write_quest({ id: 'q' })).error, /fields must be/);
+        assert.match((await handlers.phone_write_quest({ id: '', fields: {} })).error, /id or title must be/);
         assert.match((await handlers.phone_write_quest({ id: 'q', fields: 42 })).error, /fields must be/);
+    });
+
+    it('accepts flat top-level quest fields and can derive id from upsert result', async () => {
+        const { state, handlers } = makeHarness({
+            upsertQuestImpl: (q) => {
+                state.upsertQuestCalls.push(q);
+                return { ...q, id: q.id || 'quest_auto' };
+            },
+        });
+        const result = await handlers.phone_write_quest({ title: 'Find Bren', status: 'active', priority: 'high' });
+        assert.equal(result.ok, true);
+        assert.equal(result.id, 'quest_auto');
+        assert.deepEqual(state.upsertQuestCalls[0], { title: 'Find Bren', status: 'active', priority: 'high' });
     });
 
     it('surfaces upsert errors', async () => {
@@ -437,7 +479,14 @@ describe('phone_write_place', () => {
     it('validates inputs', async () => {
         const { handlers } = makeHarness();
         assert.match((await handlers.phone_write_place({ name: '', fields: {} })).error, /name must be/);
-        assert.match((await handlers.phone_write_place({ name: 'x' })).error, /fields must be/);
+        assert.match((await handlers.phone_write_place({ name: 'x', fields: null })).error, /fields must be/);
+    });
+
+    it('accepts flat top-level place fields without nested fields', async () => {
+        const { state, handlers } = makeHarness();
+        const r = await handlers.phone_write_place({ name: 'Harbor', emoji: '⚓', aliases: ['docks'] });
+        assert.equal(r.ok, true);
+        assert.deepEqual(state.upsertPlaceCalls[0], { name: 'Harbor', emoji: '⚓', aliases: ['docks'] });
     });
 });
 
