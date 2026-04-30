@@ -77,6 +77,17 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-30 — Root AGENTS.md guide added (commit pending)
+
+**Context:** Added a canonical root `AGENTS.md` quick-start guide for coding
+agents.
+
+**Notes for future agents:**
+- Use uppercase `AGENTS.md` as the agent-guide filename. A lowercase
+  `agents.md` was explicitly rejected in favor of the canonical form.
+- `AGENTS.md` is intentionally concise and points to `AGENT_MEMORY.md` first,
+  then `CLAUDE.md` for deeper architecture details.
+
 ### 2026-04-30 — Image Prompter visual canon sources (commit pending)
 
 **Context:** Follow-up to the Image Prompter prompt update: the skill now reads
