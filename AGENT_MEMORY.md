@@ -77,6 +77,16 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-30 — Nova phone write tools accept flat args (commit pending)
+
+**Context:** Debugged Nova skill failures where the NPC / Contact Manager could not reliably add contacts, and similar Quest / Map skill writes were brittle.
+
+**Notes for future agents:**
+- `phone_write_npc`, `phone_write_quest`, and `phone_write_place` now accept flat top-level fields in addition to the older nested `fields` object. This matches how tool-calling models commonly respond to user requests like "add Bren as a contact" or "create a quest".
+- `phone_write_npc` requires only `name` and marks Nova-created contacts as manual (`isManual: true`); a minimal `{ name }` call is now valid. Keep this contract if adjusting the Contact Manager prompt/schema.
+- `phone_write_quest` can create a quest from a `title` without a caller-supplied `id`; `upsertQuest()` still canonicalizes and returns the generated id. It still rejects calls that provide neither `id` nor `title`.
+- `SKILLS_VERSION` is now 8; update `test/nova-tool-args.test.mjs` whenever skill prompts/default tools/default tiers or tool schemas change.
+
 ### 2026-04-30 — Image Prompter visual canon sources (commit pending)
 
 **Context:** Follow-up to the Image Prompter prompt update: the skill now reads
