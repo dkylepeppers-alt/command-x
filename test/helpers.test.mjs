@@ -98,6 +98,8 @@ function stripJsonFence(value) {
     return fence ? fence[1].trim() : text;
 }
 
+// Mirrored from index.js. These tests keep inline copies because importing the
+// extension entrypoint directly would require SillyTavern runtime modules.
 function readBalancedJsonPayloadAt(text, start) {
     const opener = text[start];
     const expectedRootClose = opener === '[' ? ']' : '}';
@@ -198,9 +200,14 @@ function extractContacts(raw) {
     }
 
     const openingTagRe = /\[(?:contacts|status)\]/gi;
+    let consumedRangeIndex = 0;
     while ((m = openingTagRe.exec(raw)) !== null) {
         const start = m.index;
-        if (consumedRanges.some(([from, to]) => start >= from && start < to)) continue;
+        while (consumedRangeIndex < consumedRanges.length && start >= consumedRanges[consumedRangeIndex][1]) {
+            consumedRangeIndex += 1;
+        }
+        const consumedRange = consumedRanges[consumedRangeIndex];
+        if (consumedRange && start >= consumedRange[0] && start < consumedRange[1]) continue;
         addContactsFromPayload(raw.slice(openingTagRe.lastIndex));
     }
     return contacts.length ? contacts : null;

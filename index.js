@@ -603,9 +603,14 @@ function extractContacts(raw) {
     }
 
     const openingTagRe = /\[(?:contacts|status)\]/gi;
+    let consumedRangeIndex = 0;
     while ((m = openingTagRe.exec(raw)) !== null) {
         const start = m.index;
-        if (consumedRanges.some(([from, to]) => start >= from && start < to)) continue;
+        while (consumedRangeIndex < consumedRanges.length && start >= consumedRanges[consumedRangeIndex][1]) {
+            consumedRangeIndex += 1;
+        }
+        const consumedRange = consumedRanges[consumedRangeIndex];
+        if (consumedRange && start >= consumedRange[0] && start < consumedRange[1]) continue;
         blockIndex += 1;
         const payloadStart = openingTagRe.lastIndex;
         addContactsFromPayload(raw.slice(payloadStart), blockIndex);
