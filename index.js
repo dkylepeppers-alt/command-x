@@ -49,7 +49,7 @@ const LOCATION_TRAIL_CAP = 50;              // max trail entries per contact
 const TOAST_DURATION_MS = 4_000;            // toast auto-dismiss duration
 const MAX_SUMMARISED_SKILL_TOOLS = 6;       // max tool names shown in skill picker
 const SMS_IMAGE_DATA_URL_RE = /^data:image\/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=]+$/i;
-const SMS_GALLERY_IMAGE_URL_RE = /^(?:\.?\/)?user\/images\/[^\s"'<>]+$/i;
+const SMS_GALLERY_IMAGE_URL_RE = /^(?:\.?\/)?user\/images\/[^\r\n"'<>]+$/i;
 const MESSAGE_SAVE_FAILURE_NOTICE_MS = 30_000; // throttle storage-full user alerts
 
 /**
