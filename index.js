@@ -539,7 +539,7 @@ function extractContacts(raw) {
                 if (contact) contacts.push(contact);
             }
         } catch (e) {
-            console.warn('[command-x] failed to parse [status] JSON block', blockIndex, e, String(m[1] || '').slice(0, 120));
+            console.warn('[command-x] failed to parse [status] JSON block', blockIndex, e);
         }
     }
     return contacts.length ? contacts : null;
@@ -1522,6 +1522,13 @@ function applyInjectionThrottle() {
     const pollN = Math.floor(Number(settings.autoPrivatePollEveryN) || 0);
     if (pollN > 0 && _turnCounter % pollN === 0) {
         pollPrivateMessages({ silent: true }).catch(e => console.warn(`[${EXT}] Auto private poll error`, e));
+    }
+}
+
+function syncAutoDetectNpcToggles(checked) {
+    for (const id of ['cx_ext_auto_detect_npcs', 'cx-set-npcs']) {
+        const toggle = document.getElementById(id);
+        if (toggle) toggle.checked = !!checked;
     }
 }
 
@@ -5389,8 +5396,7 @@ function wirePhone() {
     });
     phoneContainer.querySelector('#cx-set-npcs')?.addEventListener('change', (e) => {
         settings.autoDetectNpcs = e.target.checked;
-        const panelToggle = document.getElementById('cx_ext_auto_detect_npcs');
-        if (panelToggle) panelToggle.checked = e.target.checked;
+        syncAutoDetectNpcToggles(e.target.checked);
         saveSettings();
         if (e.target.checked) injectContactsPrompt();
         else clearContactsPrompt();
@@ -10508,8 +10514,7 @@ jQuery(async () => {
         $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_contacts_every_n, #cx_ext_quests_every_n, #cx_ext_auto_private_poll_n, #cx_ext_track_locations, #cx_ext_auto_register_places, #cx_ext_show_trails, #cx_ext_map_every_n, #cx_nova_profile, #cx_nova_default_tier, #cx_nova_max_tool_calls, #cx_nova_turn_timeout_ms, #cx_nova_plugin_base_url').on('change', (e) => {
             saveSettings();
             if (e.target?.id === 'cx_ext_auto_detect_npcs') {
-                const phoneToggle = document.getElementById('cx-set-npcs');
-                if (phoneToggle) phoneToggle.checked = settings.autoDetectNpcs !== false;
+                syncAutoDetectNpcToggles(e.target.checked);
             }
             if (settings.enabled) {
                 createPanel();
