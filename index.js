@@ -3179,21 +3179,26 @@ async function sendToChat(text, contactName, isCommand, attachment = null) {
  */
 globalThis.commandXSmsAttachmentInterceptor = async function(chat, _contextSize, _abort, type) {
     if (type === 'quiet') return;
-    const attachment = normalizeSmsAttachment(pendingSmsVisionAttachment);
-    if (!attachment) return;
-    if (!Array.isArray(chat) || chat.length === 0) return;
-    const last = structuredClone(chat[chat.length - 1]);
-    if (!last?.is_user) return;
-    last.extra = (last.extra && typeof last.extra === 'object') ? last.extra : {};
-    const supportsMediaArrays = typeof getContext()?.ensureMessageMediaIsArray === 'function';
-    if (supportsMediaArrays) {
-        if (!Array.isArray(last.extra.media)) last.extra.media = [];
-        last.extra.media.push({ type: 'image', url: attachment.dataUrl });
-    } else if (!last.extra.image) {
-        last.extra.image = attachment.dataUrl;
+    const pendingAttachment = pendingSmsVisionAttachment;
+    if (!pendingAttachment) return;
+    try {
+        const attachment = normalizeSmsAttachment(pendingAttachment);
+        if (!attachment) return;
+        if (!Array.isArray(chat) || chat.length === 0) return;
+        const last = structuredClone(chat[chat.length - 1]);
+        if (!last?.is_user) return;
+        last.extra = (last.extra && typeof last.extra === 'object') ? last.extra : {};
+        const supportsMediaArrays = typeof getContext()?.ensureMessageMediaIsArray === 'function';
+        if (supportsMediaArrays) {
+            if (!Array.isArray(last.extra.media)) last.extra.media = [];
+            last.extra.media.push({ type: 'image', url: attachment.dataUrl });
+        } else if (!last.extra.image) {
+            last.extra.image = attachment.dataUrl;
+        }
+        chat[chat.length - 1] = last;
+    } finally {
+        pendingSmsVisionAttachment = null;
     }
-    chat[chat.length - 1] = last;
-    pendingSmsVisionAttachment = null;
 };
 
 /** Send immediately (instant mode) — single target */

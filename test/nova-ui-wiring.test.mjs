@@ -27,12 +27,12 @@ async function loadSources() {
     return { js, css, manifest: JSON.parse(manifestRaw) };
 }
 
-test('manifest.json and index.js VERSION agree on 0.13.0', async () => {
+test('manifest.json and index.js VERSION agree', async () => {
     const { js, manifest } = await loadSources();
-    assert.equal(manifest.version, '0.13.0', 'manifest.json version must be 0.13.0');
+    assert.ok(manifest.version, 'manifest.json must have a version field');
     const m = js.match(/const VERSION = '([^']+)';/);
     assert.ok(m, 'VERSION constant not found in index.js');
-    assert.equal(m[1], '0.13.0', 'index.js VERSION must match manifest');
+    assert.equal(m[1], manifest.version, 'index.js VERSION must match manifest.json version');
 });
 
 test('Nova UI wiring functions are declared', async () => {
