@@ -90,7 +90,7 @@ function extractSmsBlocks(raw) {
     return blocks.length ? blocks : null;
 }
 
-const CONTACTS_TAG_RE = /\[(?:contacts|status)\]([\s\S]*?)\[\/(?:contacts|status)\]/gi;
+const CONTACTS_TAG_RE = /\[(?:contacts|status)\]([\s\S]*?)(?:\[\/(?:contacts|status)\]|(?=\n\s*\[(?:place|quests|sms|contacts|status)\])|$)/gi;
 
 function stripJsonFence(value) {
     const text = String(value || '').trim();
@@ -382,6 +382,21 @@ describe('extractContacts', () => {
         const raw = '[status]not-json[/status] text [status][{"name":"A"}][/status] [contacts][{"name":"B"}][/contacts]';
         const result = extractContacts(raw);
         assert.deepEqual(result?.map(c => c.name), ['A', 'B']);
+    });
+    it('parses [status] when closing tag is missing before [place]', () => {
+        const raw = '[status][{"name":"Madi"},{"name":"Ainsley"}]\n\n[place][{"name":"Peppers house"}][/place]';
+        const result = extractContacts(raw);
+        assert.deepEqual(result?.map(c => c.name), ['Madi', 'Ainsley']);
+    });
+    it('unclosed [status] block stops before next [status] opener allowing later valid block to parse', () => {
+        const raw = '[status]not-json\n[status][{"name":"Valid"}][/status]';
+        const result = extractContacts(raw);
+        assert.deepEqual(result?.map(c => c.name), ['Valid']);
+    });
+    it('unclosed [status] block stops before next [contacts] opener allowing later valid block to parse', () => {
+        const raw = '[status]not-json\n[contacts][{"name":"Valid"}][/contacts]';
+        const result = extractContacts(raw);
+        assert.deepEqual(result?.map(c => c.name), ['Valid']);
     });
     it('returns null when JSON has no contact list or contact name', () => {
         assert.equal(extractContacts('[status]{"mood":"happy"}[/status]'), null);

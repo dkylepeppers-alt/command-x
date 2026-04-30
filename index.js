@@ -19,7 +19,7 @@ import {
     getRequestHeaders,
 } from '../../../../script.js';
 
-const VERSION = '0.13.0';
+const VERSION = '0.13.1';
 const EXT = 'command-x';
 const INJECT_KEY = 'command-x-sms';
 const INJECT_KEY_CONTACTS = 'command-x-contacts';
@@ -383,7 +383,7 @@ function hideSmsTagsInDom(mesId) {
    NPC CONTACT STORE — localStorage-backed, keyed per chat
    ====================================================================== */
 
-const CONTACTS_TAG_RE = /\[(?:contacts|status)\]([\s\S]*?)\[\/(?:contacts|status)\]/gi;
+const CONTACTS_TAG_RE = /\[(?:contacts|status)\]([\s\S]*?)(?:\[\/(?:contacts|status)\]|(?=\n\s*\[(?:place|quests|sms|contacts|status)\])|$)/gi;
 
 function npcStoreKey() {
     return `cx-npcs-${chatKey()}`;
