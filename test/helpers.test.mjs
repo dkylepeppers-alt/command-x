@@ -13,6 +13,8 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 /* ===== Helpers under test (inline copies) ===== */
 
@@ -413,5 +415,22 @@ describe('extractQuests', () => {
         const result = extractQuests('[quests]42[/quests]');
         // Not null — code produces empty list; title-filter removes nothing
         assert.deepEqual(result, []);
+    });
+});
+
+describe('phone settings binding source shape', () => {
+    const source = readFileSync(resolve('index.js'), 'utf8');
+
+    it('binds in-phone toggles that have dedicated handlers', () => {
+        assert.match(source, /key:\s*'styleCommands'[\s\S]*ids:\s*\['cx_style_commands',\s*'cx-set-style'\]/);
+        assert.match(source, /key:\s*'showLockscreen'[\s\S]*ids:\s*\['cx_show_lockscreen',\s*'cx-set-lock'\]/);
+        assert.match(source, /key:\s*'batchMode'[\s\S]*ids:\s*\['cx_ext_batch_mode',\s*'cx-set-batch'\]/);
+    });
+
+    it('mirrors in-phone setting changes to all bound DOM inputs before saving', () => {
+        assert.match(source, /function syncPhoneSettingInputs\(key, value\)/);
+        assert.match(source, /syncPhoneSettingInputs\('batchMode', e\.target\.checked\);[\s\S]*saveSettings\(\);/);
+        assert.match(source, /syncPhoneSettingInputs\('styleCommands', e\.target\.checked\);[\s\S]*saveSettings\(\);/);
+        assert.match(source, /syncPhoneSettingInputs\('showLockscreen', e\.target\.checked\);[\s\S]*saveSettings\(\);/);
     });
 });
