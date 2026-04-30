@@ -1526,7 +1526,8 @@ function applyInjectionThrottle() {
 }
 
 function syncAutoDetectNpcToggles(checked) {
-    for (const id of ['cx_ext_auto_detect_npcs', 'cx-set-npcs']) {
+    const binding = PHONE_SETTING_BINDINGS.find(b => b.key === 'autoDetectNpcs');
+    for (const id of binding?.ids || []) {
         const toggle = document.getElementById(id);
         if (toggle) toggle.checked = !!checked;
     }
@@ -10343,7 +10344,7 @@ const PHONE_SETTING_BINDINGS = [
     { key: 'styleCommands',            type: 'bool', default: true,  ids: ['cx_style_commands'] },
     { key: 'showLockscreen',           type: 'bool', default: false, ids: ['cx_show_lockscreen'] },
     { key: 'batchMode',                type: 'bool', default: false, ids: ['cx_ext_batch_mode'] },
-    { key: 'autoDetectNpcs',           type: 'bool', default: true,  ids: ['cx_ext_auto_detect_npcs'] },
+    { key: 'autoDetectNpcs',           type: 'bool', default: true,  ids: ['cx_ext_auto_detect_npcs', 'cx-set-npcs'] },
     { key: 'manualHybridPrivateTexts', type: 'bool', default: true,  ids: ['cx_set_private_hybrid', 'cx-set-private-hybrid'] },
     { key: 'trackLocations',           type: 'bool', default: true,  ids: ['cx_ext_track_locations', 'cx-set-track-locations'] },
     { key: 'autoRegisterPlaces',       type: 'bool', default: true,  ids: ['cx_ext_auto_register_places', 'cx-set-auto-places'] },
@@ -10512,10 +10513,11 @@ jQuery(async () => {
         loadSettings();
         refreshPrivatePhonePrompt();
         $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_contacts_every_n, #cx_ext_quests_every_n, #cx_ext_auto_private_poll_n, #cx_ext_track_locations, #cx_ext_auto_register_places, #cx_ext_show_trails, #cx_ext_map_every_n, #cx_nova_profile, #cx_nova_default_tier, #cx_nova_max_tool_calls, #cx_nova_turn_timeout_ms, #cx_nova_plugin_base_url').on('change', (e) => {
-            saveSettings();
             if (e.target?.id === 'cx_ext_auto_detect_npcs') {
+                settings.autoDetectNpcs = e.target.checked;
                 syncAutoDetectNpcToggles(e.target.checked);
             }
+            saveSettings();
             if (settings.enabled) {
                 createPanel();
                 if (settings.autoDetectNpcs !== false) injectContactsPrompt();
