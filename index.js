@@ -113,7 +113,7 @@ let scanContactsInFlight = false;
 const SCAN_CONTACTS_LABEL = '🔍 Scan Contacts';
 let questEnrichmentInFlight = false;
 let pendingSmsAttachment = null; // { type:'image', dataUrl, name, alt } | null
-let pendingSmsVisionAttachment = null; // one-shot image injected into the next user generation message
+let pendingSmsVisionAttachments = []; // one-shot images injected into the next user generation message
 let lastMessageSaveFailureNoticeAt = 0;
 
 
@@ -183,6 +183,13 @@ function addToQueue(contactName, text, displayText, isNeural, cmdType, attachmen
     updateQueueBar();
 }
 
+function stageSmsVisionAttachments(attachments) {
+    const staged = (Array.isArray(attachments) ? attachments : [attachments])
+        .map(normalizeSmsAttachment)
+        .filter(Boolean);
+    pendingSmsVisionAttachments = staged;
+}
+
 function clearQueue() {
     composeQueue = [];
     updateQueueBar();
@@ -219,6 +226,9 @@ function flushQueue() {
         }
     });
     const batchedMessage = rpParts.join('\n\n');
+    stageSmsVisionAttachments(composeQueue
+        .filter(q => !q.cmdType && !q.isNeural)
+        .map(q => q.attachment));
 
     // Build targets for prompt injection
     const targets = composeQueue.map(q => ({
@@ -3152,7 +3162,7 @@ async function sendToChat(text, contactName, isCommand, attachment = null) {
     } else {
         formatted = `*texts ${contactName} on phone:*\n"${text}"`;
     }
-    pendingSmsVisionAttachment = (!isCommand && cleanAttachment) ? cleanAttachment : null;
+    stageSmsVisionAttachments(!isCommand ? cleanAttachment : null);
     const textarea = document.querySelector('#send_textarea');
     if (textarea) {
         textarea.value = formatted;
@@ -3179,11 +3189,11 @@ async function sendToChat(text, contactName, isCommand, attachment = null) {
  */
 globalThis.commandXSmsAttachmentInterceptor = async function(chat, _contextSize, _abort, type) {
     if (type === 'quiet') return;
-    const pendingAttachment = pendingSmsVisionAttachment;
-    if (!pendingAttachment) return;
+    const pendingAttachments = Array.isArray(pendingSmsVisionAttachments) ? pendingSmsVisionAttachments.slice() : [];
+    if (!pendingAttachments.length) return;
     try {
-        const attachment = normalizeSmsAttachment(pendingAttachment);
-        if (!attachment) return;
+        const attachments = pendingAttachments.map(normalizeSmsAttachment).filter(Boolean);
+        if (!attachments.length) return;
         if (!Array.isArray(chat) || chat.length === 0) return;
         const last = structuredClone(chat[chat.length - 1]);
         if (!last?.is_user) return;
@@ -3191,13 +3201,17 @@ globalThis.commandXSmsAttachmentInterceptor = async function(chat, _contextSize,
         const supportsMediaArrays = typeof getContext()?.ensureMessageMediaIsArray === 'function';
         if (supportsMediaArrays) {
             if (!Array.isArray(last.extra.media)) last.extra.media = [];
-            last.extra.media.push({ type: 'image', url: attachment.dataUrl });
+            for (const attachment of attachments) {
+                last.extra.media.push({ type: 'image', url: attachment.dataUrl });
+            }
+            last.extra.media_display = 'list';
+            last.extra.inline_image = true;
         } else if (!last.extra.image) {
-            last.extra.image = attachment.dataUrl;
+            last.extra.image = attachments[0].dataUrl;
         }
         chat[chat.length - 1] = last;
     } finally {
-        pendingSmsVisionAttachment = null;
+        pendingSmsVisionAttachments = [];
     }
 };
 
