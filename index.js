@@ -2003,7 +2003,7 @@ function injectSmsPrompt(targets) {
         if (multi && smsTargets.length > 1) {
             instruction += ` [sms from="${smsTargets[1].name}" to="user"]sounds good[/sms]`;
         }
-        instruction += ` — The [sms] block is phone text content only. Always include from and to attributes. Only use to="user" for texts directed at the user's phone. If characters text each other, do NOT use [sms] tags — just narrate it normally.`;
+        instruction += ` — STRICT SMS FORMAT (required so Command-X can detect it): output raw [sms] tags exactly like [sms from="Name" to="user"]message text[/sms]. Use lowercase [sms] and [/sms], include BOTH from and to with double quotes, and close every tag. Put only the text-message content between the tags (no narration, stage directions, or markdown). Only use to="user" for texts directed at the user's phone. If characters text each other, do NOT use [sms] tags — just narrate it normally.`;
     }
     instruction += `]`;
 
