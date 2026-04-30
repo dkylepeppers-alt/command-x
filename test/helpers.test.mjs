@@ -98,6 +98,46 @@ function stripJsonFence(value) {
     return fence ? fence[1].trim() : text;
 }
 
+function extractLeadingJsonPayload(value) {
+    const text = stripJsonFence(value);
+    const start = text.search(/[\[{]/);
+    if (start < 0) return text;
+    const opener = text[start];
+    const expectedRootClose = opener === '[' ? ']' : '}';
+    const stack = [expectedRootClose];
+    let inString = false;
+    let escaped = false;
+    for (let i = start + 1; i < text.length; i += 1) {
+        const ch = text[i];
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+            } else if (ch === '\\') {
+                escaped = true;
+            } else if (ch === '"') {
+                inString = false;
+            }
+            continue;
+        }
+        if (ch === '"') {
+            inString = true;
+        } else if (ch === '[') {
+            stack.push(']');
+        } else if (ch === '{') {
+            stack.push('}');
+        } else if (ch === ']' || ch === '}') {
+            if (stack[stack.length - 1] !== ch) break;
+            stack.pop();
+            if (!stack.length) return text.slice(start, i + 1).trim();
+        }
+    }
+    return text;
+}
+
+function parseTaggedJsonPayload(value) {
+    return JSON.parse(extractLeadingJsonPayload(value));
+}
+
 function contactPayloadToArray(parsed) {
     if (Array.isArray(parsed)) return parsed;
     if (!parsed || typeof parsed !== 'object') return [];
@@ -129,10 +169,10 @@ function extractContacts(raw) {
     if (!raw) return null;
     CONTACTS_TAG_RE.lastIndex = 0;
     const contacts = [];
-    let m;
-    while ((m = CONTACTS_TAG_RE.exec(raw)) !== null) {
+    const consumedRanges = [];
+    const addContactsFromPayload = (payload) => {
         try {
-            const parsed = JSON.parse(stripJsonFence(m[1]));
+            const parsed = parseTaggedJsonPayload(payload);
             for (const item of contactPayloadToArray(parsed)) {
                 const contact = normalizeParsedContact(item);
                 if (contact) contacts.push(contact);
@@ -140,6 +180,18 @@ function extractContacts(raw) {
         } catch {
             // invalid blocks are ignored so later valid [status] blocks can still import NPCs.
         }
+    };
+    let m;
+    while ((m = CONTACTS_TAG_RE.exec(raw)) !== null) {
+        consumedRanges.push([m.index, CONTACTS_TAG_RE.lastIndex]);
+        addContactsFromPayload(m[1]);
+    }
+
+    const openingTagRe = /\[(?:contacts|status)\]/gi;
+    while ((m = openingTagRe.exec(raw)) !== null) {
+        const start = m.index;
+        if (consumedRanges.some(([from, to]) => start >= from && start < to)) continue;
+        addContactsFromPayload(raw.slice(openingTagRe.lastIndex));
     }
     return contacts.length ? contacts : null;
 }
@@ -377,6 +429,16 @@ describe('extractContacts', () => {
         const result = extractContacts('[status]```json\n[{"name":"Fenced"}]\n```[/status]');
         assert.equal(result?.length, 1);
         assert.equal(result[0].name, 'Fenced');
+    });
+    it('recovers a missing closing status tag before another structured tag', () => {
+        const raw = '[status][{"name":"Madi","place":"Peppers house"},{"name":"Ainsley","place":"Peppers house"}]\n\n[place][{"name":"Peppers house"}][/place]';
+        const result = extractContacts(raw);
+        assert.deepEqual(result?.map(c => c.name), ['Madi', 'Ainsley']);
+        assert.equal(result?.[0].place, 'Peppers house');
+    });
+    it('does not duplicate contacts when a valid closed status tag is present', () => {
+        const result = extractContacts('[status][{"name":"Once"}][/status]');
+        assert.deepEqual(result?.map(c => c.name), ['Once']);
     });
     it('continues after an invalid block and combines multiple valid blocks', () => {
         const raw = '[status]not-json[/status] text [status][{"name":"A"}][/status] [contacts][{"name":"B"}][/contacts]';
