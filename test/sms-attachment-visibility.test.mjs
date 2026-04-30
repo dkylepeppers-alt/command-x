@@ -35,9 +35,9 @@ test('instant and batch SMS photo sends stage attachments before generation', as
     assert.match(sendToChatSection, /stageSmsVisionAttachments\(!isCommand \? cleanAttachment : null\);/);
 
     const flushQueueStart = js.indexOf('function flushQueue()');
-    const clearQueueStart = js.indexOf('function clearQueue()', flushQueueStart);
-    assert.ok(flushQueueStart > -1 && clearQueueStart > flushQueueStart, 'flushQueue section not found');
-    const flushQueueSection = js.slice(flushQueueStart, clearQueueStart);
+    const smsParsingStart = js.indexOf('/* ======================================================================\n   SMS TAG PARSING', flushQueueStart);
+    assert.ok(flushQueueStart > -1 && smsParsingStart > flushQueueStart, 'flushQueue section not found');
+    const flushQueueSection = js.slice(flushQueueStart, smsParsingStart);
     const stageIndex = flushQueueSection.indexOf('stageSmsVisionAttachments(composeQueue');
     const sendClickIndex = flushQueueSection.indexOf('sendBtn.click()');
     assert.ok(stageIndex > -1, 'flushQueue must stage queued SMS photo attachments');
