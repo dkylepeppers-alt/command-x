@@ -487,6 +487,39 @@ function getManualOverrides(contact = {}) {
     return { ...(contact.manualOverrides || {}) };
 }
 
+function stripJsonFence(value) {
+    const text = String(value || '').trim();
+    const fence = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+    return fence ? fence[1].trim() : text;
+}
+
+function contactPayloadToArray(parsed) {
+    if (Array.isArray(parsed)) return parsed;
+    if (!parsed || typeof parsed !== 'object') return [];
+    for (const key of ['contacts', 'status', 'npcs', 'characters']) {
+        if (Array.isArray(parsed[key])) return parsed[key];
+    }
+    if (typeof parsed.name === 'string') return [parsed];
+    return [];
+}
+
+function normalizeParsedContact(c) {
+    if (!c || typeof c.name !== 'string') return null;
+    const name = c.name.trim();
+    if (!name) return null;
+    return {
+        name,
+        emoji: c.emoji || '🧑',
+        status: c.status || 'nearby',
+        mood: c.mood || null,
+        location: c.location || null,
+        relationship: c.relationship || null,
+        thoughts: c.thoughts || null,
+        avatarUrl: c.avatarUrl || null,
+        place: typeof c.place === 'string' ? c.place.trim() || null : null,
+    };
+}
+
 /**
  * Parse [status] (or legacy [contacts]) JSON from a message.
  * [status][{"name":"Sarah","emoji":"👩","status":"online","mood":"😊 happy","location":"home","relationship":"friendly","thoughts":"I need to play this cool or she'll notice immediately."}][/status]
@@ -494,26 +527,22 @@ function getManualOverrides(contact = {}) {
 function extractContacts(raw) {
     if (!raw) return null;
     CONTACTS_TAG_RE.lastIndex = 0;
-    const m = CONTACTS_TAG_RE.exec(raw);
-    if (!m) return null;
-    try {
-        const arr = JSON.parse(m[1].trim());
-        if (!Array.isArray(arr)) return null;
-        return arr.filter(c => c && typeof c.name === 'string').map(c => ({
-            name: c.name.trim(),
-            emoji: c.emoji || '🧑',
-            status: c.status || 'nearby',
-            mood: c.mood || null,
-            location: c.location || null,
-            relationship: c.relationship || null,
-            thoughts: c.thoughts || null,
-            avatarUrl: c.avatarUrl || null,
-            place: typeof c.place === 'string' ? c.place.trim() || null : null,
-        }));
-    } catch (e) {
-        console.warn('[command-x] failed to parse [status] JSON:', e);
-        return null;
+    const contacts = [];
+    let m;
+    let blockIndex = 0;
+    while ((m = CONTACTS_TAG_RE.exec(raw)) !== null) {
+        blockIndex += 1;
+        try {
+            const parsed = JSON.parse(stripJsonFence(m[1]));
+            for (const item of contactPayloadToArray(parsed)) {
+                const contact = normalizeParsedContact(item);
+                if (contact) contacts.push(contact);
+            }
+        } catch (e) {
+            console.warn('[command-x] failed to parse [status] JSON block', blockIndex, e);
+        }
     }
+    return contacts.length ? contacts : null;
 }
 
 /**
@@ -1494,6 +1523,11 @@ function applyInjectionThrottle() {
     if (pollN > 0 && _turnCounter % pollN === 0) {
         pollPrivateMessages({ silent: true }).catch(e => console.warn(`[${EXT}] Auto private poll error`, e));
     }
+}
+
+function syncPhoneSettingInputs(key, value) {
+    const binding = PHONE_SETTING_BINDINGS.find(b => b.key === key);
+    if (binding) _writeSettingToDom(binding, value);
 }
 
 function hideQuestTagsInDom(mesId) {
@@ -5351,21 +5385,25 @@ function wirePhone() {
     // Settings toggles
     phoneContainer.querySelector('#cx-set-batch')?.addEventListener('change', (e) => {
         settings.batchMode = e.target.checked;
+        syncPhoneSettingInputs('batchMode', e.target.checked);
         saveSettings();
         updateQueueBar();
     });
     phoneContainer.querySelector('#cx-set-style')?.addEventListener('change', (e) => {
         settings.styleCommands = e.target.checked;
+        syncPhoneSettingInputs('styleCommands', e.target.checked);
         saveSettings();
     });
     phoneContainer.querySelector('#cx-set-npcs')?.addEventListener('change', (e) => {
         settings.autoDetectNpcs = e.target.checked;
+        syncPhoneSettingInputs('autoDetectNpcs', e.target.checked);
         saveSettings();
         if (e.target.checked) injectContactsPrompt();
         else clearContactsPrompt();
     });
     phoneContainer.querySelector('#cx-set-private-hybrid')?.addEventListener('change', (e) => {
         settings.manualHybridPrivateTexts = e.target.checked;
+        syncPhoneSettingInputs('manualHybridPrivateTexts', e.target.checked);
         saveSettings();
         refreshPrivatePhonePrompt();
         rebuildPhone();
@@ -5373,6 +5411,7 @@ function wirePhone() {
     phoneContainer.querySelector('#cx-set-auto-poll-n')?.addEventListener('change', (e) => {
         const val = Math.max(0, Math.floor(Number(e.target.value) || 0));
         settings.autoPrivatePollEveryN = val;
+        syncPhoneSettingInputs('autoPrivatePollEveryN', val);
         saveSettings();
     });
     // --- Nova in-phone settings (v0.13.0) ---
@@ -5395,11 +5434,13 @@ function wirePhone() {
     });
     phoneContainer.querySelector('#cx-set-lock')?.addEventListener('change', (e) => {
         settings.showLockscreen = e.target.checked;
+        syncPhoneSettingInputs('showLockscreen', e.target.checked);
         saveSettings();
     });
     // --- Map settings wiring ---
     phoneContainer.querySelector('#cx-set-track-locations')?.addEventListener('change', (e) => {
         settings.trackLocations = e.target.checked;
+        syncPhoneSettingInputs('trackLocations', e.target.checked);
         saveSettings();
         if (!settings.trackLocations) clearMapPrompt();
         else injectMapPrompt();
@@ -5407,17 +5448,20 @@ function wirePhone() {
     });
     phoneContainer.querySelector('#cx-set-auto-places')?.addEventListener('change', (e) => {
         settings.autoRegisterPlaces = e.target.checked;
+        syncPhoneSettingInputs('autoRegisterPlaces', e.target.checked);
         saveSettings();
         injectMapPrompt();
     });
     phoneContainer.querySelector('#cx-set-trails')?.addEventListener('change', (e) => {
         settings.showLocationTrails = e.target.checked;
+        syncPhoneSettingInputs('showLocationTrails', e.target.checked);
         saveSettings();
         rebuildPhone();
     });
     phoneContainer.querySelector('#cx-set-map-every-n')?.addEventListener('change', (e) => {
         const val = Math.max(1, Math.floor(Number(e.target.value) || 1));
         settings.mapInjectEveryN = val;
+        syncPhoneSettingInputs('mapInjectEveryN', val);
         saveSettings();
     });
     phoneContainer.querySelector('#cx-set-clear-places')?.addEventListener('click', async () => {
@@ -10303,10 +10347,10 @@ function buildNovaStTools({
 
 const PHONE_SETTING_BINDINGS = [
     { key: 'enabled',                  type: 'bool', default: true,  ids: ['cx_enabled'] },
-    { key: 'styleCommands',            type: 'bool', default: true,  ids: ['cx_style_commands'] },
-    { key: 'showLockscreen',           type: 'bool', default: false, ids: ['cx_show_lockscreen'] },
-    { key: 'batchMode',                type: 'bool', default: false, ids: ['cx_ext_batch_mode'] },
-    { key: 'autoDetectNpcs',           type: 'bool', default: true,  ids: ['cx_ext_auto_detect_npcs'] },
+    { key: 'styleCommands',            type: 'bool', default: true,  ids: ['cx_style_commands', 'cx-set-style'] },
+    { key: 'showLockscreen',           type: 'bool', default: false, ids: ['cx_show_lockscreen', 'cx-set-lock'] },
+    { key: 'batchMode',                type: 'bool', default: false, ids: ['cx_ext_batch_mode', 'cx-set-batch'] },
+    { key: 'autoDetectNpcs',           type: 'bool', default: true,  ids: ['cx_ext_auto_detect_npcs', 'cx-set-npcs'] },
     { key: 'manualHybridPrivateTexts', type: 'bool', default: true,  ids: ['cx_set_private_hybrid', 'cx-set-private-hybrid'] },
     { key: 'trackLocations',           type: 'bool', default: true,  ids: ['cx_ext_track_locations', 'cx-set-track-locations'] },
     { key: 'autoRegisterPlaces',       type: 'bool', default: true,  ids: ['cx_ext_auto_register_places', 'cx-set-auto-places'] },
@@ -10474,7 +10518,13 @@ jQuery(async () => {
 
         loadSettings();
         refreshPrivatePhonePrompt();
-        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_contacts_every_n, #cx_ext_quests_every_n, #cx_ext_auto_private_poll_n, #cx_ext_track_locations, #cx_ext_auto_register_places, #cx_ext_show_trails, #cx_ext_map_every_n, #cx_nova_profile, #cx_nova_default_tier, #cx_nova_max_tool_calls, #cx_nova_turn_timeout_ms, #cx_nova_plugin_base_url').on('change', () => {
+        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_contacts_every_n, #cx_ext_quests_every_n, #cx_ext_auto_private_poll_n, #cx_ext_track_locations, #cx_ext_auto_register_places, #cx_ext_show_trails, #cx_ext_map_every_n, #cx_nova_profile, #cx_nova_default_tier, #cx_nova_max_tool_calls, #cx_nova_turn_timeout_ms, #cx_nova_plugin_base_url').on('change', (e) => {
+            const phoneBinding = PHONE_SETTING_BINDINGS.find(b => b.ids.includes(e.target?.id));
+            if (phoneBinding) {
+                const raw = phoneBinding.type === 'bool' ? e.target.checked : e.target.value;
+                settings[phoneBinding.key] = _coerceSettingValue(phoneBinding, raw, settings[phoneBinding.key]);
+                syncPhoneSettingInputs(phoneBinding.key, settings[phoneBinding.key]);
+            }
             saveSettings();
             if (settings.enabled) {
                 createPanel();
