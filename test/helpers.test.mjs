@@ -136,7 +136,7 @@ function extractContacts(raw) {
                 if (contact) contacts.push(contact);
             }
         } catch {
-            // Invalid blocks are ignored so later valid [status] blocks can still import NPCs.
+            // invalid blocks are ignored so later valid [status] blocks can still import NPCs.
         }
     }
     return contacts.length ? contacts : null;

@@ -529,7 +529,9 @@ function extractContacts(raw) {
     CONTACTS_TAG_RE.lastIndex = 0;
     const contacts = [];
     let m;
+    let blockIndex = 0;
     while ((m = CONTACTS_TAG_RE.exec(raw)) !== null) {
+        blockIndex += 1;
         try {
             const parsed = JSON.parse(stripJsonFence(m[1]));
             for (const item of contactPayloadToArray(parsed)) {
@@ -537,7 +539,7 @@ function extractContacts(raw) {
                 if (contact) contacts.push(contact);
             }
         } catch (e) {
-            console.warn('[command-x] failed to parse [status] JSON:', e);
+            console.warn('[command-x] failed to parse [status] JSON block', blockIndex, e, String(m[1] || '').slice(0, 120));
         }
     }
     return contacts.length ? contacts : null;
@@ -10503,8 +10505,12 @@ jQuery(async () => {
 
         loadSettings();
         refreshPrivatePhonePrompt();
-        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_contacts_every_n, #cx_ext_quests_every_n, #cx_ext_auto_private_poll_n, #cx_ext_track_locations, #cx_ext_auto_register_places, #cx_ext_show_trails, #cx_ext_map_every_n, #cx_nova_profile, #cx_nova_default_tier, #cx_nova_max_tool_calls, #cx_nova_turn_timeout_ms, #cx_nova_plugin_base_url').on('change', () => {
+        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_contacts_every_n, #cx_ext_quests_every_n, #cx_ext_auto_private_poll_n, #cx_ext_track_locations, #cx_ext_auto_register_places, #cx_ext_show_trails, #cx_ext_map_every_n, #cx_nova_profile, #cx_nova_default_tier, #cx_nova_max_tool_calls, #cx_nova_turn_timeout_ms, #cx_nova_plugin_base_url').on('change', (e) => {
             saveSettings();
+            if (e.target?.id === 'cx_ext_auto_detect_npcs') {
+                const phoneToggle = document.getElementById('cx-set-npcs');
+                if (phoneToggle) phoneToggle.checked = settings.autoDetectNpcs !== false;
+            }
             if (settings.enabled) {
                 createPanel();
                 if (settings.autoDetectNpcs !== false) injectContactsPrompt();
