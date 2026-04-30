@@ -77,6 +77,19 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-30 — Review-thread doc fixes (commit pending)
+
+**Context:** Applied PR review feedback on the root agent guide and refreshed
+docs.
+
+**Notes for future agents:**
+- In this standalone checkout, use `node --input-type=module --check < index.js`
+  for a parser-only ESM syntax check. Dynamic-importing `./index.js` from the
+  repo root can fail before useful validation because the repo intentionally has
+  no root `package.json` with `type: module`.
+- The Map app uses a contact `place` field in `[status]` data for canonical map
+  positioning; `location` remains descriptive text.
+
 ### 2026-04-30 — Root AGENTS.md guide added (commit pending)
 
 **Context:** Added a canonical root `AGENTS.md` quick-start guide for coding

@@ -48,14 +48,14 @@ node --test test/helpers.test.mjs
 node --test test/nova-tool-dispatch.test.mjs
 ```
 
-To syntax-check `index.js` without a full SillyTavern runtime:
+To syntax-check `index.js` as an ES module without a full SillyTavern runtime:
 
 ```bash
-node -e "import('./index.js').catch(e => { if (e instanceof SyntaxError) { console.error(e); process.exit(1); } })"
+node --input-type=module --check < index.js
 ```
 
-The import may fail after parsing because SillyTavern runtime modules are absent;
-only syntax errors should fail that command.
+This checks parser-level JavaScript syntax in the standalone extension checkout
+without resolving SillyTavern runtime imports.
 
 Documentation-only changes do not require the full Node suite unless they alter
 tested examples or behavior. Prefer targeted `rg` checks for stale names, paths,

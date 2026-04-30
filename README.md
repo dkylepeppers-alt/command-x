@@ -261,7 +261,7 @@ Requirements:
 | Tag | Purpose | Example |
 |-----|---------|---------|
 | `[sms from="Name" to="user"]...[/sms]` | Phone text content | `[sms from="Sarah" to="user"]omw![/sms]` |
-| `[status][...JSON...][/status]` | present-character state data | `[status][{"name":"Sarah","emoji":"👩","mood":"😊 happy","location":"café","thoughts":"I really hope he asks me to stay a little longer."}][/status]` |
+| `[status][...JSON...][/status]` | present-character state data | `[status][{"name":"Sarah","emoji":"👩","mood":"😊 happy","location":"café","place":"Lighthouse Café","thoughts":"I really hope he asks me to stay a little longer."}][/status]` |
 | `[quests][...JSON...][/quests]` | quest/task state updates | `[quests][{"title":"Meet Sarah at the diner","objective":"Get there before 8 PM","status":"active","priority":"high"}][/quests]` |
 | `[place][...JSON...][/place]` | map place registration / aliases | `[place][{"name":"Lighthouse Café","emoji":"☕","aliases":["the café"]}][/place]` |
 

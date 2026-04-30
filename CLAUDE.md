@@ -33,9 +33,10 @@ command-x/
 ├── presets/          # OpenAI-shaped connection presets shipped for Nova
 ├── server-plugin/
 │   └── nova-agent-bridge/   # Companion ST server plugin for Nova (fs/shell routes + audit + soul/memory)
-├── test/             # Node --test suites (38 files across helpers + nova-*)
+├── test/             # Node --test suites (38 files spanning helpers, Nova, and other feature-specific coverage)
 │   ├── helpers.test.mjs              # Pure phone helpers
-│   └── nova-*.test.mjs               # Nova agent (state, tools, dispatch, approval modal, plugin, diff, …)
+│   ├── nova-*.test.mjs               # Nova agent coverage (state, tools, dispatch, approval modal, plugin, diff, …)
+│   └── *.test.mjs                    # Additional non-Nova feature tests (for example swipe regeneration)
 ├── .github/          # GitHub config + copilot-instructions.md
 └── st-docs/          # Local copy of SillyTavern docs (reference only)
 ```
