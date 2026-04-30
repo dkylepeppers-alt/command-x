@@ -29,7 +29,7 @@ const INJECT_KEY_MAP = 'command-x-map';
 // Nova agent defaults (plan §7c). Extracted as a named constant so the seven
 // nested keys stay readable without reformatting the pre-existing DEFAULTS line.
 const NOVA_DEFAULTS = {
-    profileName: '',
+    profileName: 'Command-X',
     defaultTier: 'read',
     maxToolCalls: 24,
     turnTimeoutMs: 300000,
@@ -4951,8 +4951,39 @@ function resolveNovaConnectionProfileId(ctx, profileName) {
     if (!wanted) return '';
     const profiles = ctx?.extensionSettings?.connectionManager?.profiles;
     if (!Array.isArray(profiles)) return wanted;
-    const hit = profiles.find(p => p && (p.id === wanted || p.name === wanted));
+    const norm = (s) => String(s || '').trim().toLowerCase();
+    const wantedNorm = norm(wanted);
+    const wantedCompact = wantedNorm.replace(/[\s_-]+/g, '');
+    // Exact id/name match first.
+    let hit = profiles.find(p => p && (norm(p.id) === wantedNorm || norm(p.name) === wantedNorm));
+    // Fuzzy fallback: tolerate minor profile-name variations like
+    // "Command X", "command-x", or "... profile/preset".
+    if (!hit) {
+        hit = profiles.find((p) => {
+            const idN = norm(p?.id);
+            const nameN = norm(p?.name);
+            const idC = idN.replace(/[\s_-]+/g, '');
+            const nameC = nameN.replace(/[\s_-]+/g, '');
+            return idC === wantedCompact
+                || nameC === wantedCompact
+                || idN.includes(wantedNorm)
+                || nameN.includes(wantedNorm)
+                || wantedNorm.includes(idN)
+                || wantedNorm.includes(nameN);
+        });
+    }
     return String(hit?.id || wanted);
+}
+
+function doesNovaProfileExist(ctx, profileName) {
+    const wanted = String(profileName || '').trim();
+    if (!wanted) return false;
+    const profiles = ctx?.extensionSettings?.connectionManager?.profiles;
+    if (!Array.isArray(profiles)) return true; // fail-open on unknown ST shape
+    const resolved = resolveNovaConnectionProfileId(ctx, wanted);
+    const norm = (s) => String(s || '').trim().toLowerCase();
+    const resolvedNorm = norm(resolved);
+    return profiles.some((p) => p && (norm(p.id) === resolvedNorm || norm(p.name) === resolvedNorm));
 }
 
 function normaliseNovaToolSchema(tool) {
@@ -5067,6 +5098,13 @@ async function novaHandleSend() {
 
     if (!nova.profileName) {
         await cxAlert('Pick a connection profile first (tap the Profile pill).', 'Nova');
+        return;
+    }
+    if (!doesNovaProfileExist(ctx, nova.profileName)) {
+        await cxAlert(
+            `Nova profile "${nova.profileName}" was not found in SillyTavern Connection Profiles. Tap the Profile pill and choose an existing profile.`,
+            'Nova',
+        );
         return;
     }
 
@@ -7345,7 +7383,6 @@ async function runNovaToolDispatch({
     // The outer loop: one iteration per LLM round. We start by treating
     // `initialResponse` as "round 0's response" — we didn't call the LLM
     // here, the caller did, so we don't count it toward `rounds`.
-    // eslint-disable-next-line no-constant-condition
     while (true) {
         if (signal && signal.aborted) {
             return { ok: false, reason: 'aborted' };
@@ -8935,8 +8972,10 @@ const NOVA_SKILLS = [
             'You are Nova in free-form helper mode.',
             'The user has not picked a specialised skill; answer whatever they',
             'ask using the full soul + memory context and whatever tools the',
-            'current tier permits. Keep responses short. Ask before doing',
-            'anything destructive.',
+            'current tier permits. Be interactive and agentic: ask concise',
+            'clarifying questions when needed, propose next actions, and',
+            'execute safe read tools proactively when they improve accuracy.',
+            'Ask before doing anything destructive.',
         ].join('\n'),
     },
 ];
