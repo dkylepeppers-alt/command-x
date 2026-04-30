@@ -495,7 +495,7 @@ function stripJsonFence(value) {
 
 function contactPayloadToArray(parsed) {
     if (Array.isArray(parsed)) return parsed;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+    if (!parsed || typeof parsed !== 'object') return [];
     for (const key of ['contacts', 'status', 'npcs', 'characters']) {
         if (Array.isArray(parsed[key])) return parsed[key];
     }
