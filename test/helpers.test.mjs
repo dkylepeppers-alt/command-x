@@ -467,4 +467,35 @@ describe('SMS gallery attachment source shape', () => {
         assert.match(source, /<img src="\$\{escAttr\(attachment\.url\)\}"/);
         assert.match(source, /last\.extra\.media\.push\(\{ type: 'image', url: attachment\.url \}\)/);
     });
+
+    it('sanitizes the gallery folder name before sending it as ch_name', () => {
+        assert.match(source, /function sanitizeSmsGalleryFolder\(name\)/);
+        assert.match(source, /const folder = sanitizeSmsGalleryFolder\(contactName\);/);
+
+        // Inline copy of sanitizeSmsGalleryFolder for behavior assertions.
+        const sanitizeSmsGalleryFolder = (name) => {
+            const cleaned = String(name || '')
+                .replace(/[\\/]+/g, ' ')
+                .replace(/[\x00-\x1F\x7F]+/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .replace(/^\.+/, '')
+                .slice(0, 64)
+                .trim();
+            if (!cleaned || cleaned === '.' || cleaned === '..') return 'Command-X';
+            return cleaned;
+        };
+
+        assert.equal(sanitizeSmsGalleryFolder('Jane Doe'), 'Jane Doe');
+        assert.equal(sanitizeSmsGalleryFolder('  Jane  Doe  '), 'Jane Doe');
+        assert.equal(sanitizeSmsGalleryFolder('Jane/Doe'), 'Jane Doe');
+        assert.equal(sanitizeSmsGalleryFolder('Jane\\Doe'), 'Jane Doe');
+        assert.equal(sanitizeSmsGalleryFolder('../etc/passwd'), 'etc passwd');
+        assert.equal(sanitizeSmsGalleryFolder('..'), 'Command-X');
+        assert.equal(sanitizeSmsGalleryFolder('.'), 'Command-X');
+        assert.equal(sanitizeSmsGalleryFolder(''), 'Command-X');
+        assert.equal(sanitizeSmsGalleryFolder(null), 'Command-X');
+        assert.equal(sanitizeSmsGalleryFolder('Jane\u0000\u0007Doe'), 'Jane Doe');
+        assert.equal(sanitizeSmsGalleryFolder('a'.repeat(200)).length, 64);
+    });
 });

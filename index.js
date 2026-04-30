@@ -2945,6 +2945,23 @@ function splitSmsImageDataUrl(dataUrl) {
     return { format, base64: match[2] };
 }
 
+function sanitizeSmsGalleryFolder(name) {
+    // ch_name becomes a directory under user/images/ on the ST server. Strip
+    // path separators, control chars, and parent-traversal forms before sending
+    // so a contact name like "Jane/.." or "../etc" can't escape the gallery
+    // root or fail the upload.
+    const cleaned = String(name || '')
+        .replace(/[\\/]+/g, ' ')
+        .replace(/[\x00-\x1F\x7F]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/^\.+/, '')
+        .slice(0, 64)
+        .trim();
+    if (!cleaned || cleaned === '.' || cleaned === '..') return 'Command-X';
+    return cleaned;
+}
+
 function smsAttachmentFilename(file) {
     const stem = String(file?.name || 'photo')
         .replace(/\.[^.]*$/, '')
@@ -2961,7 +2978,7 @@ async function uploadSmsImageToCharacterGallery(file, contactName) {
     const dataUrl = await readImageDataUrlFromFile(file);
     const parsed = splitSmsImageDataUrl(dataUrl);
     if (!parsed) throw new Error('Unsupported image format. Please choose a PNG, JPEG, GIF, or WebP image.');
-    const folder = String(contactName || '').trim() || 'Command-X';
+    const folder = sanitizeSmsGalleryFolder(contactName);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), SMS_GALLERY_UPLOAD_TIMEOUT_MS);
     let response;
