@@ -77,6 +77,24 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-30 — Preset now enforces strict SMS tags for character-initiated texts (commit pending)
+
+**Context:** Follow-up to SMS-format hardening: ensured the chat-completion preset also tells the model to use strict `[sms]` syntax when phone messages are character-initiated, not only when replying to a user-initiated text.
+
+**Notes for future agents:**
+- `presets/openai/Command-X.json` side-channel rules now explicitly state strict SMS tag syntax applies to every phone text update, including character-initiated messages.
+- This closes a prompt-coverage gap between runtime SMS injection guidance and preset side-channel guidance.
+- Full `node --test test/*.mjs` still has the unrelated pre-existing version-pin failure (`test/nova-ui-wiring.test.mjs` expects `manifest.json` version `0.13.0`, repo is `0.13.1`).
+
+### 2026-04-30 — SMS prompt now enforces strict parser format (commit pending)
+
+**Context:** Tightened the injected SMS system prompt so model replies use the exact `[sms ...]...[/sms]` shape that Command-X parses reliably.
+
+**Notes for future agents:**
+- `injectSmsPrompt()` now includes an explicit **STRICT SMS FORMAT** clause requiring lowercase `[sms]` tags, both `from` + `to` attributes with double quotes, and a closing `[/sms]` tag.
+- The instruction also forbids narration/stage directions/markdown inside SMS tags so only phone-text content appears between the brackets.
+- This change is prompt-only (no parser changes); full `node --test test/*.mjs` still reports the pre-existing version-pin failure in `test/nova-ui-wiring.test.mjs` expecting `manifest.json` version `0.13.0` while repo currently has `0.13.1`.
+
 ### 2026-04-30 — Tolerate unclosed [status] tags before other side-channel tags (commit pending)
 
 **Context:** Fixed contact/NPC extraction regression when model output omits `[/status]` before `[place]` (or other tag blocks), which caused status import to fail even with otherwise valid JSON arrays.
