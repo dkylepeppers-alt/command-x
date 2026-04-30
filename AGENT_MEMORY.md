@@ -2591,3 +2591,50 @@ human performs browser-only SillyTavern clicks against the live instance.
   110 chars after the reflow.
 - `node --test test/*.mjs` was run after the docs-only change and passed
   793/793.
+
+---
+
+## 2026-04-30 — Docs overhaul and agent-instruction refresh
+
+### Why
+
+The documentation had drifted from the current v0.13.0 implementation in a few
+high-signal places:
+
+- Agent-facing docs still described Nova as "in development" and used old
+  pre-expansion line counts.
+- `.github/copilot-instructions.md` still warned that event listeners were never
+  removed, even though `wireEventListeners()` / `unwireEventListeners()` now
+  manage symmetric listener lifecycle.
+- README / CLAUDE only listed the older Nova skill set and missed the newer
+  Quest Designer, NPC / Contact Manager, Map / Location Designer, Lore Auditor,
+  and Prompt Doctor skills.
+- README architecture/tag references under-documented `[place]`, map context,
+  SMS image attachments, and the broader localStorage surface.
+- Nova shell wording implied a sandbox; the bridge shell route is allow-listed
+  and approval-gated, but the server plugin itself is explicitly not sandboxed.
+
+### Change
+
+- `README.md`: refreshed Nova status, complete skill list, settings summary,
+  map `[place]` / `[status].place` wording, SMS attachment caps, tag reference,
+  architecture bullets, and allow-listed shell wording.
+- `CLAUDE.md`: updated current source/style line counts, test-suite description,
+  single-file architecture size, SMS attachment constants/storage notes, Nova
+  audit split (client in-phone log vs server bridge JSONL), and full skill-pack
+  inventory. Also removed stale `settings.nova.enabled` documentation.
+- `.github/copilot-instructions.md`: updated line counts, storage-key wording
+  (`chatKey()`), prompt/event-handler summaries, private-poll cadence, and event
+  listener lifecycle guidance.
+- `docs/MANUAL_VALIDATION.md`: added a skill-picker inventory check covering all
+  shipped Nova skills.
+
+### Validation
+
+- Targeted `rg` checks over README, CLAUDE, `.github/copilot-instructions.md`,
+  docs, and bridge README confirmed no live docs still say Nova is "in
+  development", cite the old 7.9k / 8.7k / 1.46k line counts, claim event
+  listeners are never removed, or mention stale tool names like
+  `nova_write_memory` / `st_create_character`.
+- Documentation-only change; no code, tests, or server-plugin runtime files were
+  modified.
