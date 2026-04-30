@@ -45,6 +45,8 @@ function buildNovaPhoneHandlers({
     const safeName = (v) => (typeof v === 'string' ? v.trim() : '');
     const isObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
     const safeArgs = (v) => (isObject(v) ? v : {});
+    // Mirrored from production: nested `fields` plus flat schema fields, with
+    // flat args taking precedence and field lists acting as an explicit allow-list.
     const collectWriteFields = (args, allowedFields) => {
         const out = isObject(args?.fields) ? { ...args.fields } : {};
         for (const field of allowedFields) {

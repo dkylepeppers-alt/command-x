@@ -9305,6 +9305,11 @@ function buildNovaPhoneHandlers({
     // not `null`. The dispatch loop already validates tool args against the
     // JSON schema, but third-party callers + fuzzing shouldn't crash us.
     const safeArgs = (v) => (isObject(v) ? v : {});
+    // Merge a write tool's optional nested `fields` object with the flat
+    // top-level fields exposed in the schema. Flat args win when both are
+    // present, so a corrective explicit value can override a copied `fields`
+    // object. `allowedFields` is the per-tool allow-list; do not forward
+    // arbitrary LLM args into phone stores.
     const collectWriteFields = (args, allowedFields) => {
         const out = isObject(args?.fields) ? { ...args.fields } : {};
         for (const field of allowedFields) {
@@ -9314,6 +9319,7 @@ function buildNovaPhoneHandlers({
         }
         return out;
     };
+    // Mirrored in test/nova-phone-tools.test.mjs per the inline-copy convention.
     const contactWriteFields = ['emoji', 'status', 'mood', 'location', 'relationship', 'thoughts', 'avatarUrl'];
     const questWriteFields = ['title', 'summary', 'objective', 'priority', 'urgency', 'source', 'relatedContact', 'status', 'focused', 'nextAction', 'subtasks', 'notes'];
 
