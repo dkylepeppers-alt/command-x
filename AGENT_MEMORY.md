@@ -77,6 +77,24 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-30 — SMS multimodal visibility batch-mode fix (commit pending)
+
+**Context:** Follow-up to the SMS photo multimodal interceptor after the initial
+visibility enabling still missed queued/batched sends.
+
+**Notes for future agents:**
+- `pendingSmsVisionAttachments` is now an array staged through
+  `stageSmsVisionAttachments()` so both instant sends and `flushQueue()` feed the
+  generation interceptor before ST's send button is clicked.
+- Batch staging intentionally filters out neural / legacy command entries and
+  stages only normal SMS photo attachments; the interceptor appends every staged
+  image as `extra.media[]`.
+- The interceptor forces `extra.media_display = 'list'` so multiple queued photos
+  are all eligible for ST's inline-media prompt path even if the user preference
+  is gallery mode, then clears the one-shot queue in `finally`.
+- `test/sms-attachment-visibility.test.mjs` covers the manifest hook, instant +
+  batch staging, multi-image media injection, and one-shot clearing contract.
+
 ### 2026-04-30 — SMS photo attachments now reach multimodal prompt input (commit pending)
 
 **Context:** Updated Command-X SMS send flow so attached photos are injected into the next user generation message payload, allowing vision-capable models to actually “see” image attachments sent from the phone app.
