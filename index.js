@@ -487,6 +487,39 @@ function getManualOverrides(contact = {}) {
     return { ...(contact.manualOverrides || {}) };
 }
 
+function stripJsonFence(value) {
+    const text = String(value || '').trim();
+    const fence = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+    return fence ? fence[1].trim() : text;
+}
+
+function contactPayloadToArray(parsed) {
+    if (Array.isArray(parsed)) return parsed;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+    for (const key of ['contacts', 'status', 'npcs', 'characters']) {
+        if (Array.isArray(parsed[key])) return parsed[key];
+    }
+    if (typeof parsed.name === 'string') return [parsed];
+    return [];
+}
+
+function normalizeParsedContact(c) {
+    if (!c || typeof c.name !== 'string') return null;
+    const name = c.name.trim();
+    if (!name) return null;
+    return {
+        name,
+        emoji: c.emoji || '🧑',
+        status: c.status || 'nearby',
+        mood: c.mood || null,
+        location: c.location || null,
+        relationship: c.relationship || null,
+        thoughts: c.thoughts || null,
+        avatarUrl: c.avatarUrl || null,
+        place: typeof c.place === 'string' ? c.place.trim() || null : null,
+    };
+}
+
 /**
  * Parse [status] (or legacy [contacts]) JSON from a message.
  * [status][{"name":"Sarah","emoji":"👩","status":"online","mood":"😊 happy","location":"home","relationship":"friendly","thoughts":"I need to play this cool or she'll notice immediately."}][/status]
@@ -494,26 +527,20 @@ function getManualOverrides(contact = {}) {
 function extractContacts(raw) {
     if (!raw) return null;
     CONTACTS_TAG_RE.lastIndex = 0;
-    const m = CONTACTS_TAG_RE.exec(raw);
-    if (!m) return null;
-    try {
-        const arr = JSON.parse(m[1].trim());
-        if (!Array.isArray(arr)) return null;
-        return arr.filter(c => c && typeof c.name === 'string').map(c => ({
-            name: c.name.trim(),
-            emoji: c.emoji || '🧑',
-            status: c.status || 'nearby',
-            mood: c.mood || null,
-            location: c.location || null,
-            relationship: c.relationship || null,
-            thoughts: c.thoughts || null,
-            avatarUrl: c.avatarUrl || null,
-            place: typeof c.place === 'string' ? c.place.trim() || null : null,
-        }));
-    } catch (e) {
-        console.warn('[command-x] failed to parse [status] JSON:', e);
-        return null;
+    const contacts = [];
+    let m;
+    while ((m = CONTACTS_TAG_RE.exec(raw)) !== null) {
+        try {
+            const parsed = JSON.parse(stripJsonFence(m[1]));
+            for (const item of contactPayloadToArray(parsed)) {
+                const contact = normalizeParsedContact(item);
+                if (contact) contacts.push(contact);
+            }
+        } catch (e) {
+            console.warn('[command-x] failed to parse [status] JSON:', e);
+        }
     }
+    return contacts.length ? contacts : null;
 }
 
 /**
@@ -5360,6 +5387,8 @@ function wirePhone() {
     });
     phoneContainer.querySelector('#cx-set-npcs')?.addEventListener('change', (e) => {
         settings.autoDetectNpcs = e.target.checked;
+        const panelToggle = document.getElementById('cx_ext_auto_detect_npcs');
+        if (panelToggle) panelToggle.checked = e.target.checked;
         saveSettings();
         if (e.target.checked) injectContactsPrompt();
         else clearContactsPrompt();
