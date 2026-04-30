@@ -77,6 +77,15 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-30 — Tolerate unclosed [status] tags before other side-channel tags (commit pending)
+
+**Context:** Fixed contact/NPC extraction regression when model output omits `[/status]` before `[place]` (or other tag blocks), which caused status import to fail even with otherwise valid JSON arrays.
+
+**Notes for future agents:**
+- `CONTACTS_TAG_RE` now accepts a normal closing `[/status]`/`[/contacts]` **or** a boundary at newline + next side-channel tag (`[place]`, `[quests]`, `[sms]`) or end-of-message.
+- This keeps strict behavior for properly closed tags while recovering from common formatting slips in LLM output where `[status]` runs directly into `[place]`.
+- Mirror helper tests in `test/helpers.test.mjs` include a regression for this missing-closer case; update both production and mirrored regex if either parser contract changes.
+
 ### 2026-04-30 — Review-thread doc fixes (commit pending)
 
 **Context:** Applied PR review feedback on the root agent guide and refreshed

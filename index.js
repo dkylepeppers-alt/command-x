@@ -383,7 +383,7 @@ function hideSmsTagsInDom(mesId) {
    NPC CONTACT STORE — localStorage-backed, keyed per chat
    ====================================================================== */
 
-const CONTACTS_TAG_RE = /\[(?:contacts|status)\]([\s\S]*?)\[\/(?:contacts|status)\]/gi;
+const CONTACTS_TAG_RE = /\[(?:contacts|status)\]([\s\S]*?)(?:\[\/(?:contacts|status)\]|(?=\n\s*\[(?:place|quests|sms)\])|$)/gi;
 
 function npcStoreKey() {
     return `cx-npcs-${chatKey()}`;
