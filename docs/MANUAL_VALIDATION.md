@@ -96,6 +96,11 @@ Optional (only required for the bridge-plugin sections below):
 - [ ] **User/browser:** Tap the Nova tile. The view opens to an empty transcript
   with a **"Pick a connection profile"** placeholder card (it will say no
   profile is configured if you haven't set one yet).
+- [ ] **User/browser:** Tap the Nova **skill pill** and verify the picker lists
+  **Plain helper**, **Character Creator**, **Worldbook Creator**,
+  **STscript & Regex**, **Image Prompter**, **Quest Designer**,
+  **NPC / Contact Manager**, **Map / Location Designer**, **Lore Auditor**,
+  **Prompt Doctor**, and **Command-X Diagnostics**.
 - [ ] **User/browser:** Tap **Settings (⚙)**. The in-phone Settings app shows a
   **NOVA** section with: Connection profile, Default permission tier, Max tool
   calls per turn, Turn timeout, Bridge plugin base URL, Remember approvals (this

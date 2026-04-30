@@ -4,15 +4,15 @@
 
 ## Summary
 
-SillyTavern third-party extension (v0.13.0, ~7900 lines of JS) that adds a floating smartphone UI overlay with multiple apps: **Command-X** (neural command messaging + unified iMessage-style texting), **Profiles** (NPC intel cards), **Quests** (persistent story tracker), **Map** (contact locations), **Nova** (agentic assistant, in development — approval-gated tool calls with a companion server plugin), and **Settings**. Pure browser JavaScript + CSS — no build system, no bundler, no runtime dependencies beyond SillyTavern's frontend.
+SillyTavern third-party extension (v0.13.0, ~10.6k lines of JS) that adds a floating smartphone UI overlay with multiple apps: **Command-X** (neural command messaging + unified iMessage-style texting), **Profiles** (NPC intel cards), **Quests** (persistent story tracker), **Map** (contact locations), **Nova** (approval-gated agentic assistant with a companion server plugin), and **Settings**. Pure browser JavaScript + CSS — no build system, no bundler, no runtime dependencies beyond SillyTavern's frontend.
 
 **Languages/Runtime:** Vanilla ES module JavaScript, CSS3, HTML. Runs inside SillyTavern's browser frontend (Chromium-based). jQuery is available globally via ST.
 
 ## Project Layout
 
 ```
-index.js          — All extension logic (~7900 lines). Entry point loaded by ST.
-style.css         — All styles (~1460 lines). Phone shell, iMessage bubbles, command drawer, app chrome.
+index.js          — All extension logic (~10.6k lines). Entry point loaded by ST.
+style.css         — All styles (~1.7k lines). Phone shell, iMessage bubbles, command drawer, app chrome.
 manifest.json     — ST extension manifest (v0.13.0). Declares js, css, loading_order.
 settings.html     — ST settings panel fragment. Toggles + number inputs (including Nova config).
 README.md         — User-facing docs.
@@ -36,12 +36,12 @@ The core loop: user types in phone UI → extension injects system prompt via `s
 **Key systems in `index.js`:**
 - **Tag parsing** — Regex extraction of `[sms]`, `[status]` (legacy `[contacts]`), `[quests]`, and `[place]` blocks from LLM responses.
 - **NPC / quest / place stores** — JSON tag parsing + localStorage persistence per chat.
-- **Prompt injection** — `setExtensionPrompt()` for `[sms]` (per-message, depth 1) and for `[status]` / `[quests]` (persistent, throttled).
-- **Message store** — localStorage-backed, keyed `cx-msgs-{chatId}-{contactName}`.
+- **Prompt injection** — `setExtensionPrompt()` for `[sms]` (per-message, depth 1), `[status]` / `[quests]` (persistent, throttled), map/place context, and private-phone context.
+- **Message store** — localStorage-backed, keyed `cx-msgs-{chatKey}-{contactName}`; normal SMS can include locally stored image thumbnails.
 - **Phone UI** — HTML template literals; `buildPhone()` returns full phone DOM, `rebuildPhone()` replaces it.
 - **Command drawer** — Mode buttons (COMMAND / BELIEVE / FORGET / COMPEL) above input in Command-X app.
-- **Private polling** — `generateQuietPrompt()` out-of-band inbox check (gated by setting).
-- **Event handlers** — `MESSAGE_RECEIVED` (data extraction), `CHARACTER_MESSAGE_RENDERED` (DOM hiding), `CHAT_CHANGED` (state reset), `MESSAGE_DELETED` / `MESSAGE_SWIPED` (cleanup by `mesId`).
+- **Private polling** — `generateQuietPrompt()` out-of-band inbox check (manual button and optional every-N-turn cadence).
+- **Event handlers** — `MESSAGE_RECEIVED` (data extraction), `CHARACTER_MESSAGE_RENDERED` / `USER_MESSAGE_RENDERED` (DOM hiding / command styling), `CHAT_CHANGED` (state reset + Nova metadata), `MESSAGE_DELETED` / `MESSAGE_SWIPED` (cleanup by `mesId`).
 
 > See `CLAUDE.md` for the full architectural reference (event-flow ordering, state variables, named constants, tag formats, common pitfalls). Keep it in sync with this file when conventions change.
 
@@ -74,9 +74,9 @@ The core loop: user types in phone UI → extension injects system prompt via `s
 - **Tag extraction order in `MESSAGE_RECEIVED` matters**: extract `[sms]` **before** `[status]` / `[quests]`. The status/quests handlers call `rebuildPhone()` which resets UI state, and will clobber `awaitingReply` if run first. Don't reorder.
 - **`innerHTML` replacement**: Done in `CHARACTER_MESSAGE_RENDERED` handler (after ST renders). If ST's rendering pipeline changes, this is the fragile point.
 - **`awaitingReply`**: Boolean + 30-second timeout (`AWAIT_TIMEOUT_MS`). Resets on successful parse, failed parse, back-button, or chat change.
-- **localStorage keys** include `chatId` — messages / NPCs / quests are per-chat and lost if the chat is deleted. Histories are capped (`MESSAGE_HISTORY_CAP`, `QUEST_HISTORY_CAP`).
+- **localStorage keys** use `chatKey()` — messages, NPCs, quests, places, map metadata/images, trails, unread counts, and attachment thumbnails are per-chat. Histories are capped (`MESSAGE_HISTORY_CAP`, `QUEST_HISTORY_CAP`, `SMS_ATTACHMENT_HISTORY_CAP`, etc.).
 - **`cxAlert()` / `cxConfirm()`** are async in-phone modal helpers. Never use native `alert()` / `confirm()`.
-- **Event listeners** on `eventSource` are never removed (minor leak on disable). DOM listeners are cleaned by `rebuildPhone()` which replaces innerHTML.
+- **Event listeners** on `eventSource` are wired through `wireEventListeners()` and symmetrically removed by `unwireEventListeners()` on disable/destroy. DOM listeners are cleaned by `rebuildPhone()` which replaces innerHTML.
 
 ## Trust Directive
 

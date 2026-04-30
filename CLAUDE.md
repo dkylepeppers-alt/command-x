@@ -4,7 +4,7 @@
 
 ## What This Is
 
-A SillyTavern third-party extension (v0.13.0) that adds a smartphone UI overlay to RP chats. Six apps: **Command-X** (neural commands + unified messaging), **Profiles** (NPC intel cards), **Quests** (persistent story tracker), **Map** (contact location tracking), **Nova** (agentic assistant — approval-gated tool calls via a companion server plugin; still in active development, see `docs/nova-agent-plan.md`), and **Settings**. Messages flow through the RP — the extension injects system prompts so the LLM wraps phone replies in `[sms]` tags, which get extracted for the phone UI.
+A SillyTavern third-party extension (v0.13.0) that adds a smartphone UI overlay to RP chats. Six apps: **Command-X** (neural commands + unified messaging), **Profiles** (NPC intel cards), **Quests** (persistent story tracker), **Map** (contact location tracking), **Nova** (approval-gated agentic assistant via a companion server plugin), and **Settings**. Messages flow through the RP — the extension injects system prompts so the LLM wraps phone replies in `[sms]` tags, which get extracted for the phone UI.
 
 > The previous "OpenClaw" app was renamed to **Nova** in v0.13.0 along with the migration from `openclaw-bridge` → `nova-agent-bridge`. References to OpenClaw in any older notes or branches are stale; see the "Legacy note" under [Nova Agent](#nova-agent) for the migration path.
 
@@ -12,8 +12,8 @@ A SillyTavern third-party extension (v0.13.0) that adds a smartphone UI overlay 
 
 ```
 command-x/
-├── index.js          # All extension logic (~8.7k lines after the v0.13.0 Nova rewrite + review sweep)
-├── style.css         # All styling (~1.5k lines)
+├── index.js          # All extension logic (~10.6k lines; single frontend module)
+├── style.css         # All styling (~1.7k lines)
 ├── manifest.json     # ST extension manifest — single source of truth for VERSION (currently 0.13.0)
 ├── settings.html     # ST settings panel (toggles, number inputs, Nova config)
 ├── README.md         # User-facing docs
@@ -33,14 +33,15 @@ command-x/
 ├── presets/          # OpenAI-shaped connection presets shipped for Nova
 ├── server-plugin/
 │   └── nova-agent-bridge/   # Companion ST server plugin for Nova (fs/shell routes + audit + soul/memory)
-├── test/             # Node --test suites (700+ assertions across helpers + nova-*)
+├── test/             # Node --test suites (38 files spanning helpers, Nova, and other feature-specific coverage)
 │   ├── helpers.test.mjs              # Pure phone helpers
-│   └── nova-*.test.mjs               # Nova agent (state, tools, dispatch, approval modal, plugin, diff, …)
+│   ├── nova-*.test.mjs               # Nova agent coverage (state, tools, dispatch, approval modal, plugin, diff, …)
+│   └── *.test.mjs                    # Additional non-Nova feature tests (for example swipe regeneration)
 ├── .github/          # GitHub config + copilot-instructions.md
 └── st-docs/          # Local copy of SillyTavern docs (reference only)
 ```
 
-This is a **single-file JS architecture** on the frontend. All extension logic lives in `index.js`. The single-file constraint dates from when the file was ~1k lines; at ~8.7k lines (most of which is the Nova subsystem) extracting `nova/*.js` modules is being tracked as a deferred refactor in the code-review history. ST loads one JS entry point per extension. The Nova server plugin under `server-plugin/nova-agent-bridge/` is a separate Node module loaded by SillyTavern's plugin system.
+This is a **single-file JS architecture** on the frontend. All extension logic lives in `index.js`. The single-file constraint dates from when the file was ~1k lines; at ~10.6k lines (much of which is the Nova subsystem) extracting `nova/*.js` modules is being tracked as a deferred refactor in the code-review history. ST loads one JS entry point per extension. The Nova server plugin under `server-plugin/nova-agent-bridge/` is a separate Node module loaded by SillyTavern's plugin system.
 
 ## Core Architecture
 
@@ -97,7 +98,7 @@ settings            // {enabled, styleCommands, showLockscreen, panelOpen, batch
                     //  autoDetectNpcs, manualHybridPrivateTexts,
                     //  contactsInjectEveryN, questsInjectEveryN, autoPrivatePollEveryN,
                     //  trackLocations, autoRegisterPlaces, mapInjectEveryN,
-                    //  showLocationTrails, nova: { enabled, profileName, defaultTier,
+                    //  showLocationTrails, nova: { profileName, defaultTier,
                     //  maxToolCalls, turnTimeoutMs, pluginBaseUrl,
                     //  rememberApprovalsSession, activeSkill }}
                     // NOTE: legacy `openclawMode` is migrated out on load (see LEGACY_KEYS).
@@ -112,7 +113,7 @@ profileEditorState  // {mode:'new'|'edit', draft, oldName} | null
 questEditorState    // {mode:'new'|'edit', draft, oldId} | null
 privatePollInFlight // boolean — prevents overlapping quiet-prompt polls
 questEnrichmentInFlight // boolean — prevents overlapping quest AI fills
-composeQueue        // [{contactName, text, displayText, isNeural, cmdType}]
+composeQueue        // [{contactName, text, displayText, isNeural, cmdType, attachment}]
 _turnCounter        // increments on MESSAGE_RECEIVED; drives throttle
 _historyContactNamesCache // { chatId, names } — invalidated on write
 _lastMsgTsCache     // Map<`${chatId}::${name}` → timestamp>
@@ -141,6 +142,10 @@ LOCATION_TRAIL_CAP   // 50  — max trail entries per contact
 TOAST_DURATION_MS    // 4_000 — toast auto-dismiss
 MAX_AVATAR_FILE_BYTES // 8MB — safeDataUrlFromFile input size cap
 MAX_MAP_IMAGE_WIDTH  // 1024 — max downscaled width for uploaded map image
+MAX_SMS_IMAGE_WIDTH   // 768 — max downscaled width for SMS image attachments
+MAX_SMS_ATTACHMENT_DATA_URL_SIZE // 96 KB — cap for stored SMS image data URLs
+SMS_ATTACHMENT_HISTORY_CAP // 20 — max image attachments retained per contact thread
+MAX_SUMMARISED_SKILL_TOOLS // 6 — max tool names shown in skill picker
 CONTACT_GRADIENTS    // string[] — avatar background gradient palette
 CONTACT_EMOJIS       // string[] — default avatar emoji pool
 ```
@@ -149,7 +154,7 @@ CONTACT_EMOJIS       // string[] — default avatar emoji pool
 
 All keyed per SillyTavern chat ID via the canonical `chatKey()` helper (which falls back to `'default'` when no chat is loaded — every storage prefix uses this same helper to avoid silent data divergence):
 
-- **`cx-msgs-{chatKey}-{contactName}`** — Message history array (capped at `MESSAGE_HISTORY_CAP`)
+- **`cx-msgs-{chatKey}-{contactName}`** — Message history array (capped at `MESSAGE_HISTORY_CAP`; may include locally stored SMS image attachment thumbnails)
 - **`cx-npcs-{chatKey}`** — NPC store array (capped at 50)
 - **`cx-unread-{chatKey}-{contactName}`** — Unread count integer
 - **`cx-quests-{chatKey}`** — Quest store array (capped at `QUEST_HISTORY_CAP`)
@@ -194,15 +199,17 @@ Architecture:
 - **Transcript** — Per-chat, stored under `ctx.chatMetadata[EXT].nova`, replayed into the phone's Nova view.
 - **Soul / memory** — Markdown docs under `nova/soul.md` and `nova/memory.md` (seeded on first use, then per-chat editable via the `nova_write_soul`, `nova_append_memory`, and `nova_overwrite_memory` tools behind the approval gate).
 - **Server plugin** — `server-plugin/nova-agent-bridge/` exposes `/fs/*` routes (list, read, stat, search, write, delete, move — with `.nova-trash` safety + audit log + symlink-escape hardening via parent-realpath walk) and `POST /shell/run` (allow-listed, no-shell spawn with hard timeout and capped output). The extension probes `/manifest` before each Nova turn (cached briefly) to discover plugin capabilities and filter unavailable bridge-backed tools.
-- **Audit:** every dispatched tool — approved or denied — appends a JSONL line to `<root>/data/_nova-audit.jsonl` (preferred) or `<root>/_nova-audit.jsonl` (fallback when no `data/` dir exists) via `audit.js`, with `content`/`data`/`payload`/`body`/`raw` stripped at top-level and via a JSON.stringify replacer for nested occurrences.
+- **Audit:** the in-phone audit log records approval outcomes and dispatcher denials per chat. Bridge-backed write/delete/move/shell requests that reach the server plugin also append a JSONL line to `<root>/data/_nova-audit.jsonl` (preferred) or `<root>/_nova-audit.jsonl` (fallback when no `data/` dir exists) via `audit.js`, with `content`/`data`/`payload`/`body`/`raw` stripped at top-level and via a JSON.stringify replacer for nested occurrences.
 
 `settings.nova` shape (see `NOVA_DEFAULTS`):
 ```
-{ enabled, profileName, defaultTier, maxToolCalls, turnTimeoutMs,
+{ profileName, defaultTier, maxToolCalls, turnTimeoutMs,
   pluginBaseUrl, rememberApprovalsSession, activeSkill }
 ```
 
 Nova settings are declared in `NOVA_SETTING_BINDINGS` alongside the phone's `PHONE_SETTING_BINDINGS` — both are consumed by the table-driven `loadSettings` / `saveSettings` so adding a new option is a single-table edit.
+
+Nova skill packs currently live in `NOVA_SKILLS` and ship as: Character Creator, Worldbook Creator, STscript & Regex, Image Prompter, Quest Designer, NPC / Contact Manager, Map / Location Designer, Lore Auditor, Prompt Doctor, Command-X Diagnostics, and Plain helper. Each skill declares its default tier, whether tier escalation is allowed, its default tool subset, and a system-prompt fragment.
 
 Current status and remaining work are tracked in `docs/nova-agent-plan.md`.
 

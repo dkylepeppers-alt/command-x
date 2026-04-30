@@ -9,13 +9,13 @@ Messages flow through the RP naturally. The extension uses prompt injection so t
 ### 📱 Phone UI
 - **Realistic phone shell** — Notch, bezel, status bar, home indicator
 - **Lock screen → Home screen → Apps** — Navigate like a real phone
-- **Six apps:** Command-X (neural messaging), Profiles (contact intel), Quests (persistent story goals), Map (contact location tracking), Nova (agentic assistant, in development), Settings
+- **Six apps:** Command-X (neural messaging), Profiles (contact intel), Quests (persistent story goals), Map (contact location tracking), Nova (approval-gated agentic assistant), Settings
 
 ### 💬 Messaging
 - **iMessage-style chat bubbles** — Sent (blue), received (dark gray), neural commands (pink/purple glow)
 - **Multi-target texting** — Send messages to multiple contacts in a single turn (batch mode)
 - **Compose queue** — Queue up texts to different people, then flush them all at once
-- **Photo attachments** — Tap ＋ in a normal SMS thread to attach a local image; the phone stores a compressed thumbnail locally and prompts the RP that a picture was sent
+- **Photo attachments** — Tap ＋ in a normal SMS thread to attach a local image; the phone stores a compressed thumbnail locally (8 MB raw upload cap, 768 px SMS downscale, 20 retained image attachments per thread) and prompts the RP that a picture was sent
 - **Typing indicator** — Bouncing dots while waiting for a reply (30s safety timeout)
 - **`[sms from="Name" to="user"]` routing** — Messages land in the right contact's chat, even NPCs
 - **Swipe/regen handling** — When you regenerate a response in ST, old phone messages for that message ID are removed and replaced with the new content
@@ -49,7 +49,7 @@ Messages flow through the RP naturally. The extension uses prompt injection so t
 - **Zoom and pan** — Scroll-wheel / pinch / double-click to zoom (1×–5×), drag to pan; the control overlay (＋ − ⟲) stays available, and the live percentage indicator appears while zooming and briefly after zoom changes
 - **Interactive pins** — Tap empty map to add a place, drag pins to reposition, tap a contact pin to open their chat; the "📍 You" pin auto-follows the persona's `[status].place` when available, with manual placement as a fallback
 - **Movement trails** — Optional dashed trails show each contact's last few locations so you can see where they've been
-- **Auto-registration** — The LLM can register new places and move contacts between them via `[status]` tags; manual edits are preserved
+- **Auto-registration** — The LLM can register new places with `[place]` tags and move contacts with `[status].place`; manual edits are preserved
 
 **Uploading your own map background:**
 1. Open the phone, tap the **🧭 Map** app, then tap **Upload Image** in the header. Tap the **ℹ️** button next to it at any time to see this guidance in the app.
@@ -67,12 +67,12 @@ Messages flow through the RP naturally. The extension uses prompt injection so t
 - **Persistent** — NPC data survives page refreshes (localStorage-backed)
 
 ### ✴︎ Nova App (Agentic Assistant)
-- **Tool-calling agent inside the phone** — Nova talks to your LLM through a dedicated chat-completion connection profile and runs **approval-gated tool calls** against the SillyTavern frontend, your install directory, and (optionally) a sandboxed shell
+- **Tool-calling agent inside the phone** — Nova talks to your LLM through a dedicated chat-completion connection profile and runs **approval-gated tool calls** against the SillyTavern frontend, your install directory, and (optionally) the bridge plugin's allow-listed shell route
 - **Three permission tiers** — `read` (read-only tools), `write` (adds file/character/worldbook writes, every destructive call needs approval), and `full` (also enables the shell allow-list). Configure the default in Settings → NOVA
 - **Approval modal with diff preview** — Every write or shell call opens a modal showing the tool, the parsed arguments, and (for `fs_write`) a unified diff against the current file. Click Approve to execute, Cancel to deny
-- **Skills** — A skill pack (Character Creator, Worldbook Creator, Image Prompter, Command-X Diagnostics, free-form helper, STscript & Regex) shapes Nova's system prompt for the task at hand
+- **Skills** — A skill pack (Character Creator, Worldbook Creator, STscript & Regex, Image Prompter, Quest Designer, NPC / Contact Manager, Map / Location Designer, Lore Auditor, Prompt Doctor, Command-X Diagnostics, or Plain helper) shapes Nova's system prompt and default tools for the task at hand
 - **Soul + memory** — Nova reads `nova/soul.md` (persona) and `nova/memory.md` (running notes) on every turn and can edit them through the same approval gate via the `nova_write_soul`, `nova_append_memory`, and `nova_overwrite_memory` tools
-- **Audit log** — Executed bridge requests append a JSONL line to `<root>/data/_nova-audit.jsonl` (preferred) or `<root>/_nova-audit.jsonl` (fallback) on the server side, including bridge-side refusals/errors. The in-phone Settings → 📜 audit-log viewer (client side) also records approval outcomes such as user approvals/denials before dispatch. Raw `content` / `data` / `payload` is **never** logged
+- **Audit log** — Executed bridge requests append a JSONL line to `<root>/data/_nova-audit.jsonl` (preferred) or `<root>/_nova-audit.jsonl` (fallback) on the server side, including bridge-side refusals/errors. The in-phone Settings → 📜 audit-log viewer (client side) also records approval outcomes such as user approvals/denials before dispatch. Raw `content` / `data` / `payload` / `body` / `raw` fields are **never** logged
 - **Companion server plugin** — `server-plugin/nova-agent-bridge/` exposes scoped `/fs/*` and `/shell/run` routes. Without the plugin, only ST-API tools are available; a yellow banner in the transcript explains what's filtered.
 
 See the [Nova Agent](#-nova-agent) section below for setup.
@@ -85,7 +85,9 @@ See the [Nova Agent](#-nova-agent) section below for setup.
 - **Batch Send Mode** — Toggle compose queue for multi-target texting
 - **Style Commands in Chat** — Toggle `{{COMMAND}}` syntax coloring in ST chat
 - **Auto-Detect NPCs** — Toggle `[status]` injection (save tokens when not needed)
-- **Clear All NPC Data** — Wipe stored NPCs for current chat
+- **Private Polling cadence** — Enable manual checks or auto-poll every N turns
+- **Map controls** — Toggle location tracking, `[place]` auto-registration, movement trails, and map-context injection cadence
+- **Nova controls** — Configure connection profile, default tier, per-turn caps/timeouts, bridge URL, session approval memory, soul/memory editor, audit viewer, and preset installer
 - **Lock Screen on Open** — Start on lock screen when opening the phone
 
 ### Other
@@ -124,7 +126,7 @@ Refresh SillyTavern.
 
 ## ✴︎ Nova Agent
 
-Nova is a tool-calling assistant that lives inside the phone. It talks to your LLM through a dedicated chat-completion connection profile and dispatches **approval-gated tool calls** against the SillyTavern frontend, your install directory, and (optionally) a sandboxed shell — all without polluting your roleplay chat.
+Nova is a tool-calling assistant that lives inside the phone. It talks to your LLM through a dedicated chat-completion connection profile and dispatches **approval-gated tool calls** against the SillyTavern frontend, your install directory, and (optionally) the bridge plugin's allow-listed shell route — all without polluting your roleplay chat.
 
 ### SillyTavern prerequisites
 
@@ -184,11 +186,16 @@ Toggle **Settings → NOVA → Remember approvals (this session)** to skip the m
 
 Pick the active skill from the Nova app's skill pill. Each skill swaps in a tailored system-prompt fragment:
 
-- **Free-form helper** — General assistant, no specialised contract.
-- **Character Creator** — Asks for archetype + traits, returns a complete Tavern Card v2 JSON payload, and saves through ST-native `st_write_character` so the character lands in the proper user characters directory as a Tavern Card PNG.
-- **Worldbook Creator** — Returns structured world-info JSON with entries + keys + comments, and saves through ST-native `st_write_worldbook` so the book lands in the proper user worlds directory as a SillyTavern worldbook JSON file.
-- **Image Prompter** — Produces structured positive/negative prompt pairs for image-gen integrations.
-- **STscript & Regex** — Drafts STscript blocks and regex extension entries with safety notes.
+- **Plain helper** — General Nova mode; every available tool is still gated by the active permission tier and approvals.
+- **Character Creator** — Drafts and updates complete Tavern Card v2 characters through ST-native `st_write_character`, including duplicate checks and avatar-prompt notes.
+- **Worldbook Creator** — Builds and safely merges SillyTavern worldbooks through ST-native `st_write_worldbook`, preserving unrelated entries and uid numbering.
+- **STscript & Regex** — Authors and tests STscript, Regex extension rules, Macros 2.0 snippets, and Quick Replies with safety notes.
+- **Image Prompter** — Reads current scene context and produces structured positive/negative prompts for SDXL, Flux, Illustrious, anime, realistic, and cinematic modes.
+- **Quest Designer** — Creates and updates Command-X quest tracker entries from current RP goals while avoiding duplicates and preserving manual edits.
+- **NPC / Contact Manager** — Maintains Profiles data and can seed phone-thread messages only when explicitly requested.
+- **Map / Location Designer** — Curates places and contact-location context for the Map app without overwriting manual pin placement.
+- **Lore Auditor** — Read-first continuity mode for contradictions, stale lore, missing activation keys, and duplicated facts across characters, worldbooks, and chat.
+- **Prompt Doctor** — Reviews and improves prompts, character instructions, and card text with the smallest safe edits and approval diffs.
 - **Command-X Diagnostics** — Read-only troubleshooting mode that starts with `phone_diagnose`, inspects Nova/Command-X runtime state, and can search/read source files, tests, docs, presets, and bridge files before recommending fixes.
 
 ### The `nova-agent-bridge` server plugin
@@ -237,6 +244,7 @@ LLM responds with narration + [sms] tags + [status] tags
 Extension extracts [sms] → phone bubbles
 Extension extracts [status] → NPC profile data
 Extension extracts [quests] → quest tracker updates
+Extension extracts [place] → map place updates
 ST chat shows narration with subtle 📱 indicators
 ```
 
@@ -253,18 +261,19 @@ Requirements:
 | Tag | Purpose | Example |
 |-----|---------|---------|
 | `[sms from="Name" to="user"]...[/sms]` | Phone text content | `[sms from="Sarah" to="user"]omw![/sms]` |
-| `[status][...JSON...][/status]` | present-character state data | `[status][{"name":"Sarah","emoji":"👩","mood":"😊 happy","location":"café","thoughts":"I really hope he asks me to stay a little longer."}][/status]` |
+| `[status][...JSON...][/status]` | present-character state data | `[status][{"name":"Sarah","emoji":"👩","mood":"😊 happy","location":"café","place":"Lighthouse Café","thoughts":"I really hope he asks me to stay a little longer."}][/status]` |
 | `[quests][...JSON...][/quests]` | quest/task state updates | `[quests][{"title":"Meet Sarah at the diner","objective":"Get there before 8 PM","status":"active","priority":"high"}][/quests]` |
+| `[place][...JSON...][/place]` | map place registration / aliases | `[place][{"name":"Lighthouse Café","emoji":"☕","aliases":["the café"]}][/place]` |
 
 Tags are injected by the extension automatically — you don't need to type them.
 
 ## Architecture
 
-- **Prompt injection** (`setExtensionPrompt`) for both `[sms]` replies and `[status]` NPC data — no downstream parsing of unstructured RP output
-- **`MESSAGE_RECEIVED`** event handler extracts `[sms]` blocks first, then processes `[status]` (order matters — `[status]` processing triggers UI rebuild)
-- **`CHARACTER_MESSAGE_RENDERED`** hides tags in the ST chat DOM
-- **`MESSAGE_DELETED` / `MESSAGE_SWIPED`** handles regeneration cleanup
-- **localStorage** for message history, NPC store, unread counts (all keyed per chat ID)
+- **Prompt injection** (`setExtensionPrompt`) for `[sms]`, `[status]`, `[quests]`, private-phone context, and map/place context — no downstream parsing of unstructured RP output
+- **`MESSAGE_RECEIVED`** event handler extracts `[sms]` blocks first, then processes `[status]`, `[quests]`, and `[place]` (order matters — store merges can rebuild the UI)
+- **`CHARACTER_MESSAGE_RENDERED` / `USER_MESSAGE_RENDERED`** hides side-channel tags in the ST chat DOM and styles command syntax
+- **`MESSAGE_DELETED` / `MESSAGE_SWIPED`** handles regeneration cleanup by stored `mesId`
+- **localStorage** for message history, NPCs, quests, places, map metadata/images, movement trails, unread counts, and SMS attachment thumbnails, all keyed through the per-chat `chatKey()` helper
 
 ## Compatibility
 
