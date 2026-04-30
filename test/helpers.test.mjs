@@ -13,6 +13,8 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 /* ===== Helpers under test (inline copies) ===== */
 
@@ -90,27 +92,56 @@ function extractSmsBlocks(raw) {
 
 const CONTACTS_TAG_RE = /\[(?:contacts|status)\]([\s\S]*?)\[\/(?:contacts|status)\]/gi;
 
+function stripJsonFence(value) {
+    const text = String(value || '').trim();
+    const fence = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+    return fence ? fence[1].trim() : text;
+}
+
+function contactPayloadToArray(parsed) {
+    if (Array.isArray(parsed)) return parsed;
+    if (!parsed || typeof parsed !== 'object') return [];
+    for (const key of ['contacts', 'status', 'npcs', 'characters']) {
+        if (Array.isArray(parsed[key])) return parsed[key];
+    }
+    if (typeof parsed.name === 'string') return [parsed];
+    return [];
+}
+
+function normalizeParsedContact(c) {
+    if (!c || typeof c.name !== 'string') return null;
+    const name = c.name.trim();
+    if (!name) return null;
+    return {
+        name,
+        emoji: c.emoji || '🧑',
+        status: c.status || 'nearby',
+        mood: c.mood || null,
+        location: c.location || null,
+        relationship: c.relationship || null,
+        thoughts: c.thoughts || null,
+        avatarUrl: c.avatarUrl || null,
+        place: typeof c.place === 'string' ? c.place.trim() || null : null,
+    };
+}
+
 function extractContacts(raw) {
     if (!raw) return null;
     CONTACTS_TAG_RE.lastIndex = 0;
-    const m = CONTACTS_TAG_RE.exec(raw);
-    if (!m) return null;
-    try {
-        const arr = JSON.parse(m[1].trim());
-        if (!Array.isArray(arr)) return null;
-        return arr.filter(c => c && typeof c.name === 'string').map(c => ({
-            name: c.name.trim(),
-            emoji: c.emoji || '🧑',
-            status: c.status || 'nearby',
-            mood: c.mood || null,
-            location: c.location || null,
-            relationship: c.relationship || null,
-            thoughts: c.thoughts || null,
-            avatarUrl: c.avatarUrl || null,
-        }));
-    } catch {
-        return null;
+    const contacts = [];
+    let m;
+    while ((m = CONTACTS_TAG_RE.exec(raw)) !== null) {
+        try {
+            const parsed = JSON.parse(stripJsonFence(m[1]));
+            for (const item of contactPayloadToArray(parsed)) {
+                const contact = normalizeParsedContact(item);
+                if (contact) contacts.push(contact);
+            }
+        } catch {
+            // invalid blocks are ignored so later valid [status] blocks can still import NPCs.
+        }
     }
+    return contacts.length ? contacts : null;
 }
 
 const QUESTS_TAG_RE = /\[quests\]([\s\S]*?)\[\/quests\]/gi;
@@ -317,7 +348,7 @@ describe('extractContacts', () => {
         assert.equal(result[0].name, 'Bob');
     });
     it('filters entries without a string name', () => {
-        const raw = '[status][{"name":"Valid"},{"other":"field"},null][/status]';
+        const raw = '[status][{"name":"Valid"},{"name":"   "},{"other":"field"},null][/status]';
         const result = extractContacts(raw);
         assert.equal(result?.length, 1);
     });
@@ -331,8 +362,29 @@ describe('extractContacts', () => {
     it('returns null on invalid JSON', () => {
         assert.equal(extractContacts('[status]not-json[/status]'), null);
     });
-    it('returns null when JSON is not an array', () => {
-        assert.equal(extractContacts('[status]{"name":"X"}[/status]'), null);
+    it('accepts a single contact object', () => {
+        const result = extractContacts('[status]{"name":"X","place":"café"}[/status]');
+        assert.equal(result?.length, 1);
+        assert.equal(result[0].name, 'X');
+        assert.equal(result[0].place, 'café');
+    });
+    it('accepts common object wrappers around contact arrays', () => {
+        const result = extractContacts('[status]{"characters":[{"name":"NPC"}]}[/status]');
+        assert.equal(result?.length, 1);
+        assert.equal(result[0].name, 'NPC');
+    });
+    it('accepts fenced JSON inside tags', () => {
+        const result = extractContacts('[status]```json\n[{"name":"Fenced"}]\n```[/status]');
+        assert.equal(result?.length, 1);
+        assert.equal(result[0].name, 'Fenced');
+    });
+    it('continues after an invalid block and combines multiple valid blocks', () => {
+        const raw = '[status]not-json[/status] text [status][{"name":"A"}][/status] [contacts][{"name":"B"}][/contacts]';
+        const result = extractContacts(raw);
+        assert.deepEqual(result?.map(c => c.name), ['A', 'B']);
+    });
+    it('returns null when JSON has no contact list or contact name', () => {
+        assert.equal(extractContacts('[status]{"mood":"happy"}[/status]'), null);
     });
 });
 
@@ -363,5 +415,22 @@ describe('extractQuests', () => {
         const result = extractQuests('[quests]42[/quests]');
         // Not null — code produces empty list; title-filter removes nothing
         assert.deepEqual(result, []);
+    });
+});
+
+describe('phone settings binding source shape', () => {
+    const source = readFileSync(resolve('index.js'), 'utf8');
+
+    it('binds in-phone toggles that have dedicated handlers', () => {
+        assert.match(source, /key:\s*'styleCommands'[\s\S]*ids:\s*\['cx_style_commands',\s*'cx-set-style'\]/);
+        assert.match(source, /key:\s*'showLockscreen'[\s\S]*ids:\s*\['cx_show_lockscreen',\s*'cx-set-lock'\]/);
+        assert.match(source, /key:\s*'batchMode'[\s\S]*ids:\s*\['cx_ext_batch_mode',\s*'cx-set-batch'\]/);
+    });
+
+    it('mirrors in-phone setting changes to all bound DOM inputs before saving', () => {
+        assert.match(source, /function syncPhoneSettingInputs\(key, value\)/);
+        assert.match(source, /syncPhoneSettingInputs\('batchMode', e\.target\.checked\);[\s\S]*saveSettings\(\);/);
+        assert.match(source, /syncPhoneSettingInputs\('styleCommands', e\.target\.checked\);[\s\S]*saveSettings\(\);/);
+        assert.match(source, /syncPhoneSettingInputs\('showLockscreen', e\.target\.checked\);[\s\S]*saveSettings\(\);/);
     });
 });
