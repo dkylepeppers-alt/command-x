@@ -4968,8 +4968,8 @@ function resolveNovaConnectionProfileId(ctx, profileName) {
                 || nameC === wantedCompact
                 || idN.includes(wantedNorm)
                 || nameN.includes(wantedNorm)
-                || wantedNorm.includes(idN)
-                || wantedNorm.includes(nameN);
+                || (idN && wantedNorm.includes(idN))
+                || (nameN && wantedNorm.includes(nameN));
         });
     }
     return String(hit?.id || wanted);
