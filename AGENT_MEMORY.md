@@ -2591,3 +2591,42 @@ human performs browser-only SillyTavern clicks against the live instance.
   110 chars after the reflow.
 - `node --test test/*.mjs` was run after the docs-only change and passed
   793/793.
+
+---
+
+## 2026-04-30 — NPC contact detection parsing hardening
+
+### Why
+
+NPC contacts could fail to appear when an LLM returned a valid-looking `[status]`
+block that was not the exact JSON-array shape Command-X originally required.
+Common variants include a single object, a wrapper object such as
+`{"characters":[...]}`, fenced JSON, or one bad `[status]` block followed by a
+later valid block. The in-phone **Auto-Detect NPCs** toggle also updated module
+state before saving, but the global ST settings checkbox could overwrite that
+value during `saveSettings()`.
+
+### Change
+
+- `extractContacts()` now scans all `[status]` / legacy `[contacts]` blocks and
+  imports every valid contact it can parse instead of stopping at the first
+  block.
+- Added tolerant parsing helpers for fenced JSON, single-contact objects, and
+  wrapper arrays under `contacts`, `status`, `npcs`, or `characters`.
+- Empty/whitespace names are ignored before merging into the NPC store.
+- The in-phone `#cx-set-npcs` toggle now mirrors its value to
+  `#cx_ext_auto_detect_npcs` before saving so enabling/disabling auto-detection
+  from the phone persists correctly.
+- `test/helpers.test.mjs` inline helper copy was kept in sync and now covers the
+  new contact parser shapes.
+
+### Validation
+
+- Baseline before edits: `node --test test/*.mjs` had 853/854 passing with the
+  pre-existing `test/nova-shell-route.test.mjs` ANSI-colored stdout mismatch
+  (`'\x1B[33m4\x1B[39m'` vs `'4'`).
+- `node --test test/helpers.test.mjs` passed 70/70 after the change.
+- Syntax check passed:
+  `node -e "import('./index.js').catch(e => { if (e instanceof SyntaxError) { console.error(e); process.exit(1); } })"`
+- Full suite after edits: `node --test test/*.mjs` had 857/858 passing with the
+  same unrelated `nova-shell-route` ANSI-colored stdout mismatch.
