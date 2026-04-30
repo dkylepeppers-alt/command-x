@@ -48,12 +48,8 @@ const PLACES_CAP = 40;                      // max registered places per chat
 const LOCATION_TRAIL_CAP = 50;              // max trail entries per contact
 const TOAST_DURATION_MS = 4_000;            // toast auto-dismiss duration
 const MAX_SUMMARISED_SKILL_TOOLS = 6;       // max tool names shown in skill picker
-const MAX_SMS_IMAGE_WIDTH = 768;             // max downscaled width for SMS image attachments
-// Keep this conservative: localStorage quotas are small (~5 MB in many browsers),
-// shared across all persisted phone state, and base64 data URLs add overhead.
-const MAX_SMS_ATTACHMENT_DATA_URL_SIZE = 96 * 1024; // cap stored SMS image data URLs
-const SMS_ATTACHMENT_HISTORY_CAP = 20;       // max image attachments retained per contact history
 const SMS_IMAGE_DATA_URL_RE = /^data:image\/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=]+$/i;
+const SMS_GALLERY_IMAGE_URL_RE = /^(?:\.?\/)?user\/images\/[^\s"'<>]+$/i;
 const MESSAGE_SAVE_FAILURE_NOTICE_MS = 30_000; // throttle storage-full user alerts
 
 /**
@@ -112,7 +108,7 @@ let privatePollInFlight = false;
 let scanContactsInFlight = false;
 const SCAN_CONTACTS_LABEL = '🔍 Scan Contacts';
 let questEnrichmentInFlight = false;
-let pendingSmsAttachment = null; // { type:'image', dataUrl, name, alt } | null
+let pendingSmsAttachment = null; // { type:'image', url, name, alt } | null
 let pendingSmsVisionAttachment = null; // one-shot image injected into the next user generation message
 let lastMessageSaveFailureNoticeAt = 0;
 
@@ -2069,23 +2065,6 @@ function stripSmsAttachment(message) {
     return clean;
 }
 
-function pruneSmsAttachmentsForStorage(messages, keepAttachments = SMS_ATTACHMENT_HISTORY_CAP) {
-    const list = Array.isArray(messages) ? messages : [];
-    // Shallow-copy the array only: kept messages can be shared safely, while
-    // entries that lose an attachment are replaced with cloned objects below.
-    const result = list.slice();
-    let remaining = Math.max(0, Number(keepAttachments) || 0);
-    for (let i = list.length - 1; i >= 0; i -= 1) {
-        if (!list[i]?.attachment) continue;
-        if (remaining > 0) {
-            remaining -= 1;
-        } else {
-            result[i] = stripSmsAttachment(list[i]);
-        }
-    }
-    return result;
-}
-
 function notifyMessageSaveFailed(contactName, message) {
     const nowTs = Date.now();
     if (nowTs - lastMessageSaveFailureNoticeAt < MESSAGE_SAVE_FAILURE_NOTICE_MS) return;
@@ -2095,7 +2074,7 @@ function notifyMessageSaveFailed(contactName, message) {
 }
 
 function saveMessages(contactName, msgs) {
-    const history = pruneSmsAttachmentsForStorage(msgs).slice(-MESSAGE_HISTORY_CAP);
+    const history = (Array.isArray(msgs) ? msgs : []).slice(-MESSAGE_HISTORY_CAP);
     try {
         localStorage.setItem(storeKey(contactName), JSON.stringify(history));
     } catch (e) {
@@ -2111,14 +2090,21 @@ function saveMessages(contactName, msgs) {
     invalidateContactCaches(contactName);
 }
 
+function normalizeSmsImageUrl(value) {
+    const url = String(value || '').trim();
+    if (!url) return '';
+    if (SMS_IMAGE_DATA_URL_RE.test(url)) return url;
+    if (SMS_GALLERY_IMAGE_URL_RE.test(url)) return url.replace(/^\.?\//, '');
+    return '';
+}
+
 function normalizeSmsAttachment(attachment) {
     if (!attachment || typeof attachment !== 'object') return null;
-    const dataUrl = typeof attachment.dataUrl === 'string' ? attachment.dataUrl : '';
-    if (!SMS_IMAGE_DATA_URL_RE.test(dataUrl)) return null;
-    if (dataUrl.length > MAX_SMS_ATTACHMENT_DATA_URL_SIZE) return null;
+    const url = normalizeSmsImageUrl(attachment.url || attachment.src || attachment.path || attachment.dataUrl);
+    if (!url) return null;
     return {
         type: 'image',
-        dataUrl,
+        url,
         name: String(attachment.name || 'photo').trim().slice(0, 120) || 'photo',
         alt: String(attachment.alt || attachment.name || 'Attached photo').trim().slice(0, 160) || 'Attached photo',
     };
@@ -2926,6 +2912,80 @@ function safeDataUrlFromFile(file, maxWidth = 256, quality = 0.82) {
     });
 }
 
+function readImageDataUrlFromFile(file) {
+    return new Promise((resolve, reject) => {
+        if (!file || !file.type || !file.type.startsWith('image/')) {
+            reject(new Error('Please choose an image file.'));
+            return;
+        }
+        if (Number.isFinite(file.size) && file.size > MAX_AVATAR_FILE_BYTES) {
+            const mb = (MAX_AVATAR_FILE_BYTES / (1024 * 1024)).toFixed(0);
+            reject(new Error(`Image is too large (over ${mb} MB). Please choose a smaller file.`));
+            return;
+        }
+        const reader = new FileReader();
+        reader.onerror = () => reject(new Error('Could not read image file.'));
+        reader.onload = () => {
+            const dataUrl = String(reader.result || '');
+            if (!SMS_IMAGE_DATA_URL_RE.test(dataUrl)) {
+                reject(new Error('Unsupported image format. Please choose a PNG, JPEG, GIF, or WebP image.'));
+                return;
+            }
+            resolve(dataUrl);
+        };
+        reader.readAsDataURL(file);
+    });
+}
+
+function splitSmsImageDataUrl(dataUrl) {
+    const match = String(dataUrl || '').match(/^data:image\/(png|jpe?g|gif|webp);base64,([a-z0-9+/=]+)$/i);
+    if (!match) return null;
+    const format = match[1].toLowerCase() === 'jpeg' ? 'jpg' : match[1].toLowerCase();
+    return { format, base64: match[2] };
+}
+
+function smsAttachmentFilename(file) {
+    const stem = String(file?.name || 'photo')
+        .replace(/\.[^.]*$/, '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 60) || 'photo';
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    return `command-x-sms-${stamp}-${stem}`;
+}
+
+async function uploadSmsImageToCharacterGallery(file, contactName) {
+    const dataUrl = await readImageDataUrlFromFile(file);
+    const parsed = splitSmsImageDataUrl(dataUrl);
+    if (!parsed) throw new Error('Unsupported image format. Please choose a PNG, JPEG, GIF, or WebP image.');
+    const folder = String(contactName || '').trim() || 'Command-X';
+    const response = await fetch('/api/images/upload', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({
+            image: parsed.base64,
+            format: parsed.format,
+            ch_name: folder,
+            filename: smsAttachmentFilename(file),
+        }),
+    });
+    let responseData = null;
+    try { responseData = await response.json(); } catch { responseData = null; }
+    if (!response.ok) {
+        throw new Error(responseData?.error || `Failed to save image to ${folder}'s gallery.`);
+    }
+    const url = normalizeSmsImageUrl(responseData?.path);
+    if (!url) throw new Error('Gallery upload succeeded but did not return a usable image path.');
+    return {
+        type: 'image',
+        url,
+        name: String(file?.name || 'photo').trim().slice(0, 120) || 'photo',
+        alt: file?.name ? `Attached photo: ${file.name}` : 'Attached photo',
+    };
+}
+
 function findStoredNpcIndexByName(name, stored = null) {
     const list = stored || loadNpcs();
     const normalized = normalizeContactName(name);
@@ -3174,8 +3234,8 @@ async function sendToChat(text, contactName, isCommand, attachment = null) {
  * multimodal models the same way normal ST image attachments are.
  *
  * We clone/replace the last user message in the outbound `chat` prompt array
- * and attach image data via ST's supported `extra.media[]` shape when available
- * or legacy `extra.image` on older builds.
+ * and attach the saved gallery URL via ST's supported `extra.media[]` shape
+ * when available or legacy `extra.image` on older builds.
  */
 globalThis.commandXSmsAttachmentInterceptor = async function(chat, _contextSize, _abort, type) {
     if (type === 'quiet') return;
@@ -3191,9 +3251,9 @@ globalThis.commandXSmsAttachmentInterceptor = async function(chat, _contextSize,
         const supportsMediaArrays = typeof getContext()?.ensureMessageMediaIsArray === 'function';
         if (supportsMediaArrays) {
             if (!Array.isArray(last.extra.media)) last.extra.media = [];
-            last.extra.media.push({ type: 'image', url: attachment.dataUrl });
+            last.extra.media.push({ type: 'image', url: attachment.url });
         } else if (!last.extra.image) {
-            last.extra.image = attachment.dataUrl;
+            last.extra.image = attachment.url;
         }
         chat[chat.length - 1] = last;
     } finally {
@@ -3821,7 +3881,7 @@ function renderBubble(msg) {
     div.className = `cx-sms ${isSent ? 'cx-sms-sent' : 'cx-sms-recv'}${msg.type === 'sent-neural' ? ' cx-sms-neural' : ''}`;
     const attachment = normalizeSmsAttachment(msg.attachment);
     const attachmentHtml = attachment
-        ? `<span class="cx-sms-attachment"><img src="${escAttr(attachment.dataUrl)}" alt="${escAttr(attachment.alt)}"><span>${escHtml(attachment.name)}</span></span>`
+        ? `<span class="cx-sms-attachment"><img src="${escAttr(attachment.url)}" alt="${escAttr(attachment.alt)}"><span>${escHtml(attachment.name)}</span></span>`
         : '';
     div.innerHTML = `${attachmentHtml}${msg.text ? `<span class="cx-sms-body">${escHtml(msg.text)}</span>` : ''}` +
                     (msg.time ? `<span class="cx-sms-ts">${msg.time}</span>` : '');
@@ -4017,7 +4077,7 @@ function updateSmsAttachmentPreview() {
         return;
     }
     if (img) {
-        img.src = attachment.dataUrl;
+        img.src = attachment.url;
         img.alt = attachment.alt;
     }
     if (label) label.textContent = attachment.name || 'Photo';
@@ -4038,18 +4098,7 @@ function triggerSmsImagePicker() {
                 const mb = (MAX_AVATAR_FILE_BYTES / (1024 * 1024)).toFixed(0);
                 throw new Error(`Image is too large (over ${mb} MB). Please choose a smaller file.`);
             }
-            const dataUrl = await safeDataUrlFromFile(file, MAX_SMS_IMAGE_WIDTH, 0.82);
-            if (dataUrl.length > MAX_SMS_ATTACHMENT_DATA_URL_SIZE) {
-                const actualKb = Math.round(dataUrl.length / 1024);
-                const limitKb = Math.round(MAX_SMS_ATTACHMENT_DATA_URL_SIZE / 1024);
-                throw new Error(`Compressed image (${actualKb} KB) exceeds the ${limitKb} KB SMS limit. Please choose a smaller image.`);
-            }
-            pendingSmsAttachment = {
-                type: 'image',
-                dataUrl,
-                name: file.name || 'photo',
-                alt: file.name ? `Attached photo: ${file.name}` : 'Attached photo',
-            };
+            pendingSmsAttachment = await uploadSmsImageToCharacterGallery(file, currentContactName);
             updateSmsAttachmentPreview();
         } catch (error) {
             await cxAlert(String(error?.message || error), 'SMS Photo');

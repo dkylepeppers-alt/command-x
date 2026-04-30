@@ -37,7 +37,7 @@ The core loop: user types in phone UI → extension injects system prompt via `s
 - **Tag parsing** — Regex extraction of `[sms]`, `[status]` (legacy `[contacts]`), `[quests]`, and `[place]` blocks from LLM responses.
 - **NPC / quest / place stores** — JSON tag parsing + localStorage persistence per chat.
 - **Prompt injection** — `setExtensionPrompt()` for `[sms]` (per-message, depth 1), `[status]` / `[quests]` (persistent, throttled), map/place context, and private-phone context.
-- **Message store** — localStorage-backed, keyed `cx-msgs-{chatKey}-{contactName}`; normal SMS can include locally stored image thumbnails.
+- **Message store** — localStorage-backed, keyed `cx-msgs-{chatKey}-{contactName}`; normal SMS can include image attachments stored as SillyTavern character-gallery URLs.
 - **Phone UI** — HTML template literals; `buildPhone()` returns full phone DOM, `rebuildPhone()` replaces it.
 - **Command drawer** — Mode buttons (COMMAND / BELIEVE / FORGET / COMPEL) above input in Command-X app.
 - **Private polling** — `generateQuietPrompt()` out-of-band inbox check (manual button and optional every-N-turn cadence).
@@ -74,7 +74,7 @@ The core loop: user types in phone UI → extension injects system prompt via `s
 - **Tag extraction order in `MESSAGE_RECEIVED` matters**: extract `[sms]` **before** `[status]` / `[quests]`. The status/quests handlers call `rebuildPhone()` which resets UI state, and will clobber `awaitingReply` if run first. Don't reorder.
 - **`innerHTML` replacement**: Done in `CHARACTER_MESSAGE_RENDERED` handler (after ST renders). If ST's rendering pipeline changes, this is the fragile point.
 - **`awaitingReply`**: Boolean + 30-second timeout (`AWAIT_TIMEOUT_MS`). Resets on successful parse, failed parse, back-button, or chat change.
-- **localStorage keys** use `chatKey()` — messages, NPCs, quests, places, map metadata/images, trails, unread counts, and attachment thumbnails are per-chat. Histories are capped (`MESSAGE_HISTORY_CAP`, `QUEST_HISTORY_CAP`, `SMS_ATTACHMENT_HISTORY_CAP`, etc.).
+- **localStorage keys** use `chatKey()` — messages, NPCs, quests, places, map metadata/images, trails, and unread counts are per-chat. Histories are capped (`MESSAGE_HISTORY_CAP`, `QUEST_HISTORY_CAP`, etc.); SMS photo history stores gallery URLs instead of image data.
 - **`cxAlert()` / `cxConfirm()`** are async in-phone modal helpers. Never use native `alert()` / `confirm()`.
 - **Event listeners** on `eventSource` are wired through `wireEventListeners()` and symmetrically removed by `unwireEventListeners()` on disable/destroy. DOM listeners are cleaned by `rebuildPhone()` which replaces innerHTML.
 
