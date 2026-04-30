@@ -1996,7 +1996,7 @@ function injectSmsPrompt(targets) {
     let instruction = `[System: ${parts.join(' ')}`;
     if (!allNeural) {
         if (multi && smsTargets.length > 1) {
-            instruction += ` Include a separate [sms from="Name"] block for EACH person who was texted. Each person replies independently.`;
+            instruction += ` Include a separate [sms from="Name" to="user"] block for EACH person who was texted. Each person replies independently.`;
         }
         const smsExampleName = smsTargets.length ? smsTargets[0].name : names[0];
         instruction += ` Example: *She glanced at her phone.* [sms from="${smsExampleName}" to="user"]hey yeah on my way[/sms] *She set it down.*`;
