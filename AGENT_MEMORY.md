@@ -77,6 +77,23 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-30 — Tolerant status block recovery (commit pending)
+
+**Context:** Fixed NPC/status detection when an LLM emits a `[status]` JSON block
+without the closing `[/status]` tag before another structured block such as
+`[place]`.
+
+**Notes for future agents:**
+- `extractContacts()` now parses the first balanced JSON object/array after an
+  unmatched `[status]` / `[contacts]` opener, so tags followed by `[place]` or
+  trailing prose can still import NPCs without duplicating valid closed blocks.
+- `hideContactsTagsInDom()` also strips unclosed status/contact blocks so a
+  malformed status tag does not leak into the visible chat while preserving
+  subsequent structured tags for their own hiders.
+- Full `node --test test/*.mjs` still fails on the pre-existing
+  `test/nova-shell-route.test.mjs` ANSI-colored stdout assertion; targeted
+  helper tests and `node --input-type=module --check < index.js` pass.
+
 ### 2026-04-30 — Review-thread doc fixes (commit pending)
 
 **Context:** Applied PR review feedback on the root agent guide and refreshed
