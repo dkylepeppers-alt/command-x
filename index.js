@@ -8230,7 +8230,7 @@ async function sendNovaTurn({
    skill default-tool lists.
    ---------------------------------------------------------------------- */
 
-const SKILLS_VERSION = 5; // bump when any skill prompt, defaultTools, or defaultTier changes
+const SKILLS_VERSION = 7; // bump when any skill prompt, defaultTools, or defaultTier changes
 
 const NOVA_TOOLS = [
     // === 4a. Filesystem (plugin-backed) ===
@@ -8810,11 +8810,31 @@ const NOVA_SKILLS = [
         // to copy. fs_write would force tier escalation on every turn; drop it from
         // the default set and let the user escalate + pick it manually if they want
         // prompts written to disk.
-        defaultTools: ['st_get_context', 'phone_list_npcs'],
+        defaultTools: ['st_get_context', 'st_read_character', 'st_list_worldbooks', 'st_read_worldbook', 'phone_list_npcs'],
         systemPrompt: [
             'You are the Image Prompter skill inside Nova.',
-            'First use st_get_context to extract the current scene: subjects,',
-            'relationship, action, location, outfit, mood, lighting, and camera.',
+            'First use st_get_context to extract the current roleplay scene.',
+            'Use st_read_character for active/visible characters to capture',
+            'base visual descriptions from their character cards. Use',
+            'st_list_worldbooks and st_read_worldbook to inspect associated',
+            'worldbook entries for canonical visual details when available.',
+            'Use chat context for current clothing, setting, pose, visible',
+            'actions, lighting, camera framing, and mood; let current scene',
+            'details override stale defaults only for transient visuals.',
+            'Write dense, image-generation-focused prompts based on that',
+            'current scene context.',
+            '',
+            'Only include details that directly affect the visual result:',
+            '- characters’ physical appearance, facial expression, pose,',
+            '  body position, clothing or lack of clothing, and visible actions',
+            '- environment, props, lighting, camera framing, composition,',
+            '  art style, render style, and visually expressible mood cues',
+            '',
+            'Do not include story narration, inner thoughts, dialogue,',
+            'symbolism, backstory, or filler language. Be specific, concrete,',
+            'and visually descriptive. Prioritize details that improve image',
+            'fidelity, scene accuracy, and character consistency.',
+            '',
             'Then produce prompts',
             'for SD / SDXL / Flux / Illustrious. Emit structured output:',
             '  { mode, scene_summary, positive, negative, sampler_hint, steps_hint, cfg_hint, size_hint, notes }.',

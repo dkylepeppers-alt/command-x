@@ -77,6 +77,36 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-04-30 — Image Prompter visual canon sources (commit pending)
+
+**Context:** Follow-up to the Image Prompter prompt update: the skill now reads
+character cards and worldbook entries for stable visual canon before composing
+current-scene image prompts.
+
+**Notes for future agents:**
+- `image-prompter.defaultTools` now includes `st_read_character`,
+  `st_list_worldbooks`, and `st_read_worldbook` in addition to
+  `st_get_context` / `phone_list_npcs`; keep the skill read-only and avoid
+  reintroducing filesystem defaults.
+- The prompt distinguishes stable base visuals from character cards/worldbooks
+  versus transient chat-context details such as clothing, setting, pose,
+  lighting, camera framing, and mood.
+- Current `SKILLS_VERSION` is 7; update `test/nova-tool-args.test.mjs` whenever
+  skill prompt wording, default tools, or default tiers change.
+
+### 2026-04-28 — Image Prompter visual-only prompt guidance (commit pending)
+
+**Context:** Tightened Nova's Image Prompter skill so it produces dense,
+image-generation-focused prompts grounded in the current RP scene.
+
+**Notes for future agents:**
+- `NOVA_SKILLS.image-prompter.systemPrompt` now explicitly excludes story
+  narration, inner thoughts, dialogue, symbolism, backstory, and filler; keep it
+  focused on directly visible details that affect the generated image.
+- This entry bumped `SKILLS_VERSION` to 6; later prompt/default-tool changes may
+  supersede that value, so check the latest History entry and
+  `test/nova-tool-args.test.mjs` for the current pin.
+
 ### 2026-04-28 — Nova Command-X diagnostics skill (commit pending)
 
 **Context:** Added read-only self-diagnosis support so Nova can inspect its own
@@ -91,8 +121,9 @@ runtime state and troubleshoot Command-X phone systems before recommending fixes
   `nova_read_soul` / `nova_read_memory`, and read-only filesystem tools for
   source/test/docs/plugin inspection. It intentionally does not expose write or
   shell tools by default.
-- `SKILLS_VERSION` is now 5; bump it and update `test/nova-tool-args.test.mjs`
-  whenever skill prompts, default tools, or default tiers change.
+- This entry bumped `SKILLS_VERSION` to 5; later prompt/default-tool changes may
+  supersede that value, so check the latest History entry and
+  `test/nova-tool-args.test.mjs` for the current pin.
 
 ### 2026-04-28 — Nova creator writes use native ST locations (commit pending)
 
