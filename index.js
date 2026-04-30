@@ -51,6 +51,7 @@ const MAX_SUMMARISED_SKILL_TOOLS = 6;       // max tool names shown in skill pic
 const SMS_IMAGE_DATA_URL_RE = /^data:image\/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=]+$/i;
 const SMS_GALLERY_IMAGE_URL_RE = /^(?:\.?\/)?user\/images\/[^\r\n"'<>]+$/i;
 const MESSAGE_SAVE_FAILURE_NOTICE_MS = 30_000; // throttle storage-full user alerts
+const SMS_GALLERY_UPLOAD_TIMEOUT_MS = 60_000;
 
 /**
  * Depth values passed to `setExtensionPrompt` (`extension_prompt_types.IN_CHAT`).
@@ -2949,7 +2950,7 @@ function smsAttachmentFilename(file) {
         .replace(/\.[^.]*$/, '')
         .trim()
         .toLowerCase()
-        .replace(/[^a-z0-9_-]+/g, '-')
+        .replace(/[^\p{L}\p{N}_-]+/gu, '-')
         .replace(/^-+|-+$/g, '')
         .slice(0, 60) || 'photo';
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -2961,18 +2962,30 @@ async function uploadSmsImageToCharacterGallery(file, contactName) {
     const parsed = splitSmsImageDataUrl(dataUrl);
     if (!parsed) throw new Error('Unsupported image format. Please choose a PNG, JPEG, GIF, or WebP image.');
     const folder = String(contactName || '').trim() || 'Command-X';
-    const response = await fetch('/api/images/upload', {
-        method: 'POST',
-        headers: getRequestHeaders(),
-        body: JSON.stringify({
-            image: parsed.base64,
-            format: parsed.format,
-            ch_name: folder,
-            filename: smsAttachmentFilename(file),
-        }),
-    });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), SMS_GALLERY_UPLOAD_TIMEOUT_MS);
+    let response;
+    try {
+        response = await fetch('/api/images/upload', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            signal: controller.signal,
+            body: JSON.stringify({
+                image: parsed.base64,
+                format: parsed.format,
+                ch_name: folder,
+                filename: smsAttachmentFilename(file),
+            }),
+        });
+    } catch (error) {
+        if (error?.name === 'AbortError') throw new Error('Saving the SMS photo to the character gallery timed out. Please try again.');
+        throw error;
+    } finally {
+        clearTimeout(timeoutId);
+    }
     let responseData = null;
-    try { responseData = await response.json(); } catch { responseData = null; }
+    try { responseData = await response.json(); }
+    catch (error) { console.warn('[command-x] gallery upload response parse failed', error); }
     if (!response.ok) {
         throw new Error(responseData?.error || `Failed to save image to ${folder}'s gallery.`);
     }
