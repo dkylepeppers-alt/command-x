@@ -2789,3 +2789,45 @@ stale settings-panel checkbox/value can overwrite the in-phone change.
 - Full suite after edits: `node --test test/*.mjs` had 859/860 passing with the
   same unrelated `test/nova-shell-route.test.mjs` ANSI-colored stdout mismatch
   (`'\x1B[33m4\x1B[39m'` vs `'4'`).
+
+---
+
+## 2026-05-01 — Command-X chat/data persistence hardening
+
+### Why
+
+Command-X phone data and SMS chats could appear not to persist because the
+per-chat localStorage key helper used truthy fallback logic (`ctx.chatId || ...`),
+which drops valid falsy SillyTavern ids such as numeric `0`. It also preferred
+older context ids before ST's canonical current-chat id, so data could be saved
+under one key and later looked up under another after chat switches or updates.
+Older builds also left useful data under legacy fallback keys like `default` and
+`no-chat`.
+
+### Change
+
+- Added `collectChatKeyCandidates()` / `chatKeyCandidates()` so storage keys:
+  - prefer `ctx.getCurrentChatId()` when available,
+  - preserve valid falsy ids like `0`,
+  - fall back through `ctx.chatId`, `ctx.groupId`, `default`, and legacy
+    `no-chat` keys without duplicates.
+- Added shared fallback localStorage readers/removers and applied them to NPCs,
+  quests, places, map metadata, location trails, SMS message threads, and unread
+  counts.
+- Contact history and unread-total scans now consider all current/legacy chat-key
+  candidates, so existing phone threads remain visible after the primary key
+  changes.
+- Contact rename/delete and map clearing now remove matching legacy-keyed data as
+  well as the primary key.
+- Added helper tests for chat-key candidate ordering, numeric-zero handling, and
+  source-shape coverage for legacy storage fallback.
+
+### Validation
+
+- Baseline before edits: `node --test test/*.mjs` had 865/866 passing with the
+  pre-existing `test/nova-shell-route.test.mjs` ANSI-colored stdout mismatch
+  (`'\x1B[33m4\x1B[39m'` vs `'4'`).
+- `node --test test/helpers.test.mjs` passed 83/83.
+- Syntax check passed: `node --input-type=module --check < index.js`.
+- Full suite after edits: `node --test test/*.mjs` had 870/871 passing with the
+  same unrelated `nova-shell-route` ANSI-colored stdout mismatch.
