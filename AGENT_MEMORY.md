@@ -2831,3 +2831,33 @@ Older builds also left useful data under legacy fallback keys like `default` and
 - Syntax check passed: `node --input-type=module --check < index.js`.
 - Full suite after edits: `node --test test/*.mjs` had 870/871 passing with the
   same unrelated `nova-shell-route` ANSI-colored stdout mismatch.
+
+---
+
+## 2026-05-01 — Unread fallback review follow-up
+
+### Why
+
+PR review found that `getUnread()` returned as soon as it found any unread-count
+candidate key. With multi-key fallback storage, a canonical key containing `0`, a
+negative value, or corrupted text could hide a later legacy key with a positive
+unread count.
+
+### Change
+
+- Added `normalizeUnreadCount()` for shared positive-integer unread coercion.
+- Updated `getUnread()` to scan every current/legacy unread key candidate and
+  return the maximum positive count instead of returning on the first key.
+- Reused the same coercion in `setUnread()` and `getTotalUnread()` to keep unread
+  parsing consistent.
+- Added helper/source-shape tests for unread coercion and fallback aggregation.
+
+### Validation
+
+- Baseline before edits: `node --test test/helpers.test.mjs` passed 83/83.
+- After edits: `node --test test/helpers.test.mjs` passed 86/86.
+- Syntax check passed: `node --input-type=module --check < index.js`.
+- Full suite after edits: `node --test test/*.mjs` had 873/874 passing with the
+  same unrelated `test/nova-shell-route.test.mjs` ANSI-colored stdout mismatch
+  (`'\x1B[33m4\x1B[39m'` vs `'4'`).
+- `parallel_validation` passed: code review clean and CodeQL reported 0 alerts.
