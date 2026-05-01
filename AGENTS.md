@@ -6,7 +6,7 @@ full architecture reference.
 
 ## Project snapshot
 
-- SillyTavern third-party extension, currently v0.13.0.
+- SillyTavern third-party extension, currently v0.13.2.
 - Vanilla browser JavaScript, CSS, and HTML loaded directly by SillyTavern.
 - No bundler, no `package.json`, and no build step.
 - Main frontend files:

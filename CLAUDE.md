@@ -4,7 +4,7 @@
 
 ## What This Is
 
-A SillyTavern third-party extension (v0.13.0) that adds a smartphone UI overlay to RP chats. Six apps: **Command-X** (neural commands + unified messaging), **Profiles** (NPC intel cards), **Quests** (persistent story tracker), **Map** (contact location tracking), **Nova** (approval-gated agentic assistant via a companion server plugin), and **Settings**. Messages flow through the RP — the extension injects system prompts so the LLM wraps phone replies in `[sms]` tags, which get extracted for the phone UI.
+A SillyTavern third-party extension (v0.13.2) that adds a smartphone UI overlay to RP chats. Six apps: **Command-X** (neural commands + unified messaging), **Profiles** (NPC intel cards), **Quests** (persistent story tracker), **Map** (contact location tracking), **Nova** (approval-gated agentic assistant via a companion server plugin), and **Settings**. Messages flow through the RP — the extension injects system prompts so the LLM wraps phone replies in `[sms]` tags, which get extracted for the phone UI.
 
 > The previous "OpenClaw" app was renamed to **Nova** in v0.13.0 along with the migration from `openclaw-bridge` → `nova-agent-bridge`. References to OpenClaw in any older notes or branches are stale; see the "Legacy note" under [Nova Agent](#nova-agent) for the migration path.
 
@@ -14,7 +14,7 @@ A SillyTavern third-party extension (v0.13.0) that adds a smartphone UI overlay 
 command-x/
 ├── index.js          # All extension logic (~10.6k lines; single frontend module)
 ├── style.css         # All styling (~1.7k lines)
-├── manifest.json     # ST extension manifest — single source of truth for VERSION (currently 0.13.0)
+├── manifest.json     # ST extension manifest — single source of truth for VERSION (currently 0.13.2)
 ├── settings.html     # ST settings panel (toggles, number inputs, Nova config)
 ├── README.md         # User-facing docs
 ├── AGENT_MEMORY.md   # Append-only shared memory across agent sessions
@@ -131,7 +131,7 @@ typingTimeout       // setTimeout ID for the 30s awaitingReply cleanup
 ### Named Constants
 
 ```javascript
-VERSION              // single-sourced; mirror of manifest.json#version (currently '0.13.0')
+VERSION              // single-sourced; mirror of manifest.json#version (currently '0.13.2')
 CX_PROMPT_DEPTHS     // {sms:1, contacts:2, privatePhone:3, map:3, quests:4} (frozen)
 AWAIT_TIMEOUT_MS     // 30_000 — awaitingReply auto-clear timeout
 CLOCK_INTERVAL_MS    // 30_000 — clock display refresh interval

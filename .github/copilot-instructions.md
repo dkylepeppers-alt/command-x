@@ -4,7 +4,7 @@
 
 ## Summary
 
-SillyTavern third-party extension (v0.13.0, ~10.6k lines of JS) that adds a floating smartphone UI overlay with multiple apps: **Command-X** (neural command messaging + unified iMessage-style texting), **Profiles** (NPC intel cards), **Quests** (persistent story tracker), **Map** (contact locations), **Nova** (approval-gated agentic assistant with a companion server plugin), and **Settings**. Pure browser JavaScript + CSS — no build system, no bundler, no runtime dependencies beyond SillyTavern's frontend.
+SillyTavern third-party extension (v0.13.2, ~10.6k lines of JS) that adds a floating smartphone UI overlay with multiple apps: **Command-X** (neural command messaging + unified iMessage-style texting), **Profiles** (NPC intel cards), **Quests** (persistent story tracker), **Map** (contact locations), **Nova** (approval-gated agentic assistant with a companion server plugin), and **Settings**. Pure browser JavaScript + CSS — no build system, no bundler, no runtime dependencies beyond SillyTavern's frontend.
 
 **Languages/Runtime:** Vanilla ES module JavaScript, CSS3, HTML. Runs inside SillyTavern's browser frontend (Chromium-based). jQuery is available globally via ST.
 
@@ -13,7 +13,7 @@ SillyTavern third-party extension (v0.13.0, ~10.6k lines of JS) that adds a floa
 ```
 index.js          — All extension logic (~10.6k lines). Entry point loaded by ST.
 style.css         — All styles (~1.7k lines). Phone shell, iMessage bubbles, command drawer, app chrome.
-manifest.json     — ST extension manifest (v0.13.0). Declares js, css, loading_order.
+manifest.json     — ST extension manifest (v0.13.2). Declares js, css, loading_order.
 settings.html     — ST settings panel fragment. Toggles + number inputs (including Nova config).
 README.md         — User-facing docs.
 AGENT_MEMORY.md   — Append-only shared memory across agent sessions. Read first, update on each PR.

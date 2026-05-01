@@ -6,7 +6,7 @@
     "js": "index.js",
     "generate_interceptor": "commandXSmsAttachmentInterceptor",
     "css": "style.css",
-    "version": "0.13.1",
+    "version": "0.13.2",
     "homePage": "https://github.com/dkylepeppers-alt/command-x",
     "description": "Smartphone UI with Command-X neural messaging, iMessage-style texting, NPC profiles, a persistent Quests app, a Map app for tracking contact locations, the Nova agentic assistant (connection-profile swap, per-chat transcript, skill packs, approval-gated tool calls, soul/memory self-edit), and in-phone settings. Uses prompt injection for structured [sms], [status], [quests], and [place] tag extraction."
 }

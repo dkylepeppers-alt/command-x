@@ -19,7 +19,7 @@ import {
     getRequestHeaders,
 } from '../../../../script.js';
 
-const VERSION = '0.13.1';
+const VERSION = '0.13.2';
 const EXT = 'command-x';
 const INJECT_KEY = 'command-x-sms';
 const INJECT_KEY_CONTACTS = 'command-x-contacts';

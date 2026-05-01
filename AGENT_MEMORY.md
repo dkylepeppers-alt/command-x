@@ -77,6 +77,15 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-05-01 — Version bump to v0.13.2 / bridge v0.1.1 (commit pending)
+
+**Context:** Bumped release metadata across the extension and companion Nova bridge.
+
+**Notes for future agents:**
+- Extension runtime version is now `0.13.2`; keep `manifest.json`, `index.js` `VERSION`, current-version docs, and `docs/MANUAL_VALIDATION.md` aligned on future bumps.
+- The companion `server-plugin/nova-agent-bridge/package.json` version is now `0.1.1`; `/manifest.version` remains sourced from that package file.
+- Baseline full tests can still fail in this TTY on `test/nova-shell-route.test.mjs` because stdout from `node -e "console.log(2+2)"` is colorized; rerun with `NO_COLOR=1 node --test test/*.mjs` for the clean suite.
+
 ### 2026-04-30 — SMS photos save to SillyTavern character galleries (commit pending)
 
 **Context:** Replaced the localStorage data-URL SMS photo path with SillyTavern's
