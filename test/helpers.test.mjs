@@ -449,3 +449,53 @@ describe('phone settings binding source shape', () => {
         assert.match(source, /syncPhoneSettingInputs\('showLockscreen', e\.target\.checked\);[\s\S]*saveSettings\(\);/);
     });
 });
+
+describe('SMS gallery attachment source shape', () => {
+    const source = readFileSync(resolve('index.js'), 'utf8');
+
+    it('uploads SMS photos to SillyTavern image galleries instead of enforcing the old local data cap', () => {
+        assert.match(source, /async function uploadSmsImageToCharacterGallery\(file, contactName\)/);
+        assert.match(source, /fetch\('\/api\/images\/upload'/);
+        assert.match(source, /ch_name:\s*folder/);
+        assert.doesNotMatch(source, /MAX_SMS_ATTACHMENT_DATA_URL_SIZE/);
+        assert.doesNotMatch(source, /SMS_ATTACHMENT_HISTORY_CAP/);
+    });
+
+    it('stores and renders gallery URLs for SMS attachments', () => {
+        assert.match(source, /SMS_GALLERY_IMAGE_URL_RE/);
+        assert.match(source, /normalizeSmsImageUrl\(attachment\.url \|\| attachment\.src \|\| attachment\.path \|\| attachment\.dataUrl\)/);
+        assert.match(source, /<img src="\$\{escAttr\(attachment\.url\)\}"/);
+        assert.match(source, /last\.extra\.media\.push\(\{ type: 'image', url: attachment\.url \}\)/);
+    });
+
+    it('sanitizes the gallery folder name before sending it as ch_name', () => {
+        assert.match(source, /function sanitizeSmsGalleryFolder\(name\)/);
+        assert.match(source, /const folder = sanitizeSmsGalleryFolder\(contactName\);/);
+
+        // Inline copy of sanitizeSmsGalleryFolder for behavior assertions.
+        const sanitizeSmsGalleryFolder = (name) => {
+            const cleaned = String(name || '')
+                .replace(/[\\/]+/g, ' ')
+                .replace(/[\x00-\x1F\x7F]+/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .replace(/^\.+/, '')
+                .slice(0, 64)
+                .trim();
+            if (!cleaned || cleaned === '.' || cleaned === '..') return 'Command-X';
+            return cleaned;
+        };
+
+        assert.equal(sanitizeSmsGalleryFolder('Jane Doe'), 'Jane Doe');
+        assert.equal(sanitizeSmsGalleryFolder('  Jane  Doe  '), 'Jane Doe');
+        assert.equal(sanitizeSmsGalleryFolder('Jane/Doe'), 'Jane Doe');
+        assert.equal(sanitizeSmsGalleryFolder('Jane\\Doe'), 'Jane Doe');
+        assert.equal(sanitizeSmsGalleryFolder('../etc/passwd'), 'etc passwd');
+        assert.equal(sanitizeSmsGalleryFolder('..'), 'Command-X');
+        assert.equal(sanitizeSmsGalleryFolder('.'), 'Command-X');
+        assert.equal(sanitizeSmsGalleryFolder(''), 'Command-X');
+        assert.equal(sanitizeSmsGalleryFolder(null), 'Command-X');
+        assert.equal(sanitizeSmsGalleryFolder('Jane\u0000\u0007Doe'), 'Jane Doe');
+        assert.equal(sanitizeSmsGalleryFolder('a'.repeat(200)).length, 64);
+    });
+});

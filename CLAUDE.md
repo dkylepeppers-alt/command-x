@@ -142,9 +142,6 @@ LOCATION_TRAIL_CAP   // 50  — max trail entries per contact
 TOAST_DURATION_MS    // 4_000 — toast auto-dismiss
 MAX_AVATAR_FILE_BYTES // 8MB — safeDataUrlFromFile input size cap
 MAX_MAP_IMAGE_WIDTH  // 1024 — max downscaled width for uploaded map image
-MAX_SMS_IMAGE_WIDTH   // 768 — max downscaled width for SMS image attachments
-MAX_SMS_ATTACHMENT_DATA_URL_SIZE // 96 KB — cap for stored SMS image data URLs
-SMS_ATTACHMENT_HISTORY_CAP // 20 — max image attachments retained per contact thread
 MAX_SUMMARISED_SKILL_TOOLS // 6 — max tool names shown in skill picker
 CONTACT_GRADIENTS    // string[] — avatar background gradient palette
 CONTACT_EMOJIS       // string[] — default avatar emoji pool
@@ -154,7 +151,7 @@ CONTACT_EMOJIS       // string[] — default avatar emoji pool
 
 All keyed per SillyTavern chat ID via the canonical `chatKey()` helper (which falls back to `'default'` when no chat is loaded — every storage prefix uses this same helper to avoid silent data divergence):
 
-- **`cx-msgs-{chatKey}-{contactName}`** — Message history array (capped at `MESSAGE_HISTORY_CAP`; may include locally stored SMS image attachment thumbnails)
+- **`cx-msgs-{chatKey}-{contactName}`** — Message history array (capped at `MESSAGE_HISTORY_CAP`; SMS image attachments store SillyTavern gallery URLs, not image data)
 - **`cx-npcs-{chatKey}`** — NPC store array (capped at 50)
 - **`cx-unread-{chatKey}-{contactName}`** — Unread count integer
 - **`cx-quests-{chatKey}`** — Quest store array (capped at `QUEST_HISTORY_CAP`)

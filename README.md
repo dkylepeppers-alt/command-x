@@ -15,7 +15,7 @@ Messages flow through the RP naturally. The extension uses prompt injection so t
 - **iMessage-style chat bubbles** — Sent (blue), received (dark gray), neural commands (pink/purple glow)
 - **Multi-target texting** — Send messages to multiple contacts in a single turn (batch mode)
 - **Compose queue** — Queue up texts to different people, then flush them all at once
-- **Photo attachments** — Tap ＋ in a normal SMS thread to attach a local image; the phone stores a compressed thumbnail locally (8 MB raw upload cap, 768 px SMS downscale, 20 retained image attachments per thread) and prompts the RP that a picture was sent
+- **Photo attachments** — Tap ＋ in a normal SMS thread to attach a local image; Command-X saves it to the contact's SillyTavern character gallery (`user/images/<contact>/`), stores only the gallery URL in phone history, and prompts the RP that a picture was sent
 - **Typing indicator** — Bouncing dots while waiting for a reply (30s safety timeout)
 - **`[sms from="Name" to="user"]` routing** — Messages land in the right contact's chat, even NPCs
 - **Swipe/regen handling** — When you regenerate a response in ST, old phone messages for that message ID are removed and replaced with the new content
@@ -273,7 +273,7 @@ Tags are injected by the extension automatically — you don't need to type them
 - **`MESSAGE_RECEIVED`** event handler extracts `[sms]` blocks first, then processes `[status]`, `[quests]`, and `[place]` (order matters — store merges can rebuild the UI)
 - **`CHARACTER_MESSAGE_RENDERED` / `USER_MESSAGE_RENDERED`** hides side-channel tags in the ST chat DOM and styles command syntax
 - **`MESSAGE_DELETED` / `MESSAGE_SWIPED`** handles regeneration cleanup by stored `mesId`
-- **localStorage** for message history, NPCs, quests, places, map metadata/images, movement trails, unread counts, and SMS attachment thumbnails, all keyed through the per-chat `chatKey()` helper
+- **localStorage** for message history, NPCs, quests, places, map metadata/images, movement trails, and unread counts, all keyed through the per-chat `chatKey()` helper. SMS photo history stores SillyTavern gallery URLs instead of image data.
 
 ## Compatibility
 
