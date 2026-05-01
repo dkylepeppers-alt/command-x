@@ -25,6 +25,28 @@ function normalizeContactName(name) {
     return String(name || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
+function pushChatKeyCandidate(candidates, value) {
+    if (value === undefined || value === null) return;
+    const text = String(value).trim();
+    if (!text || candidates.includes(text)) return;
+    candidates.push(text);
+}
+
+function collectChatKeyCandidates(ctx = {}) {
+    const candidates = [];
+    try { pushChatKeyCandidate(candidates, ctx.getCurrentChatId?.()); }
+    catch { /* ignore */ }
+    pushChatKeyCandidate(candidates, ctx.chatId);
+    pushChatKeyCandidate(candidates, ctx.groupId);
+    pushChatKeyCandidate(candidates, 'default');
+    pushChatKeyCandidate(candidates, 'no-chat');
+    return candidates;
+}
+
+function chatScopedStorageKeys(ctx, prefix, suffix = '') {
+    return collectChatKeyCandidates(ctx).map(key => `${prefix}-${key}${suffix}`);
+}
+
 function slugifyQuestTitle(value) {
     const slug = String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
     return slug || 'quest';
@@ -192,6 +214,36 @@ describe('normalizeContactName', () => {
     it('collapses inner whitespace', () => assert.equal(normalizeContactName('Dr  Who'), 'dr who'));
     it('handles empty string', () => assert.equal(normalizeContactName(''), ''));
     it('handles null', () => assert.equal(normalizeContactName(null), ''));
+});
+
+describe('chat storage key candidates', () => {
+    it('prefers the ST current chat id over character/group ids', () => {
+        assert.deepEqual(
+            collectChatKeyCandidates({ getCurrentChatId: () => 'chat-file', chatId: 7, groupId: 'group-a' }),
+            ['chat-file', '7', 'group-a', 'default', 'no-chat'],
+        );
+    });
+
+    it('preserves numeric zero ids instead of falling through to default', () => {
+        assert.deepEqual(
+            collectChatKeyCandidates({ getCurrentChatId: () => '', chatId: 0, groupId: null }),
+            ['0', 'default', 'no-chat'],
+        );
+    });
+
+    it('deduplicates primary and legacy fallback candidates', () => {
+        assert.deepEqual(
+            collectChatKeyCandidates({ getCurrentChatId: () => 'default', chatId: 'default', groupId: 'no-chat' }),
+            ['default', 'no-chat'],
+        );
+    });
+
+    it('builds primary plus legacy storage keys for contact threads', () => {
+        assert.deepEqual(
+            chatScopedStorageKeys({ getCurrentChatId: () => 'chat-file', chatId: 0 }, 'cx-msgs', '-Sarah'),
+            ['cx-msgs-chat-file-Sarah', 'cx-msgs-0-Sarah', 'cx-msgs-default-Sarah', 'cx-msgs-no-chat-Sarah'],
+        );
+    });
 });
 
 describe('slugifyQuestTitle', () => {
@@ -447,6 +499,20 @@ describe('phone settings binding source shape', () => {
         assert.match(source, /syncPhoneSettingInputs\('batchMode', e\.target\.checked\);[\s\S]*saveSettings\(\);/);
         assert.match(source, /syncPhoneSettingInputs\('styleCommands', e\.target\.checked\);[\s\S]*saveSettings\(\);/);
         assert.match(source, /syncPhoneSettingInputs\('showLockscreen', e\.target\.checked\);[\s\S]*saveSettings\(\);/);
+    });
+});
+
+describe('chat persistence source shape', () => {
+    const source = readFileSync(resolve('index.js'), 'utf8');
+
+    it('uses fallback storage keys for existing localStorage data', () => {
+        assert.match(source, /function collectChatKeyCandidates\(ctx = \{\}\)/);
+        assert.match(source, /ctx\.getCurrentChatId\?\.\(\)/);
+        assert.match(source, /pushChatKeyCandidate\(candidates, ctx\.chatId\)/);
+        assert.match(source, /pushChatKeyCandidate\(candidates, 'no-chat'\)/);
+        assert.match(source, /function readFirstLocalStorageJson\(keys, fallback = null\)/);
+        assert.match(source, /function storeKeys\(contactName\)/);
+        assert.match(source, /readFirstLocalStorageJson\(storeKeys\(contactName\), \[\]\)/);
     });
 });
 

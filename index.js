@@ -117,16 +117,62 @@ let lastMessageSaveFailureNoticeAt = 0;
 /**
  * Resolve the canonical chat key used in every per-chat storage prefix
  * (`cx-msgs-*`, `cx-npcs-*`, `cx-quests-*`, `cx-unread-*`, `cx-places-*`,
- * `cx-map-*`, `cx-loctrail-*`). Single source of truth so the fallback
- * never diverges between writers and readers — historically the `cx-msgs`
- * family used `'default'` while the `cx-places`/`cx-map`/`cx-loctrail`
- * family used `'no-chat'`, which silently split data when both
- * `ctx.chatId` and `ctx.groupId` were falsy. We standardise on
- * `'default'` to match the higher-value (message/NPC/quest) data paths.
+ * `cx-map-*`, `cx-loctrail-*`). Prefer SillyTavern's current chat id when
+ * available, but retain `chatId` / `groupId` / old fallback keys as read
+ * candidates so data saved by older Command-X builds remains visible.
+ *
+ * Important: do not use `ctx.chatId || ...` here. ST can expose valid falsy
+ * ids (notably numeric `0`), and dropping those silently routes data into the
+ * fallback bucket, making chats look like they did not persist.
  */
+function pushChatKeyCandidate(candidates, value) {
+    if (value === undefined || value === null) return;
+    const text = String(value).trim();
+    if (!text || candidates.includes(text)) return;
+    candidates.push(text);
+}
+
+function collectChatKeyCandidates(ctx = {}) {
+    const candidates = [];
+    try { pushChatKeyCandidate(candidates, ctx.getCurrentChatId?.()); }
+    catch (_) { /* context getter may throw while ST is changing chats */ }
+    pushChatKeyCandidate(candidates, ctx.chatId);
+    pushChatKeyCandidate(candidates, ctx.groupId);
+    pushChatKeyCandidate(candidates, 'default');
+    // Legacy map/trail fallback used before storage keys were unified.
+    pushChatKeyCandidate(candidates, 'no-chat');
+    return candidates;
+}
+
+function chatKeyCandidates() {
+    return collectChatKeyCandidates(getContext());
+}
+
 function chatKey() {
-    const ctx = getContext();
-    return String(ctx.chatId || ctx.groupId || ctx.getCurrentChatId?.() || 'default');
+    return chatKeyCandidates()[0] || 'default';
+}
+
+function chatScopedStorageKeys(prefix, suffix = '') {
+    return chatKeyCandidates().map(key => `${prefix}-${key}${suffix}`);
+}
+
+function readFirstLocalStorageJson(keys, fallback = null) {
+    for (const key of keys) {
+        try {
+            const raw = localStorage.getItem(key);
+            if (raw == null) continue;
+            return JSON.parse(raw);
+        } catch (error) {
+            console.warn('[command-x] localStorage read', key, error);
+        }
+    }
+    return fallback;
+}
+
+function removeLocalStorageKeys(keys) {
+    for (const key of keys) {
+        try { localStorage.removeItem(key); } catch { /* ignore */ }
+    }
 }
 
 // Back-compat alias retained because `currentChatId` is referenced
@@ -387,9 +433,13 @@ function npcStoreKey() {
     return `cx-npcs-${chatKey()}`;
 }
 
+function npcStoreKeys() {
+    return chatScopedStorageKeys('cx-npcs');
+}
+
 function loadNpcs() {
     try {
-        const parsed = JSON.parse(localStorage.getItem(npcStoreKey()) || '[]');
+        const parsed = readFirstLocalStorageJson(npcStoreKeys(), []);
         if (!Array.isArray(parsed)) return [];
         // Defensive: localStorage is shared by every extension on this
         // origin. Filter out anything that doesn't look like an NPC
@@ -650,9 +700,13 @@ function questStoreKey() {
     return `cx-quests-${chatKey()}`;
 }
 
+function questStoreKeys() {
+    return chatScopedStorageKeys('cx-quests');
+}
+
 function loadQuests() {
     try {
-        const parsed = JSON.parse(localStorage.getItem(questStoreKey()) || '[]');
+        const parsed = readFirstLocalStorageJson(questStoreKeys(), []);
         if (!Array.isArray(parsed)) return [];
         // Defensive: drop entries that aren't object records. Loaded
         // quests pass through `sanitizeQuestValue` on every merge, so
@@ -1024,12 +1078,24 @@ function placeStoreKey() {
     return `cx-places-${currentChatId()}`;
 }
 
+function placeStoreKeys() {
+    return chatScopedStorageKeys('cx-places');
+}
+
 function mapMetaKey() {
     return `cx-map-${currentChatId()}`;
 }
 
+function mapMetaKeys() {
+    return chatScopedStorageKeys('cx-map');
+}
+
 function locationTrailKey(contactName) {
     return `cx-loctrail-${currentChatId()}-${contactName}`;
+}
+
+function locationTrailKeys(contactName) {
+    return chatScopedStorageKeys('cx-loctrail', `-${contactName}`);
 }
 
 /**
@@ -1065,7 +1131,7 @@ function normalizeStoredPlace(raw, siblingList = []) {
 
 function loadPlaces() {
     try {
-        const parsed = JSON.parse(localStorage.getItem(placeStoreKey()) || '[]');
+        const parsed = readFirstLocalStorageJson(placeStoreKeys(), []);
         if (!Array.isArray(parsed)) return [];
         const result = [];
         for (const raw of parsed) {
@@ -1103,7 +1169,7 @@ function defaultMapMeta() {
 
 function loadMapMeta() {
     try {
-        const parsed = JSON.parse(localStorage.getItem(mapMetaKey()) || 'null');
+        const parsed = readFirstLocalStorageJson(mapMetaKeys(), null);
         if (!parsed || typeof parsed !== 'object') return defaultMapMeta();
         return {
             mode: parsed.mode === 'image' ? 'image' : 'schematic',
@@ -1255,11 +1321,10 @@ function deletePlace(placeId) {
     savePlaces(stored);
     // Scrub trail entries pointing to this place (cheap pass over current-chat keys)
     try {
-        const chatId = currentChatId();
-        const prefix = `cx-loctrail-${chatId}-`;
+        const prefixes = chatKeyCandidates().map(key => `cx-loctrail-${key}-`);
         for (let i = 0; i < localStorage.length; i++) {
             const key = localStorage.key(i);
-            if (!key || !key.startsWith(prefix)) continue;
+            if (!key || !prefixes.some(prefix => key.startsWith(prefix))) continue;
             try {
                 const trail = JSON.parse(localStorage.getItem(key) || '[]');
                 if (!Array.isArray(trail)) continue;
@@ -1275,7 +1340,7 @@ function deletePlace(placeId) {
 
 function loadLocationTrail(contactName) {
     try {
-        const trail = JSON.parse(localStorage.getItem(locationTrailKey(contactName)) || '[]');
+        const trail = readFirstLocalStorageJson(locationTrailKeys(contactName), []);
         return Array.isArray(trail) ? trail : [];
     } catch { return []; }
 }
@@ -1301,11 +1366,10 @@ function pushLocationTrail(contactName, placeId, mesId = null) {
 function removeTrailForMesId(mesId) {
     if (mesId == null) return;
     try {
-        const chatId = currentChatId();
-        const prefix = `cx-loctrail-${chatId}-`;
+        const prefixes = chatKeyCandidates().map(key => `cx-loctrail-${key}-`);
         for (let i = 0; i < localStorage.length; i++) {
             const key = localStorage.key(i);
-            if (!key || !key.startsWith(prefix)) continue;
+            if (!key || !prefixes.some(prefix => key.startsWith(prefix))) continue;
             try {
                 const trail = JSON.parse(localStorage.getItem(key) || '[]');
                 if (!Array.isArray(trail)) continue;
@@ -2027,6 +2091,10 @@ function storeKey(contactName) {
     return `cx-msgs-${chatKey()}-${contactName}`;
 }
 
+function storeKeys(contactName) {
+    return chatScopedStorageKeys('cx-msgs', `-${contactName}`);
+}
+
 /* ------------------------------------------------------------------
    Phase 2 caches — keyed by current chat id, invalidated on any write.
    historyContactNames() used to scan every localStorage key, and sort
@@ -2055,7 +2123,10 @@ function lastMessageTs(contactName) {
 }
 
 function loadMessages(contactName) {
-    try { return JSON.parse(localStorage.getItem(storeKey(contactName)) || '[]'); }
+    try {
+        const parsed = readFirstLocalStorageJson(storeKeys(contactName), []);
+        return Array.isArray(parsed) ? parsed : [];
+    }
     catch { return []; }
 }
 
@@ -2128,13 +2199,17 @@ function historyContactNames() {
     if (_historyContactNamesCache.chatId === chatId && _historyContactNamesCache.names) {
         return _historyContactNamesCache.names.slice();
     }
-    const prefix = `cx-msgs-${chatId}-`;
+    const prefixes = chatKeyCandidates().map(key => `cx-msgs-${key}-`);
     const names = new Set();
     for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i);
-        if (!key || !key.startsWith(prefix)) continue;
-        const name = key.slice(prefix.length).trim();
-        if (name) names.add(name);
+        if (!key) continue;
+        for (const prefix of prefixes) {
+            if (!key.startsWith(prefix)) continue;
+            const name = key.slice(prefix.length).trim();
+            if (name) names.add(name);
+            break;
+        }
     }
     const result = [...names];
     _historyContactNamesCache = { chatId, names: result };
@@ -2271,8 +2346,20 @@ function unreadKey(contactName) {
     return `cx-unread-${chatKey()}-${contactName}`;
 }
 
+function unreadKeys(contactName) {
+    return chatScopedStorageKeys('cx-unread', `-${contactName}`);
+}
+
 function getUnread(contactName) {
-    return parseInt(localStorage.getItem(unreadKey(contactName)) || '0', 10);
+    for (const key of unreadKeys(contactName)) {
+        try {
+            const raw = localStorage.getItem(key);
+            if (raw == null) continue;
+            const n = parseInt(raw || '0', 10);
+            return Number.isFinite(n) && n > 0 ? n : 0;
+        } catch { /* try next candidate */ }
+    }
+    return 0;
 }
 
 function incrementUnread(contactName) {
@@ -2283,7 +2370,7 @@ function incrementUnread(contactName) {
 
 function setUnread(contactName, value) {
     const count = Math.max(0, parseInt(value || '0', 10) || 0);
-    if (!count) localStorage.removeItem(unreadKey(contactName));
+    if (!count) removeLocalStorageKeys(unreadKeys(contactName));
     else localStorage.setItem(unreadKey(contactName), String(count));
     updateUnreadBadges();
 }
@@ -2438,7 +2525,7 @@ function cxPrompt(message, { title = 'Command-X', defaultValue = '', placeholder
 }
 
 function markRead(contactName) {
-    localStorage.removeItem(unreadKey(contactName));
+    removeLocalStorageKeys(unreadKeys(contactName));
     updateUnreadBadges();
 }
 
@@ -2448,17 +2535,24 @@ function getTotalUnread() {
     // `loadNpcs()` + `historyContactNames()` + a Map sort and is invoked
     // from every rebuildPhone / incrementUnread / markRead / poll path —
     // an O(unread-keys) scan is dramatically cheaper at idle.
-    let total = 0;
-    const prefix = `cx-unread-${chatKey()}-`;
+    const byContact = new Map();
+    const prefixes = chatKeyCandidates().map(key => `cx-unread-${key}-`);
     try {
         for (let i = 0; i < localStorage.length; i++) {
             const key = localStorage.key(i);
-            if (!key || !key.startsWith(prefix)) continue;
-            const n = parseInt(localStorage.getItem(key) || '0', 10);
-            if (Number.isFinite(n) && n > 0) total += n;
+            if (!key) continue;
+            for (const prefix of prefixes) {
+                if (!key.startsWith(prefix)) continue;
+                const contact = key.slice(prefix.length).trim();
+                const n = parseInt(localStorage.getItem(key) || '0', 10);
+                if (contact && Number.isFinite(n) && n > 0) {
+                    byContact.set(contact, Math.max(byContact.get(contact) || 0, n));
+                }
+                break;
+            }
         }
     } catch (_) { /* localStorage access can throw in strict-storage browsers */ }
-    return total;
+    return [...byContact.values()].reduce((sum, n) => sum + n, 0);
 }
 
 function updateUnreadBadges() {
@@ -3060,13 +3154,13 @@ function renameContactThread(oldName, newName) {
     const oldMsgs = loadMessages(oldName);
     if (oldMsgs.length) {
         saveMessages(newName, oldMsgs);
-        try { localStorage.removeItem(storeKey(oldName)); } catch { /* ignore */ }
+        removeLocalStorageKeys(storeKeys(oldName));
         invalidateContactCaches();
     }
     const unread = getUnread(oldName);
     if (unread) {
         setUnread(newName, unread);
-        try { localStorage.removeItem(unreadKey(oldName)); } catch { /* ignore */ }
+        removeLocalStorageKeys(unreadKeys(oldName));
     }
     if (currentContactName === oldName) currentContactName = newName;
     composeQueue = composeQueue.map(item => item.contactName === oldName ? { ...item, contactName: newName } : item);
@@ -3078,8 +3172,8 @@ function deleteStoredContact(name) {
     if (idx < 0) return false;
     stored.splice(idx, 1);
     saveNpcs(stored);
-    try { localStorage.removeItem(storeKey(name)); } catch { /* ignore */ }
-    try { localStorage.removeItem(unreadKey(name)); } catch { /* ignore */ }
+    removeLocalStorageKeys(storeKeys(name));
+    removeLocalStorageKeys(unreadKeys(name));
     invalidateContactCaches();
     composeQueue = composeQueue.filter(item => item.contactName !== name);
     if (currentContactName === name) currentContactName = null;
@@ -4081,14 +4175,13 @@ function sendPhoneMessage() {
 
 function clearAllMapDataForCurrentChat() {
     try {
-        localStorage.removeItem(placeStoreKey());
-        localStorage.removeItem(mapMetaKey());
-        const chatId = currentChatId();
-        const prefix = `cx-loctrail-${chatId}-`;
+        removeLocalStorageKeys(placeStoreKeys());
+        removeLocalStorageKeys(mapMetaKeys());
+        const prefixes = chatKeyCandidates().map(key => `cx-loctrail-${key}-`);
         const toRemove = [];
         for (let i = 0; i < localStorage.length; i++) {
             const key = localStorage.key(i);
-            if (key && key.startsWith(prefix)) toRemove.push(key);
+            if (key && prefixes.some(prefix => key.startsWith(prefix))) toRemove.push(key);
         }
         for (const k of toRemove) localStorage.removeItem(k);
     } catch (e) { console.warn('[command-x] clear map data', e); }
