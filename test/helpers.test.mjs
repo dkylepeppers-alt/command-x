@@ -47,6 +47,11 @@ function chatScopedStorageKeys(ctx, prefix, suffix = '') {
     return collectChatKeyCandidates(ctx).map(key => `${prefix}-${key}${suffix}`);
 }
 
+function normalizeUnreadCount(value) {
+    const count = parseInt(value || '0', 10);
+    return Number.isFinite(count) && count > 0 ? count : 0;
+}
+
 function slugifyQuestTitle(value) {
     const slug = String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
     return slug || 'quest';
@@ -243,6 +248,20 @@ describe('chat storage key candidates', () => {
             chatScopedStorageKeys({ getCurrentChatId: () => 'chat-file', chatId: 0 }, 'cx-msgs', '-Sarah'),
             ['cx-msgs-chat-file-Sarah', 'cx-msgs-0-Sarah', 'cx-msgs-default-Sarah', 'cx-msgs-no-chat-Sarah'],
         );
+    });
+});
+
+describe('normalizeUnreadCount', () => {
+    it('keeps positive integer values', () => {
+        assert.equal(normalizeUnreadCount('3'), 3);
+        assert.equal(normalizeUnreadCount(12), 12);
+    });
+
+    it('coerces invalid and non-positive values to zero', () => {
+        assert.equal(normalizeUnreadCount('not-a-number'), 0);
+        assert.equal(normalizeUnreadCount('-4'), 0);
+        assert.equal(normalizeUnreadCount('0'), 0);
+        assert.equal(normalizeUnreadCount(null), 0);
     });
 });
 
@@ -513,6 +532,12 @@ describe('chat persistence source shape', () => {
         assert.match(source, /function readFirstLocalStorageJson\(keys, fallback = null\)/);
         assert.match(source, /function storeKeys\(contactName\)/);
         assert.match(source, /readFirstLocalStorageJson\(storeKeys\(contactName\), \[\]\)/);
+    });
+
+    it('aggregates unread fallbacks instead of returning on invalid primary keys', () => {
+        assert.match(source, /function normalizeUnreadCount\(value\)/);
+        assert.match(source, /function getUnread\(contactName\) \{[\s\S]*let count = 0;[\s\S]*count = Math\.max\(count, normalizeUnreadCount\(raw\)\);[\s\S]*return count;/);
+        assert.doesNotMatch(source, /return Number\.isFinite\(n\) && n > 0 \? n : 0;/);
     });
 });
 

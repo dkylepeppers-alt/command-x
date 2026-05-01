@@ -2350,16 +2350,21 @@ function unreadKeys(contactName) {
     return chatScopedStorageKeys('cx-unread', `-${contactName}`);
 }
 
+function normalizeUnreadCount(value) {
+    const count = parseInt(value || '0', 10);
+    return Number.isFinite(count) && count > 0 ? count : 0;
+}
+
 function getUnread(contactName) {
+    let count = 0;
     for (const key of unreadKeys(contactName)) {
         try {
             const raw = localStorage.getItem(key);
             if (raw == null) continue;
-            const n = parseInt(raw || '0', 10);
-            return Number.isFinite(n) && n > 0 ? n : 0;
+            count = Math.max(count, normalizeUnreadCount(raw));
         } catch { /* try next candidate */ }
     }
-    return 0;
+    return count;
 }
 
 function incrementUnread(contactName) {
@@ -2369,7 +2374,7 @@ function incrementUnread(contactName) {
 }
 
 function setUnread(contactName, value) {
-    const count = Math.max(0, parseInt(value || '0', 10) || 0);
+    const count = normalizeUnreadCount(value);
     if (!count) removeLocalStorageKeys(unreadKeys(contactName));
     else localStorage.setItem(unreadKey(contactName), String(count));
     updateUnreadBadges();
@@ -2544,8 +2549,8 @@ function getTotalUnread() {
             for (const prefix of prefixes) {
                 if (!key.startsWith(prefix)) continue;
                 const contact = key.slice(prefix.length).trim();
-                const n = parseInt(localStorage.getItem(key) || '0', 10);
-                if (contact && Number.isFinite(n) && n > 0) {
+                const n = normalizeUnreadCount(localStorage.getItem(key));
+                if (contact && n > 0) {
                     byContact.set(contact, Math.max(byContact.get(contact) || 0, n));
                 }
                 break;
