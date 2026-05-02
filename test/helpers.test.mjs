@@ -22,7 +22,16 @@ function escHtml(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,
 function escAttr(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
 function normalizeContactName(name) {
-    return String(name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    return String(name || '')
+        .trim()
+        .toLowerCase()
+        .replace(/\([^)]*\)/g, ' ')
+        .replace(/\[[^\]]*\]/g, ' ')
+        .replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')
+        .replace(/^(the|a|an)\s+/g, '')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
 }
 
 function pushChatKeyCandidate(candidates, value) {
@@ -45,6 +54,69 @@ function collectChatKeyCandidates(ctx = {}) {
 
 function chatScopedStorageKeys(ctx, prefix, suffix = '') {
     return collectChatKeyCandidates(ctx).map(key => `${prefix}-${key}${suffix}`);
+}
+
+const MESSAGE_HISTORY_CAP = 200;
+
+function normalizeMessageHistory(msgs) {
+    return Array.isArray(msgs) ? msgs.slice(-MESSAGE_HISTORY_CAP) : [];
+}
+
+function createMessageThreadStore(source = null) {
+    const threads = Object.create(null);
+    if (!source || typeof source !== 'object' || Array.isArray(source)) return threads;
+    for (const [name, messages] of Object.entries(source)) {
+        threads[name] = normalizeMessageHistory(messages);
+    }
+    return threads;
+}
+
+function messageHistoryKey(message) {
+    return JSON.stringify([
+        message?.type ?? '',
+        message?.text ?? '',
+        message?.time ?? '',
+        message?.ts ?? '',
+        message?.mesId ?? null,
+        message?.attachment?.url ?? '',
+        message?.attachment?.name ?? '',
+    ]);
+}
+
+function mergeMessageHistories(primary, secondary) {
+    const seen = new Set();
+    const merged = [];
+    for (const message of [...normalizeMessageHistory(primary), ...normalizeMessageHistory(secondary)]) {
+        const key = messageHistoryKey(message);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        merged.push(message);
+    }
+    return merged.sort((a, b) => {
+        const aTs = Number(a?.ts);
+        const bTs = Number(b?.ts);
+        if (Number.isFinite(aTs) && Number.isFinite(bTs) && aTs !== bTs) return aTs - bTs;
+        return 0;
+    }).slice(-MESSAGE_HISTORY_CAP);
+}
+
+function messageHistoriesEqual(a, b) {
+    const left = normalizeMessageHistory(a);
+    const right = normalizeMessageHistory(b);
+    if (left.length !== right.length) return false;
+    return left.every((message, index) => messageHistoryKey(message) === messageHistoryKey(right[index]));
+}
+
+function loadMetadataMessages(contactName, threads) {
+    if (!threads || typeof threads !== 'object' || Array.isArray(threads)) return [];
+    const exact = normalizeMessageHistory(threads[contactName]);
+    if (exact.length) return exact;
+    const requested = normalizeContactName(contactName);
+    if (!requested) return [];
+    for (const [name, messages] of Object.entries(threads)) {
+        if (normalizeContactName(name) === requested) return normalizeMessageHistory(messages);
+    }
+    return [];
 }
 
 function normalizeUnreadCount(value) {
@@ -248,6 +320,55 @@ describe('chat storage key candidates', () => {
             chatScopedStorageKeys({ getCurrentChatId: () => 'chat-file', chatId: 0 }, 'cx-msgs', '-Sarah'),
             ['cx-msgs-chat-file-Sarah', 'cx-msgs-0-Sarah', 'cx-msgs-default-Sarah', 'cx-msgs-no-chat-Sarah'],
         );
+    });
+});
+
+describe('Message metadata persistence', () => {
+    it('normalizes message history arrays and rejects invalid thread values', () => {
+        const history = Array.from({ length: MESSAGE_HISTORY_CAP + 2 }, (_, i) => ({ text: `m${i}` }));
+        assert.equal(normalizeMessageHistory(history).length, MESSAGE_HISTORY_CAP);
+        assert.equal(normalizeMessageHistory(history)[0].text, 'm2');
+        assert.deepEqual(normalizeMessageHistory(null), []);
+        assert.deepEqual(normalizeMessageHistory({ text: 'nope' }), []);
+    });
+
+    it('loads exact and case-insensitive contact threads from chat metadata', () => {
+        const threads = createMessageThreadStore({
+            Sarah: [{ type: 'sent', text: 'hi' }],
+            // Punctuation/brackets/articles intentionally verify production normalizeContactName fallback matching.
+            'The Dr. Who [Time Lord]': [{ type: 'received', text: 'run' }],
+        });
+        assert.deepEqual(loadMetadataMessages('Sarah', threads), [{ type: 'sent', text: 'hi' }]);
+        assert.deepEqual(loadMetadataMessages('dr who', threads), [{ type: 'received', text: 'run' }]);
+        assert.deepEqual(loadMetadataMessages('Unknown', threads), []);
+        assert.deepEqual(loadMetadataMessages('Sarah', []), []);
+    });
+
+    it('stores metadata threads in a null-prototype object for reserved contact names', () => {
+        const source = Object.create(null);
+        source.__proto__ = [{ type: 'sent', text: 'proto' }];
+        source.constructor = [{ type: 'received', text: 'ctor' }];
+        source.prototype = [{ type: 'sent', text: 'prototype' }];
+        const threads = createMessageThreadStore(source);
+        assert.equal(Object.getPrototypeOf(threads), null);
+        assert.deepEqual(loadMetadataMessages('__proto__', threads), [{ type: 'sent', text: 'proto' }]);
+        assert.deepEqual(loadMetadataMessages('constructor', threads), [{ type: 'received', text: 'ctor' }]);
+        assert.deepEqual(loadMetadataMessages('prototype', threads), [{ type: 'sent', text: 'prototype' }]);
+        assert.equal({}.polluted, undefined);
+    });
+
+    it('merges localStorage and metadata histories without duplicating mirrored messages', () => {
+        const metadata = [
+            { type: 'sent', text: 'first', time: '9:00 AM', ts: 1 },
+            { type: 'received', text: 'second', time: '9:01 AM', ts: 2 },
+        ];
+        const local = [
+            { type: 'sent', text: 'first', time: '9:00 AM', ts: 1 },
+            { type: 'sent', text: 'third', time: '9:02 AM', ts: 3 },
+        ];
+        assert.deepEqual(mergeMessageHistories(metadata, local).map(message => message.text), ['first', 'second', 'third']);
+        assert.equal(messageHistoriesEqual(metadata, local), false);
+        assert.equal(messageHistoriesEqual(metadata, metadata), true);
     });
 });
 
@@ -532,6 +653,20 @@ describe('chat persistence source shape', () => {
         assert.match(source, /function readFirstLocalStorageJson\(keys, fallback = null\)/);
         assert.match(source, /function storeKeys\(contactName\)/);
         assert.match(source, /readFirstLocalStorageJson\(storeKeys\(contactName\), \[\]\)/);
+    });
+
+    it('persists SMS threads into chat metadata as a reload-safe backing store', () => {
+        assert.match(source, /function createMessageThreadStore\(source = null\)/);
+        assert.match(source, /Object\.create\(null\)/);
+        assert.match(source, /state\.messageThreads = createMessageThreadStore\(state\.messageThreads\)/);
+        assert.match(source, /function mergeMessageHistories\(primary, secondary\)/);
+        assert.match(source, /function loadMetadataMessages\(contactName\)/);
+        assert.match(source, /function saveMetadataMessages\(contactName, history\)/);
+        assert.match(source, /saveExtensionChatState\(\{ messageThreads: threads \}, \{ debounced: true \}\)/);
+        assert.match(source, /const merged = mergeMessageHistories\(metadataMessages, localMessages\)/);
+        assert.match(source, /saveMetadataMessages\(contactName, history\);/);
+        assert.match(source, /localStorage\.setItem\(storeKey\(contactName\), JSON\.stringify\(history\)\)/);
+        assert.match(source, /Object\.keys\(threads\)[\s\S]*normalizeMessageHistory\(threads\[name\]\)\.length[\s\S]*names\.add\(name\)/);
     });
 
     it('aggregates unread fallbacks instead of returning on invalid primary keys', () => {

@@ -182,6 +182,15 @@ function currentChatId() {
     return chatKey();
 }
 
+function createMessageThreadStore(source = null) {
+    const threads = Object.create(null);
+    if (!source || typeof source !== 'object' || Array.isArray(source)) return threads;
+    for (const [name, messages] of Object.entries(source)) {
+        threads[name] = normalizeMessageHistory(messages);
+    }
+    return threads;
+}
+
 function getExtensionChatState() {
     const ctx = getContext();
     ctx.chatMetadata[EXT] = ctx.chatMetadata[EXT] || {};
@@ -189,18 +198,23 @@ function getExtensionChatState() {
     const state = ctx.chatMetadata[EXT].privatePhone;
     let mutated = false;
     if (!Array.isArray(state.events)) { state.events = []; mutated = true; }
+    if (!state.messageThreads || typeof state.messageThreads !== 'object' || Array.isArray(state.messageThreads) || Object.getPrototypeOf(state.messageThreads) !== null) {
+        state.messageThreads = createMessageThreadStore(state.messageThreads);
+        mutated = true;
+    }
     if (!Number.isFinite(Number(state.lastPollAt))) { state.lastPollAt = 0; mutated = true; }
     if (!Array.isArray(state.lastPollSummary)) { state.lastPollSummary = []; mutated = true; }
     if (mutated && typeof ctx.saveMetadata === 'function') ctx.saveMetadata();
     return state;
 }
 
-function saveExtensionChatState(patch = {}) {
+function saveExtensionChatState(patch = {}, { debounced = false } = {}) {
     const ctx = getContext();
     const current = getExtensionChatState();
     ctx.chatMetadata[EXT] = ctx.chatMetadata[EXT] || {};
     ctx.chatMetadata[EXT].privatePhone = { ...current, ...patch };
-    ctx.saveMetadata();
+    if (debounced && typeof ctx.saveMetadataDebounced === 'function') ctx.saveMetadataDebounced();
+    else ctx.saveMetadata();
     return ctx.chatMetadata[EXT].privatePhone;
 }
 
@@ -2123,11 +2137,120 @@ function lastMessageTs(contactName) {
 }
 
 function loadMessages(contactName) {
+    const metadataMessages = loadMetadataMessages(contactName);
+
     try {
         const parsed = readFirstLocalStorageJson(storeKeys(contactName), []);
-        return Array.isArray(parsed) ? parsed : [];
+        const localMessages = normalizeMessageHistory(parsed);
+        if (metadataMessages.length) {
+            const merged = mergeMessageHistories(metadataMessages, localMessages);
+            if (!messageHistoriesEqual(merged, metadataMessages) || !messageHistoriesEqual(merged, localMessages)) {
+                saveMessages(contactName, merged);
+            }
+            return merged;
+        }
+        if (localMessages.length) saveMetadataMessages(contactName, localMessages);
+        return localMessages;
     }
-    catch { return []; }
+    catch { return metadataMessages; }
+}
+
+/** Return a capped SMS history array, or an empty array for invalid stored data. */
+function normalizeMessageHistory(msgs) {
+    return Array.isArray(msgs) ? msgs.slice(-MESSAGE_HISTORY_CAP) : [];
+}
+
+/** Stable-enough identity for mirrored localStorage/chatMetadata SMS records. */
+function messageHistoryKey(message) {
+    return JSON.stringify([
+        message?.type ?? '',
+        message?.text ?? '',
+        message?.time ?? '',
+        message?.ts ?? '',
+        message?.mesId ?? null,
+        message?.attachment?.url ?? '',
+        message?.attachment?.name ?? '',
+    ]);
+}
+
+/** Merge metadata and localStorage histories, removing mirrored duplicates. */
+function mergeMessageHistories(primary, secondary) {
+    const seen = new Set();
+    const merged = [];
+    for (const message of [...normalizeMessageHistory(primary), ...normalizeMessageHistory(secondary)]) {
+        const key = messageHistoryKey(message);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        merged.push(message);
+    }
+    return merged.sort((a, b) => {
+        const aTs = Number(a?.ts);
+        const bTs = Number(b?.ts);
+        if (Number.isFinite(aTs) && Number.isFinite(bTs) && aTs !== bTs) return aTs - bTs;
+        return 0;
+    }).slice(-MESSAGE_HISTORY_CAP);
+}
+
+/** Compare normalized histories by the same identity used for de-duplication. */
+function messageHistoriesEqual(a, b) {
+    const left = normalizeMessageHistory(a);
+    const right = normalizeMessageHistory(b);
+    if (left.length !== right.length) return false;
+    return left.every((message, index) => messageHistoryKey(message) === messageHistoryKey(right[index]));
+}
+
+/**
+ * Load an SMS thread from per-chat metadata. Exact contact keys win, then a
+ * normalized-name fallback keeps renamed/case-shifted contacts attached to
+ * their existing thread.
+ */
+function loadMetadataMessages(contactName) {
+    try {
+        const threads = getExtensionChatState().messageThreads;
+        if (!threads || typeof threads !== 'object' || Array.isArray(threads)) return [];
+        const exact = normalizeMessageHistory(threads[contactName]);
+        if (exact.length) return exact;
+        const requested = normalizeContactName(contactName);
+        if (!requested) return [];
+        for (const [name, messages] of Object.entries(threads)) {
+            if (normalizeContactName(name) === requested) return normalizeMessageHistory(messages);
+        }
+    } catch (error) {
+        console.warn('[command-x] metadata message load', error);
+    }
+    return [];
+}
+
+/** Save a capped SMS thread into chat metadata so it survives browser reloads. */
+function saveMetadataMessages(contactName, history) {
+    try {
+        const state = getExtensionChatState();
+        const threads = createMessageThreadStore(state.messageThreads);
+        threads[contactName] = normalizeMessageHistory(history);
+        saveExtensionChatState({ messageThreads: threads }, { debounced: true });
+        return true;
+    } catch (error) {
+        console.warn('[command-x] metadata message save', error);
+        return false;
+    }
+}
+
+/**
+ * Remove metadata-backed SMS threads by exact or normalized contact name,
+ * matching the rename/delete behavior used for localStorage keys.
+ */
+function removeMetadataMessages(contactName) {
+    try {
+        const state = getExtensionChatState();
+        const threads = createMessageThreadStore(state.messageThreads);
+        const requested = normalizeContactName(contactName);
+        for (const name of Object.keys(threads)) {
+            if (name === contactName || normalizeContactName(name) === requested) delete threads[name];
+        }
+        saveExtensionChatState({ messageThreads: threads });
+    } catch (error) {
+        console.warn('[command-x] metadata message remove', error);
+    }
 }
 
 function stripSmsAttachment(message) {
@@ -2146,7 +2269,8 @@ function notifyMessageSaveFailed(contactName, message) {
 }
 
 function saveMessages(contactName, msgs) {
-    const history = (Array.isArray(msgs) ? msgs : []).slice(-MESSAGE_HISTORY_CAP);
+    const history = normalizeMessageHistory(msgs);
+    saveMetadataMessages(contactName, history);
     try {
         localStorage.setItem(storeKey(contactName), JSON.stringify(history));
     } catch (e) {
@@ -2210,6 +2334,16 @@ function historyContactNames() {
             if (name) names.add(name);
             break;
         }
+    }
+    try {
+        const threads = getExtensionChatState().messageThreads;
+        if (threads && typeof threads === 'object' && !Array.isArray(threads)) {
+            for (const name of Object.keys(threads)) {
+                if (name && normalizeMessageHistory(threads[name]).length) names.add(name);
+            }
+        }
+    } catch (error) {
+        console.warn('[command-x] metadata history contacts', error);
     }
     const result = [...names];
     _historyContactNamesCache = { chatId, names: result };
@@ -3160,6 +3294,7 @@ function renameContactThread(oldName, newName) {
     if (oldMsgs.length) {
         saveMessages(newName, oldMsgs);
         removeLocalStorageKeys(storeKeys(oldName));
+        removeMetadataMessages(oldName);
         invalidateContactCaches();
     }
     const unread = getUnread(oldName);
@@ -3178,6 +3313,7 @@ function deleteStoredContact(name) {
     stored.splice(idx, 1);
     saveNpcs(stored);
     removeLocalStorageKeys(storeKeys(name));
+    removeMetadataMessages(name);
     removeLocalStorageKeys(unreadKeys(name));
     invalidateContactCaches();
     composeQueue = composeQueue.filter(item => item.contactName !== name);

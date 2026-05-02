@@ -77,6 +77,38 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-05-02 — SMS metadata persistence review hardening (commit pending)
+
+**Context:** Follow-up review pass for metadata-backed SMS thread persistence.
+
+**Notes for future agents:**
+- `chatMetadata[command-x].privatePhone.messageThreads` is normalized into a
+  null-prototype object via `createMessageThreadStore()` before assignment, so
+  reserved contact names like `__proto__`, `constructor`, and `prototype` remain
+  data keys instead of mutating object prototypes.
+- `saveMetadataMessages()` uses the debounced metadata save path; immediate
+  metadata saves remain for less frequent private-phone state updates.
+- `test/helpers.test.mjs` mirrors the production `normalizeContactName()` logic
+  for metadata thread matching. Keep the inline copy in sync when changing
+  contact-name normalization.
+
+### 2026-05-02 — SMS chats persist through reload via chat metadata (commit pending)
+
+**Context:** Fixed SMS threads appearing empty after browser reloads by adding a
+chat-metadata backing store alongside the existing localStorage message keys.
+
+**Notes for future agents:**
+- `saveMessages()` now writes each contact thread to
+  `chatMetadata[command-x].privatePhone.messageThreads` before attempting the
+  existing localStorage write, so SMS history survives reloads even when
+  localStorage is unavailable or loses data.
+- `loadMessages()` merges metadata-backed and localStorage-backed threads,
+  de-duplicating mirrored records; older localStorage-only histories migrate into
+  metadata on first read for backward compatibility.
+- `historyContactNames()` includes metadata thread names as well as
+  localStorage-prefixed keys, so history-only contacts remain visible after a
+  reload.
+
 ### 2026-04-30 — SMS photos save to SillyTavern character galleries (commit pending)
 
 **Context:** Replaced the localStorage data-URL SMS photo path with SillyTavern's
