@@ -77,6 +77,21 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-05-02 — SMS metadata persistence review hardening (commit pending)
+
+**Context:** Follow-up review pass for metadata-backed SMS thread persistence.
+
+**Notes for future agents:**
+- `chatMetadata[command-x].privatePhone.messageThreads` is normalized into a
+  null-prototype object via `createMessageThreadStore()` before assignment, so
+  reserved contact names like `__proto__`, `constructor`, and `prototype` remain
+  data keys instead of mutating object prototypes.
+- `saveMetadataMessages()` uses the debounced metadata save path; immediate
+  metadata saves remain for less frequent private-phone state updates.
+- `test/helpers.test.mjs` mirrors the production `normalizeContactName()` logic
+  for metadata thread matching. Keep the inline copy in sync when changing
+  contact-name normalization.
+
 ### 2026-05-02 — SMS chats persist through reload via chat metadata (commit pending)
 
 **Context:** Fixed SMS threads appearing empty after browser reloads by adding a

@@ -22,7 +22,16 @@ function escHtml(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,
 function escAttr(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
 function normalizeContactName(name) {
-    return String(name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    return String(name || '')
+        .trim()
+        .toLowerCase()
+        .replace(/\([^)]*\)/g, ' ')
+        .replace(/\[[^\]]*\]/g, ' ')
+        .replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')
+        .replace(/^(the|a|an)\s+/g, '')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
 }
 
 function pushChatKeyCandidate(candidates, value) {
@@ -51,6 +60,15 @@ const MESSAGE_HISTORY_CAP = 200;
 
 function normalizeMessageHistory(msgs) {
     return Array.isArray(msgs) ? msgs.slice(-MESSAGE_HISTORY_CAP) : [];
+}
+
+function createMessageThreadStore(source = null) {
+    const threads = Object.create(null);
+    if (!source || typeof source !== 'object' || Array.isArray(source)) return threads;
+    for (const [name, messages] of Object.entries(source)) {
+        threads[name] = normalizeMessageHistory(messages);
+    }
+    return threads;
 }
 
 function messageHistoryKey(message) {
@@ -315,15 +333,28 @@ describe('Message metadata persistence', () => {
     });
 
     it('loads exact and case-insensitive contact threads from chat metadata', () => {
-        const threads = {
+        const threads = createMessageThreadStore({
             Sarah: [{ type: 'sent', text: 'hi' }],
-            // Double space intentionally verifies normalizeContactName fallback matching.
-            'Dr  Who': [{ type: 'received', text: 'run' }],
-        };
+            // Punctuation/brackets/articles intentionally verify production normalizeContactName fallback matching.
+            'The Dr. Who [Time Lord]': [{ type: 'received', text: 'run' }],
+        });
         assert.deepEqual(loadMetadataMessages('Sarah', threads), [{ type: 'sent', text: 'hi' }]);
         assert.deepEqual(loadMetadataMessages('dr who', threads), [{ type: 'received', text: 'run' }]);
         assert.deepEqual(loadMetadataMessages('Unknown', threads), []);
         assert.deepEqual(loadMetadataMessages('Sarah', []), []);
+    });
+
+    it('stores metadata threads in a null-prototype object for reserved contact names', () => {
+        const source = Object.create(null);
+        source.__proto__ = [{ type: 'sent', text: 'proto' }];
+        source.constructor = [{ type: 'received', text: 'ctor' }];
+        source.prototype = [{ type: 'sent', text: 'prototype' }];
+        const threads = createMessageThreadStore(source);
+        assert.equal(Object.getPrototypeOf(threads), null);
+        assert.deepEqual(loadMetadataMessages('__proto__', threads), [{ type: 'sent', text: 'proto' }]);
+        assert.deepEqual(loadMetadataMessages('constructor', threads), [{ type: 'received', text: 'ctor' }]);
+        assert.deepEqual(loadMetadataMessages('prototype', threads), [{ type: 'sent', text: 'prototype' }]);
+        assert.equal({}.polluted, undefined);
     });
 
     it('merges localStorage and metadata histories without duplicating mirrored messages', () => {
@@ -625,11 +656,13 @@ describe('chat persistence source shape', () => {
     });
 
     it('persists SMS threads into chat metadata as a reload-safe backing store', () => {
-        assert.match(source, /state\.messageThreads = \{\}/);
+        assert.match(source, /function createMessageThreadStore\(source = null\)/);
+        assert.match(source, /Object\.create\(null\)/);
+        assert.match(source, /state\.messageThreads = createMessageThreadStore\(state\.messageThreads\)/);
         assert.match(source, /function mergeMessageHistories\(primary, secondary\)/);
         assert.match(source, /function loadMetadataMessages\(contactName\)/);
         assert.match(source, /function saveMetadataMessages\(contactName, history\)/);
-        assert.match(source, /saveExtensionChatState\(\{ messageThreads: threads \}\)/);
+        assert.match(source, /saveExtensionChatState\(\{ messageThreads: threads \}, \{ debounced: true \}\)/);
         assert.match(source, /const merged = mergeMessageHistories\(metadataMessages, localMessages\)/);
         assert.match(source, /saveMetadataMessages\(contactName, history\);/);
         assert.match(source, /localStorage\.setItem\(storeKey\(contactName\), JSON\.stringify\(history\)\)/);

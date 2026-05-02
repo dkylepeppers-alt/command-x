@@ -182,6 +182,15 @@ function currentChatId() {
     return chatKey();
 }
 
+function createMessageThreadStore(source = null) {
+    const threads = Object.create(null);
+    if (!source || typeof source !== 'object' || Array.isArray(source)) return threads;
+    for (const [name, messages] of Object.entries(source)) {
+        threads[name] = normalizeMessageHistory(messages);
+    }
+    return threads;
+}
+
 function getExtensionChatState() {
     const ctx = getContext();
     ctx.chatMetadata[EXT] = ctx.chatMetadata[EXT] || {};
@@ -189,19 +198,23 @@ function getExtensionChatState() {
     const state = ctx.chatMetadata[EXT].privatePhone;
     let mutated = false;
     if (!Array.isArray(state.events)) { state.events = []; mutated = true; }
-    if (!state.messageThreads || typeof state.messageThreads !== 'object' || Array.isArray(state.messageThreads)) { state.messageThreads = {}; mutated = true; }
+    if (!state.messageThreads || typeof state.messageThreads !== 'object' || Array.isArray(state.messageThreads) || Object.getPrototypeOf(state.messageThreads) !== null) {
+        state.messageThreads = createMessageThreadStore(state.messageThreads);
+        mutated = true;
+    }
     if (!Number.isFinite(Number(state.lastPollAt))) { state.lastPollAt = 0; mutated = true; }
     if (!Array.isArray(state.lastPollSummary)) { state.lastPollSummary = []; mutated = true; }
     if (mutated && typeof ctx.saveMetadata === 'function') ctx.saveMetadata();
     return state;
 }
 
-function saveExtensionChatState(patch = {}) {
+function saveExtensionChatState(patch = {}, { debounced = false } = {}) {
     const ctx = getContext();
     const current = getExtensionChatState();
     ctx.chatMetadata[EXT] = ctx.chatMetadata[EXT] || {};
     ctx.chatMetadata[EXT].privatePhone = { ...current, ...patch };
-    ctx.saveMetadata();
+    if (debounced && typeof ctx.saveMetadataDebounced === 'function') ctx.saveMetadataDebounced();
+    else ctx.saveMetadata();
     return ctx.chatMetadata[EXT].privatePhone;
 }
 
@@ -2212,11 +2225,9 @@ function loadMetadataMessages(contactName) {
 function saveMetadataMessages(contactName, history) {
     try {
         const state = getExtensionChatState();
-        const threads = state.messageThreads && typeof state.messageThreads === 'object' && !Array.isArray(state.messageThreads)
-            ? { ...state.messageThreads }
-            : {};
+        const threads = createMessageThreadStore(state.messageThreads);
         threads[contactName] = normalizeMessageHistory(history);
-        saveExtensionChatState({ messageThreads: threads });
+        saveExtensionChatState({ messageThreads: threads }, { debounced: true });
         return true;
     } catch (error) {
         console.warn('[command-x] metadata message save', error);
@@ -2231,9 +2242,7 @@ function saveMetadataMessages(contactName, history) {
 function removeMetadataMessages(contactName) {
     try {
         const state = getExtensionChatState();
-        const threads = state.messageThreads && typeof state.messageThreads === 'object' && !Array.isArray(state.messageThreads)
-            ? { ...state.messageThreads }
-            : {};
+        const threads = createMessageThreadStore(state.messageThreads);
         const requested = normalizeContactName(contactName);
         for (const name of Object.keys(threads)) {
             if (name === contactName || normalizeContactName(name) === requested) delete threads[name];
