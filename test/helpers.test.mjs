@@ -269,7 +269,7 @@ describe('chat storage key candidates', () => {
     });
 });
 
-describe('SMS message metadata persistence helpers', () => {
+describe('Message metadata persistence', () => {
     it('normalizes message history arrays and rejects invalid thread values', () => {
         const history = Array.from({ length: MESSAGE_HISTORY_CAP + 2 }, (_, i) => ({ text: `m${i}` }));
         assert.equal(normalizeMessageHistory(history).length, MESSAGE_HISTORY_CAP);

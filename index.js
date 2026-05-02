@@ -2136,10 +2136,16 @@ function loadMessages(contactName) {
     catch { return []; }
 }
 
+/** Return a capped SMS history array, or an empty array for invalid stored data. */
 function normalizeMessageHistory(msgs) {
     return Array.isArray(msgs) ? msgs.slice(-MESSAGE_HISTORY_CAP) : [];
 }
 
+/**
+ * Load an SMS thread from per-chat metadata. Exact contact keys win, then a
+ * normalized-name fallback keeps renamed/case-shifted contacts attached to
+ * their existing thread.
+ */
 function loadMetadataMessages(contactName) {
     try {
         const threads = getExtensionChatState().messageThreads;
@@ -2157,6 +2163,7 @@ function loadMetadataMessages(contactName) {
     return [];
 }
 
+/** Save a capped SMS thread into chat metadata so it survives browser reloads. */
 function saveMetadataMessages(contactName, history) {
     try {
         const state = getExtensionChatState();
@@ -2172,6 +2179,10 @@ function saveMetadataMessages(contactName, history) {
     }
 }
 
+/**
+ * Remove metadata-backed SMS threads by exact or normalized contact name,
+ * matching the rename/delete behavior used for localStorage keys.
+ */
 function removeMetadataMessages(contactName) {
     try {
         const state = getExtensionChatState();
