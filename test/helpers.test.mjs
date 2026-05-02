@@ -47,6 +47,24 @@ function chatScopedStorageKeys(ctx, prefix, suffix = '') {
     return collectChatKeyCandidates(ctx).map(key => `${prefix}-${key}${suffix}`);
 }
 
+const MESSAGE_HISTORY_CAP = 200;
+
+function normalizeMessageHistory(msgs) {
+    return Array.isArray(msgs) ? msgs.slice(-MESSAGE_HISTORY_CAP) : [];
+}
+
+function loadMetadataMessages(contactName, threads) {
+    if (!threads || typeof threads !== 'object' || Array.isArray(threads)) return [];
+    const exact = normalizeMessageHistory(threads[contactName]);
+    if (exact.length) return exact;
+    const requested = normalizeContactName(contactName);
+    if (!requested) return [];
+    for (const [name, messages] of Object.entries(threads)) {
+        if (normalizeContactName(name) === requested) return normalizeMessageHistory(messages);
+    }
+    return [];
+}
+
 function normalizeUnreadCount(value) {
     const count = parseInt(value || '0', 10);
     return Number.isFinite(count) && count > 0 ? count : 0;
@@ -248,6 +266,27 @@ describe('chat storage key candidates', () => {
             chatScopedStorageKeys({ getCurrentChatId: () => 'chat-file', chatId: 0 }, 'cx-msgs', '-Sarah'),
             ['cx-msgs-chat-file-Sarah', 'cx-msgs-0-Sarah', 'cx-msgs-default-Sarah', 'cx-msgs-no-chat-Sarah'],
         );
+    });
+});
+
+describe('SMS message metadata persistence helpers', () => {
+    it('normalizes message history arrays and rejects invalid thread values', () => {
+        const history = Array.from({ length: MESSAGE_HISTORY_CAP + 2 }, (_, i) => ({ text: `m${i}` }));
+        assert.equal(normalizeMessageHistory(history).length, MESSAGE_HISTORY_CAP);
+        assert.equal(normalizeMessageHistory(history)[0].text, 'm2');
+        assert.deepEqual(normalizeMessageHistory(null), []);
+        assert.deepEqual(normalizeMessageHistory({ text: 'nope' }), []);
+    });
+
+    it('loads exact and case-insensitive contact threads from chat metadata', () => {
+        const threads = {
+            Sarah: [{ type: 'sent', text: 'hi' }],
+            'Dr  Who': [{ type: 'received', text: 'run' }],
+        };
+        assert.deepEqual(loadMetadataMessages('Sarah', threads), [{ type: 'sent', text: 'hi' }]);
+        assert.deepEqual(loadMetadataMessages('dr who', threads), [{ type: 'received', text: 'run' }]);
+        assert.deepEqual(loadMetadataMessages('Unknown', threads), []);
+        assert.deepEqual(loadMetadataMessages('Sarah', []), []);
     });
 });
 
@@ -532,6 +571,15 @@ describe('chat persistence source shape', () => {
         assert.match(source, /function readFirstLocalStorageJson\(keys, fallback = null\)/);
         assert.match(source, /function storeKeys\(contactName\)/);
         assert.match(source, /readFirstLocalStorageJson\(storeKeys\(contactName\), \[\]\)/);
+    });
+
+    it('persists SMS threads into chat metadata as a reload-safe backing store', () => {
+        assert.match(source, /state\.messageThreads = \{\}/);
+        assert.match(source, /function loadMetadataMessages\(contactName\)/);
+        assert.match(source, /function saveMetadataMessages\(contactName, history\)/);
+        assert.match(source, /saveExtensionChatState\(\{ messageThreads: threads \}\)/);
+        assert.match(source, /saveMetadataMessages\(contactName, history\);[\s\S]*localStorage\.setItem\(storeKey\(contactName\), JSON\.stringify\(history\)\)/);
+        assert.match(source, /Object\.keys\(threads\)[\s\S]*normalizeMessageHistory\(threads\[name\]\)\.length[\s\S]*names\.add\(name\)/);
     });
 
     it('aggregates unread fallbacks instead of returning on invalid primary keys', () => {
