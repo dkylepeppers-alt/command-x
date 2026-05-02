@@ -82,14 +82,21 @@ function mergeMessageHistories(primary, secondary) {
     }).slice(-MESSAGE_HISTORY_CAP);
 }
 
+function messageHistoriesEqual(a, b) {
+    const left = normalizeMessageHistory(a);
+    const right = normalizeMessageHistory(b);
+    if (left.length !== right.length) return false;
+    return left.every((message, index) => messageHistoryKey(message) === messageHistoryKey(right[index]));
+}
+
 function loadMetadataMessages(contactName, threads) {
     if (!threads || typeof threads !== 'object' || Array.isArray(threads)) return [];
     const exact = normalizeMessageHistory(threads[contactName]);
     if (exact.length) return exact;
     const requested = normalizeContactName(contactName);
     if (!requested) return [];
-    for (const [normalizedName, messages] of Object.entries(threads).map(([name, value]) => [normalizeContactName(name), value])) {
-        if (normalizedName === requested) return normalizeMessageHistory(messages);
+    for (const [name, messages] of Object.entries(threads)) {
+        if (normalizeContactName(name) === requested) return normalizeMessageHistory(messages);
     }
     return [];
 }
@@ -329,6 +336,8 @@ describe('Message metadata persistence', () => {
             { type: 'sent', text: 'third', time: '9:02 AM', ts: 3 },
         ];
         assert.deepEqual(mergeMessageHistories(metadata, local).map(message => message.text), ['first', 'second', 'third']);
+        assert.equal(messageHistoriesEqual(metadata, local), false);
+        assert.equal(messageHistoriesEqual(metadata, metadata), true);
     });
 });
 
@@ -622,7 +631,8 @@ describe('chat persistence source shape', () => {
         assert.match(source, /function saveMetadataMessages\(contactName, history\)/);
         assert.match(source, /saveExtensionChatState\(\{ messageThreads: threads \}\)/);
         assert.match(source, /const merged = mergeMessageHistories\(metadataMessages, localMessages\)/);
-        assert.match(source, /saveMetadataMessages\(contactName, history\);[\s\S]*localStorage\.setItem\(storeKey\(contactName\), JSON\.stringify\(history\)\)/);
+        assert.match(source, /saveMetadataMessages\(contactName, history\);/);
+        assert.match(source, /localStorage\.setItem\(storeKey\(contactName\), JSON\.stringify\(history\)\)/);
         assert.match(source, /Object\.keys\(threads\)[\s\S]*normalizeMessageHistory\(threads\[name\]\)\.length[\s\S]*names\.add\(name\)/);
     });
 

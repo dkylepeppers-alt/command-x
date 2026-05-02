@@ -2131,7 +2131,7 @@ function loadMessages(contactName) {
         const localMessages = normalizeMessageHistory(parsed);
         if (metadataMessages.length) {
             const merged = mergeMessageHistories(metadataMessages, localMessages);
-            if (merged.length !== metadataMessages.length || merged.length !== localMessages.length) {
+            if (!messageHistoriesEqual(merged, metadataMessages) || !messageHistoriesEqual(merged, localMessages)) {
                 saveMessages(contactName, merged);
             }
             return merged;
@@ -2178,6 +2178,14 @@ function mergeMessageHistories(primary, secondary) {
     }).slice(-MESSAGE_HISTORY_CAP);
 }
 
+/** Compare normalized histories by the same identity used for de-duplication. */
+function messageHistoriesEqual(a, b) {
+    const left = normalizeMessageHistory(a);
+    const right = normalizeMessageHistory(b);
+    if (left.length !== right.length) return false;
+    return left.every((message, index) => messageHistoryKey(message) === messageHistoryKey(right[index]));
+}
+
 /**
  * Load an SMS thread from per-chat metadata. Exact contact keys win, then a
  * normalized-name fallback keeps renamed/case-shifted contacts attached to
@@ -2191,8 +2199,8 @@ function loadMetadataMessages(contactName) {
         if (exact.length) return exact;
         const requested = normalizeContactName(contactName);
         if (!requested) return [];
-        for (const [normalizedName, messages] of Object.entries(threads).map(([name, value]) => [normalizeContactName(name), value])) {
-            if (normalizedName === requested) return normalizeMessageHistory(messages);
+        for (const [name, messages] of Object.entries(threads)) {
+            if (normalizeContactName(name) === requested) return normalizeMessageHistory(messages);
         }
     } catch (error) {
         console.warn('[command-x] metadata message load', error);
@@ -2227,8 +2235,8 @@ function removeMetadataMessages(contactName) {
             ? { ...state.messageThreads }
             : {};
         const requested = normalizeContactName(contactName);
-        for (const [name, normalizedName] of Object.keys(threads).map(key => [key, normalizeContactName(key)])) {
-            if (name === contactName || normalizedName === requested) delete threads[name];
+        for (const name of Object.keys(threads)) {
+            if (name === contactName || normalizeContactName(name) === requested) delete threads[name];
         }
         saveExtensionChatState({ messageThreads: threads });
     } catch (error) {
