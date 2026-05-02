@@ -2125,20 +2125,57 @@ function lastMessageTs(contactName) {
 
 function loadMessages(contactName) {
     const metadataMessages = loadMetadataMessages(contactName);
-    if (metadataMessages.length) return metadataMessages;
 
     try {
         const parsed = readFirstLocalStorageJson(storeKeys(contactName), []);
         const localMessages = normalizeMessageHistory(parsed);
+        if (metadataMessages.length) {
+            const merged = mergeMessageHistories(metadataMessages, localMessages);
+            if (merged.length !== metadataMessages.length || merged.length !== localMessages.length) {
+                saveMessages(contactName, merged);
+            }
+            return merged;
+        }
         if (localMessages.length) saveMetadataMessages(contactName, localMessages);
         return localMessages;
     }
-    catch { return []; }
+    catch { return metadataMessages; }
 }
 
 /** Return a capped SMS history array, or an empty array for invalid stored data. */
 function normalizeMessageHistory(msgs) {
     return Array.isArray(msgs) ? msgs.slice(-MESSAGE_HISTORY_CAP) : [];
+}
+
+/** Stable-enough identity for mirrored localStorage/chatMetadata SMS records. */
+function messageHistoryKey(message) {
+    return JSON.stringify([
+        message?.type ?? '',
+        message?.text ?? '',
+        message?.time ?? '',
+        message?.ts ?? '',
+        message?.mesId ?? null,
+        message?.attachment?.url ?? '',
+        message?.attachment?.name ?? '',
+    ]);
+}
+
+/** Merge metadata and localStorage histories, removing mirrored duplicates. */
+function mergeMessageHistories(primary, secondary) {
+    const seen = new Set();
+    const merged = [];
+    for (const message of [...normalizeMessageHistory(primary), ...normalizeMessageHistory(secondary)]) {
+        const key = messageHistoryKey(message);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        merged.push(message);
+    }
+    return merged.sort((a, b) => {
+        const aTs = Number(a?.ts);
+        const bTs = Number(b?.ts);
+        if (Number.isFinite(aTs) && Number.isFinite(bTs) && aTs !== bTs) return aTs - bTs;
+        return 0;
+    }).slice(-MESSAGE_HISTORY_CAP);
 }
 
 /**
@@ -2154,8 +2191,8 @@ function loadMetadataMessages(contactName) {
         if (exact.length) return exact;
         const requested = normalizeContactName(contactName);
         if (!requested) return [];
-        for (const [name, messages] of Object.entries(threads)) {
-            if (normalizeContactName(name) === requested) return normalizeMessageHistory(messages);
+        for (const [normalizedName, messages] of Object.entries(threads).map(([name, value]) => [normalizeContactName(name), value])) {
+            if (normalizedName === requested) return normalizeMessageHistory(messages);
         }
     } catch (error) {
         console.warn('[command-x] metadata message load', error);
@@ -2190,8 +2227,8 @@ function removeMetadataMessages(contactName) {
             ? { ...state.messageThreads }
             : {};
         const requested = normalizeContactName(contactName);
-        for (const name of Object.keys(threads)) {
-            if (name === contactName || normalizeContactName(name) === requested) delete threads[name];
+        for (const [name, normalizedName] of Object.keys(threads).map(key => [key, normalizeContactName(key)])) {
+            if (name === contactName || normalizedName === requested) delete threads[name];
         }
         saveExtensionChatState({ messageThreads: threads });
     } catch (error) {

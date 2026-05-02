@@ -53,14 +53,43 @@ function normalizeMessageHistory(msgs) {
     return Array.isArray(msgs) ? msgs.slice(-MESSAGE_HISTORY_CAP) : [];
 }
 
+function messageHistoryKey(message) {
+    return JSON.stringify([
+        message?.type ?? '',
+        message?.text ?? '',
+        message?.time ?? '',
+        message?.ts ?? '',
+        message?.mesId ?? null,
+        message?.attachment?.url ?? '',
+        message?.attachment?.name ?? '',
+    ]);
+}
+
+function mergeMessageHistories(primary, secondary) {
+    const seen = new Set();
+    const merged = [];
+    for (const message of [...normalizeMessageHistory(primary), ...normalizeMessageHistory(secondary)]) {
+        const key = messageHistoryKey(message);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        merged.push(message);
+    }
+    return merged.sort((a, b) => {
+        const aTs = Number(a?.ts);
+        const bTs = Number(b?.ts);
+        if (Number.isFinite(aTs) && Number.isFinite(bTs) && aTs !== bTs) return aTs - bTs;
+        return 0;
+    }).slice(-MESSAGE_HISTORY_CAP);
+}
+
 function loadMetadataMessages(contactName, threads) {
     if (!threads || typeof threads !== 'object' || Array.isArray(threads)) return [];
     const exact = normalizeMessageHistory(threads[contactName]);
     if (exact.length) return exact;
     const requested = normalizeContactName(contactName);
     if (!requested) return [];
-    for (const [name, messages] of Object.entries(threads)) {
-        if (normalizeContactName(name) === requested) return normalizeMessageHistory(messages);
+    for (const [normalizedName, messages] of Object.entries(threads).map(([name, value]) => [normalizeContactName(name), value])) {
+        if (normalizedName === requested) return normalizeMessageHistory(messages);
     }
     return [];
 }
@@ -281,12 +310,25 @@ describe('Message metadata persistence', () => {
     it('loads exact and case-insensitive contact threads from chat metadata', () => {
         const threads = {
             Sarah: [{ type: 'sent', text: 'hi' }],
+            // Double space intentionally verifies normalizeContactName fallback matching.
             'Dr  Who': [{ type: 'received', text: 'run' }],
         };
         assert.deepEqual(loadMetadataMessages('Sarah', threads), [{ type: 'sent', text: 'hi' }]);
         assert.deepEqual(loadMetadataMessages('dr who', threads), [{ type: 'received', text: 'run' }]);
         assert.deepEqual(loadMetadataMessages('Unknown', threads), []);
         assert.deepEqual(loadMetadataMessages('Sarah', []), []);
+    });
+
+    it('merges localStorage and metadata histories without duplicating mirrored messages', () => {
+        const metadata = [
+            { type: 'sent', text: 'first', time: '9:00 AM', ts: 1 },
+            { type: 'received', text: 'second', time: '9:01 AM', ts: 2 },
+        ];
+        const local = [
+            { type: 'sent', text: 'first', time: '9:00 AM', ts: 1 },
+            { type: 'sent', text: 'third', time: '9:02 AM', ts: 3 },
+        ];
+        assert.deepEqual(mergeMessageHistories(metadata, local).map(message => message.text), ['first', 'second', 'third']);
     });
 });
 
@@ -575,9 +617,11 @@ describe('chat persistence source shape', () => {
 
     it('persists SMS threads into chat metadata as a reload-safe backing store', () => {
         assert.match(source, /state\.messageThreads = \{\}/);
+        assert.match(source, /function mergeMessageHistories\(primary, secondary\)/);
         assert.match(source, /function loadMetadataMessages\(contactName\)/);
         assert.match(source, /function saveMetadataMessages\(contactName, history\)/);
         assert.match(source, /saveExtensionChatState\(\{ messageThreads: threads \}\)/);
+        assert.match(source, /const merged = mergeMessageHistories\(metadataMessages, localMessages\)/);
         assert.match(source, /saveMetadataMessages\(contactName, history\);[\s\S]*localStorage\.setItem\(storeKey\(contactName\), JSON\.stringify\(history\)\)/);
         assert.match(source, /Object\.keys\(threads\)[\s\S]*normalizeMessageHistory\(threads\[name\]\)\.length[\s\S]*names\.add\(name\)/);
     });

@@ -87,9 +87,9 @@ chat-metadata backing store alongside the existing localStorage message keys.
   `chatMetadata[command-x].privatePhone.messageThreads` before attempting the
   existing localStorage write, so SMS history survives reloads even when
   localStorage is unavailable or loses data.
-- `loadMessages()` prefers metadata-backed threads, but migrates older
-  localStorage-only histories into metadata on first read for backward
-  compatibility.
+- `loadMessages()` merges metadata-backed and localStorage-backed threads,
+  de-duplicating mirrored records; older localStorage-only histories migrate into
+  metadata on first read for backward compatibility.
 - `historyContactNames()` includes metadata thread names as well as
   localStorage-prefixed keys, so history-only contacts remain visible after a
   reload.
