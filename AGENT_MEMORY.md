@@ -77,6 +77,23 @@ grows large, consider moving detail into `CLAUDE.md` or `docs/`._
 
 _Newest entries first. Append a new entry here at the end of every PR._
 
+### 2026-05-02 — SMS chats persist through reload via chat metadata (commit pending)
+
+**Context:** Fixed SMS threads appearing empty after browser reloads by adding a
+chat-metadata backing store alongside the existing localStorage message keys.
+
+**Notes for future agents:**
+- `saveMessages()` now writes each contact thread to
+  `chatMetadata[command-x].privatePhone.messageThreads` before attempting the
+  existing localStorage write, so SMS history survives reloads even when
+  localStorage is unavailable or loses data.
+- `loadMessages()` prefers metadata-backed threads, but migrates older
+  localStorage-only histories into metadata on first read for backward
+  compatibility.
+- `historyContactNames()` includes metadata thread names as well as
+  localStorage-prefixed keys, so history-only contacts remain visible after a
+  reload.
+
 ### 2026-04-30 — SMS photos save to SillyTavern character galleries (commit pending)
 
 **Context:** Replaced the localStorage data-URL SMS photo path with SillyTavern's
