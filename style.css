@@ -409,23 +409,38 @@
     position: fixed; inset: 0; z-index: 10000000;
     background: rgba(0,0,0,.55); backdrop-filter: blur(4px);
     -webkit-backdrop-filter: blur(4px);
-    display: flex; align-items: center; justify-content: center;
-    padding: 24px;
+    display: flex; align-items: flex-start; justify-content: center;
+    padding: max(18px, env(safe-area-inset-top)) 18px max(18px, env(safe-area-inset-bottom));
+    overflow-y: auto;
+    overscroll-behavior: contain;
 }
 .cx-modal-box {
     background: #1c1c2e; border: 1px solid rgba(255,255,255,.12);
     border-radius: 18px; padding: 24px 22px 18px;
     max-width: 320px; width: 100%;
+    max-height: calc(100dvh - 36px);
+    overflow-y: auto;
+    margin: auto 0;
+    position: relative;
     box-shadow: 0 12px 40px rgba(0,0,0,.55);
     font-family: -apple-system, BlinkMacSystemFont, 'SF Pro', 'Segoe UI', Roboto, sans-serif;
     display: flex; flex-direction: column; gap: 14px;
     animation: cx-modal-in .18s ease;
+    will-change: top, left;
 }
+.cx-modal-dragging { animation: none; transition: none !important; }
 @keyframes cx-modal-in {
     from { opacity: 0; transform: scale(.92); }
     to   { opacity: 1; transform: scale(1); }
 }
-.cx-modal-title { font-size: 16px; font-weight: 700; color: #fff; }
+.cx-modal-title {
+    font-size: 16px; font-weight: 700; color: #fff;
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+}
+.cx-modal-title:active { cursor: grabbing; }
 .cx-modal-body  { font-size: 14px; color: #d1d5db; line-height: 1.5; }
 .cx-modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
 .cx-modal-btn {

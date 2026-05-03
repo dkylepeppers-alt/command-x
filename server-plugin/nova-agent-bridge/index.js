@@ -54,12 +54,7 @@ function resolvePluginVersion() {
 
 const PLUGIN_VERSION = resolvePluginVersion();
 
-// Plan §4b — shell allow-list. Kept as a static list here; a future config
-// loader (§8a config.yaml) will override via `NOVA_SHELL_ALLOW` or equivalent.
-const DEFAULT_SHELL_ALLOW = Object.freeze([
-    'node', 'npm', 'git', 'python', 'python3',
-    'grep', 'rg', 'ls', 'cat', 'head', 'tail', 'wc', 'find',
-]);
+const DEFAULT_SHELL_POLICY = Object.freeze({ enabled: false, allow: Object.freeze([]) });
 
 // Capabilities surface advertised via /manifest. Keys are plan-stable
 // identifiers the extension reads during Phase 4f capability discovery.
@@ -67,10 +62,8 @@ const DEFAULT_SHELL_ALLOW = Object.freeze([
 // the UI can render a yellow "partial support" banner instead of silently
 // degrading.
 //
-// `shell_run` is no longer a static `false` — its presence depends on
-// whether `resolveAllowList` (called at init time) found at least one
-// binary on PATH. The actual value is computed in `init()` and merged
-// into the manifest response there.
+// `shell_run` is advertised only when config explicitly enables shell and
+// `resolveAllowList` finds at least one configured binary on PATH.
 const BASE_CAPABILITIES = Object.freeze({
     fs_list: true,
     fs_read: true,
@@ -108,6 +101,88 @@ function resolveRoot(configPath) {
         console.warn(`[${PLUGIN_ID}] config read failed:`, e?.message || e);
     }
     return path.resolve(process.cwd());
+}
+
+function readConfigText(configPath) {
+    try {
+        if (configPath && fs.existsSync(configPath)) return fs.readFileSync(configPath, 'utf8');
+    } catch (e) {
+        console.warn(`[${PLUGIN_ID}] config read failed:`, e?.message || e);
+    }
+    return '';
+}
+
+function stripYamlQuotes(value) {
+    return String(value || '').replace(/^['"]|['"]$/g, '').trim();
+}
+
+function parseYamlBoolean(value) {
+    const clean = stripYamlQuotes(value).toLowerCase();
+    if (['true', 'yes', 'on', '1'].includes(clean)) return true;
+    if (['false', 'no', 'off', '0'].includes(clean)) return false;
+    return null;
+}
+
+function sanitizeShellAllow(names) {
+    const out = [];
+    const seen = new Set();
+    if (!Array.isArray(names)) return out;
+    for (const raw of names) {
+        const name = stripYamlQuotes(raw);
+        if (!name || name.includes('/') || name.includes('\\') || seen.has(name)) continue;
+        seen.add(name);
+        out.push(name);
+    }
+    return out;
+}
+
+function parseInlineYamlList(value) {
+    const clean = String(value || '').trim();
+    const m = clean.match(/^\[(.*)\]$/);
+    if (!m) return null;
+    return m[1].split(',').map(x => stripYamlQuotes(x)).filter(Boolean);
+}
+
+function resolveShellPolicy(configPath) {
+    const raw = readConfigText(configPath);
+    if (!raw) return { enabled: DEFAULT_SHELL_POLICY.enabled, allow: [...DEFAULT_SHELL_POLICY.allow] };
+    const lines = raw.split(/\r?\n/);
+    let inShell = false;
+    let inAllow = false;
+    let enabled = DEFAULT_SHELL_POLICY.enabled;
+    const allow = [];
+
+    for (const line of lines) {
+        const noComment = line.replace(/\s+#.*$/, '');
+        if (!noComment.trim()) continue;
+        const shellStart = noComment.match(/^shell\s*:\s*$/);
+        if (shellStart) { inShell = true; inAllow = false; continue; }
+        if (/^\S/.test(noComment)) { inShell = false; inAllow = false; }
+        if (!inShell) continue;
+
+        const enabledMatch = noComment.match(/^\s+enabled\s*:\s*(.+?)\s*$/);
+        if (enabledMatch) {
+            const parsed = parseYamlBoolean(enabledMatch[1]);
+            if (parsed !== null) enabled = parsed;
+            inAllow = false;
+            continue;
+        }
+
+        const allowMatch = noComment.match(/^\s+allow\s*:\s*(.*?)\s*$/);
+        if (allowMatch) {
+            const inline = parseInlineYamlList(allowMatch[1]);
+            if (inline) allow.push(...inline);
+            inAllow = !inline;
+            continue;
+        }
+
+        if (inAllow) {
+            const item = noComment.match(/^\s+-\s*(.+?)\s*$/);
+            if (item) allow.push(item[1]);
+        }
+    }
+
+    return { enabled, allow: sanitizeShellAllow(allow) };
 }
 
 // Module-scoped so exit() can close the audit logger on teardown. Kept at
@@ -196,14 +271,14 @@ function resolveAllowList(names) {
 async function init(router) {
     const configPath = path.resolve(__dirname, 'config.yaml');
     const root = resolveRoot(configPath);
+    const shellPolicy = resolveShellPolicy(configPath);
     const auditLogPath = resolveAuditLogPath(root);
     activeAuditLogger = buildAuditLogger({ logPath: auditLogPath });
 
     // Plan §4b / §8c — resolve the shell allow-list once at startup.
-    // `shell_run` is enabled in the manifest only when at least one
-    // allow-listed binary was found on PATH. The shell handler refuses
-    // commands not in this map.
-    const resolvedAllowList = resolveAllowList(DEFAULT_SHELL_ALLOW);
+    // `shell_run` is enabled in the manifest only when config explicitly
+    // enables shell and at least one configured bare command resolves on PATH.
+    const resolvedAllowList = shellPolicy.enabled ? resolveAllowList(shellPolicy.allow) : {};
     const capabilities = Object.freeze({
         ...BASE_CAPABILITIES,
         shell_run: Object.keys(resolvedAllowList).length > 0,
@@ -227,6 +302,7 @@ async function init(router) {
             // capability probe expects `Array.isArray(shellAllowList)`).
             // Absolute paths are an internal plugin detail.
             shellAllowList: Object.keys(resolvedAllowList),
+            shell: { enabled: shellPolicy.enabled, configuredAllowList: shellPolicy.allow },
             capabilities,
             auditLogPath,
         });
@@ -261,7 +337,7 @@ async function init(router) {
         auditLogger: activeAuditLogger,
     }));
 
-    console.log(`[${PLUGIN_ID}] loaded — root=${root} audit=${auditLogPath} shell=${capabilities.shell_run ? Object.keys(resolvedAllowList).length + ' binaries' : 'disabled (no binaries on PATH)'}`);
+    console.log(`[${PLUGIN_ID}] loaded — root=${root} audit=${auditLogPath} shell=${capabilities.shell_run ? Object.keys(resolvedAllowList).length + ' binaries' : 'disabled'}`);
     return Promise.resolve();
 }
 
@@ -285,5 +361,5 @@ module.exports = {
         description: 'Filesystem and shell bridge for the Command-X Nova agent.',
     },
     // Exposed for unit tests / other modules. Not part of the plugin contract.
-    _internal: { resolveRoot, resolvePluginVersion, resolveAuditLogPath, resolveAllowList, PLUGIN_VERSION, DEFAULT_SHELL_ALLOW, BASE_CAPABILITIES },
+    _internal: { resolveRoot, resolvePluginVersion, resolveAuditLogPath, resolveAllowList, resolveShellPolicy, PLUGIN_VERSION, DEFAULT_SHELL_POLICY, BASE_CAPABILITIES },
 };

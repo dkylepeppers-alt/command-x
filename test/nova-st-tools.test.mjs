@@ -21,6 +21,11 @@ function buildNovaStTools({
     executeSlashImpl,
     listProfilesImpl,
     fetchImpl,
+    worldInfoCacheImpl,
+    eventSourceImpl,
+    eventTypesImpl,
+    updateWorldInfoListImpl,
+    reloadWorldInfoEditorImpl,
 } = {}) {
     const isObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
     const safeArgs = (v) => (isObject(v) ? v : {});
@@ -247,6 +252,56 @@ function buildNovaStTools({
             entries,
         };
     };
+    const normalizeWorldbookRows = (rows) => {
+        const out = [];
+        if (!Array.isArray(rows)) return out;
+        for (const row of rows) {
+            if (isObject(row)) {
+                const fileId = String(row.file_id || '').trim();
+                const name = String(row.name || fileId || '').trim();
+                if (!fileId && !name) continue;
+                const clean = { file_id: fileId || name, name: name || fileId };
+                if (isObject(row.extensions)) clean.extensions = row.extensions;
+                out.push(clean);
+            } else {
+                const name = String(row || '').trim();
+                if (name) out.push({ file_id: name, name });
+            }
+        }
+        return out;
+    };
+    const resolveWorldbookIdentifier = (native, requested) => {
+        if (!native?.ok) return null;
+        const rows = Array.isArray(native.rows) ? native.rows : [];
+        const byFileId = rows.find(row => row.file_id === requested);
+        if (byFileId) return { status: 'found', row: byFileId };
+        const byName = rows.filter(row => row.name === requested);
+        if (byName.length === 1) return { status: 'found', row: byName[0] };
+        if (byName.length > 1) return { status: 'ambiguous', rows: byName };
+        return { status: 'not-found' };
+    };
+    const refreshWorldbooks = async (fileId, data) => {
+        let refreshed = false;
+        const ctx = getCtx() || {};
+        const cache = worldInfoCacheImpl;
+        if (cache && typeof cache.set === 'function') {
+            try { cache.set(fileId, data); refreshed = true; } catch (_) { /* non-fatal */ }
+        }
+        const events = eventSourceImpl || ctx.eventSource;
+        const types = eventTypesImpl || ctx.eventTypes || ctx.event_types;
+        if (events && typeof events.emit === 'function' && types?.WORLDINFO_UPDATED) {
+            try { await events.emit(types.WORLDINFO_UPDATED, fileId, data); refreshed = true; } catch (_) { /* non-fatal */ }
+        }
+        const updateList = updateWorldInfoListImpl || (typeof ctx.updateWorldInfoList === 'function' ? ctx.updateWorldInfoList : null);
+        if (typeof updateList === 'function') {
+            try { await updateList(); refreshed = true; } catch (_) { /* non-fatal */ }
+        }
+        const reloadEditor = reloadWorldInfoEditorImpl || (typeof ctx.reloadWorldInfoEditor === 'function' ? ctx.reloadWorldInfoEditor : null);
+        if (typeof reloadEditor === 'function') {
+            try { await reloadEditor(fileId); refreshed = true; } catch (_) { /* non-fatal */ }
+        }
+        return refreshed;
+    };
     const refreshCharacters = async () => {
         const ctx = getCtx();
         const refresh = ctx && typeof ctx.getCharacters === 'function' ? ctx.getCharacters : null;
@@ -257,26 +312,14 @@ function buildNovaStTools({
     const listWorldbooksNative = async () => {
         const result = await postJson('/api/worldinfo/list', {});
         if (!result.ok) return result;
-        const rows = Array.isArray(result.data) ? result.data : [];
-        const worldbooks = [];
-        const identifiers = new Set();
+        const rows = normalizeWorldbookRows(result.data);
+        const worldbooks = rows.map(row => row.name || row.file_id).filter(Boolean);
+        const canonicalIds = rows.map(row => row.file_id).filter(Boolean);
+        const identifiers = new Set(canonicalIds);
         for (const row of rows) {
-            if (isObject(row)) {
-                const name = String(row.name || '').trim();
-                const fileId = String(row.file_id || '').trim();
-                if (name) worldbooks.push(name);
-                else if (fileId) worldbooks.push(fileId);
-                if (name) identifiers.add(name);
-                if (fileId) identifiers.add(fileId);
-            } else {
-                const name = String(row || '').trim();
-                if (name) {
-                    worldbooks.push(name);
-                    identifiers.add(name);
-                }
-            }
+            if (row.name) identifiers.add(row.name);
         }
-        return { ok: true, worldbooks, identifiers, rows };
+        return { ok: true, worldbooks, canonicalIds, identifiers, rows };
     };
 
     return {
@@ -343,7 +386,7 @@ function buildNovaStTools({
         st_list_worldbooks: async () => {
             try {
                 const native = await listWorldbooksNative();
-                if (native.ok) return { worldbooks: native.worldbooks, count: native.worldbooks.length, rows: native.rows };
+                if (native.ok) return { worldbooks: native.worldbooks, count: native.worldbooks.length, rows: native.rows, canonicalIds: native.canonicalIds };
             } catch (_) { /* fall through to slash fallback */ }
             const exec = await getSlash();
             if (typeof exec === 'function') {
@@ -374,10 +417,24 @@ function buildNovaStTools({
             const { name } = safeArgs(rawArgs);
             const cleanName = safeName(name);
             if (!cleanName) return { error: 'name must be a non-empty string' };
+            let resolvedName = cleanName;
+            let displayName = cleanName;
             try {
-                const result = await postJson('/api/worldinfo/get', { name: cleanName });
+                const native = await listWorldbooksNative();
+                if (native.ok) {
+                    const resolved = resolveWorldbookIdentifier(native, cleanName);
+                    if (resolved?.status === 'not-found') return { error: 'not-found', name: cleanName };
+                    if (resolved?.status === 'ambiguous') return { error: 'ambiguous', name: cleanName, matches: resolved.rows };
+                    if (resolved?.status === 'found') {
+                        resolvedName = resolved.row.file_id;
+                        displayName = resolved.row.name || resolved.row.file_id;
+                    }
+                }
+            } catch (_) { /* old ST build or fetch unavailable: fall through to direct get/slash */ }
+            try {
+                const result = await postJson('/api/worldinfo/get', { name: resolvedName });
                 if (result.ok && isObject(result.data) && isObject(result.data.entries)) {
-                    return { name: cleanName, book: result.data };
+                    return { name: displayName, file_id: resolvedName, book: result.data };
                 }
             } catch (_) { /* fall through to slash fallback */ }
             const exec = await getSlash();
@@ -410,21 +467,34 @@ function buildNovaStTools({
             if (!cleanName) return { error: 'name must be a non-empty string' };
             if (!isObject(args.book)) return { error: 'missing-book', tool: 'st_write_worldbook' };
             if (!isObject(args.book.entries) && !Array.isArray(args.book.entries)) return { error: 'invalid-book', tool: 'st_write_worldbook', hint: 'Worldbook JSON must include an `entries` object.' };
-            const book = normalizeWorldbookBook(cleanName, args.book);
+            let fileId = cleanName;
+            let displayName = cleanName;
+            let existed = false;
             try {
                 const native = await listWorldbooksNative();
-                if (native.ok && native.identifiers?.has(cleanName) && !args.overwrite) {
-                    return { error: 'exists', name: cleanName, hint: 'Set overwrite=true to replace this worldbook.' };
+                if (native.ok) {
+                    const resolved = resolveWorldbookIdentifier(native, cleanName);
+                    if (resolved?.status === 'ambiguous') return { error: 'ambiguous', name: cleanName, matches: resolved.rows };
+                    if (resolved?.status === 'found') {
+                        existed = true;
+                        fileId = resolved.row.file_id;
+                        displayName = resolved.row.name || resolved.row.file_id;
+                        if (!args.overwrite) {
+                            return { error: 'exists', name: displayName, file_id: fileId, hint: 'Set overwrite=true to replace this worldbook.' };
+                        }
+                    }
                 }
             } catch (_) { /* if listing fails, let edit endpoint be authoritative */ }
+            const book = normalizeWorldbookBook(displayName, args.book);
             let result;
             try {
-                result = await postJson('/api/worldinfo/edit', { name: cleanName, data: book });
+                result = await postJson('/api/worldinfo/edit', { name: fileId, data: book });
             } catch (err) {
                 return { error: 'write-failed', tool: 'st_write_worldbook', message: String(err?.message || err) };
             }
             if (!result.ok) return { error: 'write-failed', tool: 'st_write_worldbook', status: result.status, message: result.message };
-            return { ok: true, action: 'saved', name: cleanName };
+            const refreshed = await refreshWorldbooks(fileId, book);
+            return { ok: true, action: existed ? 'updated' : 'created', name: displayName, file_id: fileId, ...(refreshed ? {} : { uiRefreshRequired: true }) };
         },
         st_run_slash: async (rawArgs) => {
             const { command } = safeArgs(rawArgs);
@@ -798,6 +868,11 @@ describe('st_list_worldbooks', () => {
         };
         const r = await buildNovaStTools({ fetchImpl }).st_list_worldbooks();
         assert.deepEqual(r.worldbooks, ['World A', 'world-b']);
+        assert.deepEqual(r.canonicalIds, ['world-a', 'world-b']);
+        assert.deepEqual(r.rows, [
+            { file_id: 'world-a', name: 'World A' },
+            { file_id: 'world-b', name: 'world-b' },
+        ]);
         assert.equal(r.count, 2);
     });
 
@@ -844,14 +919,45 @@ describe('st_list_worldbooks', () => {
 
 describe('st_read_worldbook', () => {
     it('uses the native worldinfo get endpoint when available', async () => {
+        const calls = [];
         const fetchImpl = async (url, init) => {
-            assert.equal(url, '/api/worldinfo/get');
-            assert.deepEqual(JSON.parse(init.body), { name: 'My World' });
-            return mockResponse({ entries: { 0: { uid: 0, key: ['k'] } } });
+            calls.push({ url, body: JSON.parse(init.body) });
+            if (url === '/api/worldinfo/list') return mockResponse([{ file_id: 'my-world', name: 'My World' }]);
+            if (url === '/api/worldinfo/get') return mockResponse({ entries: { 0: { uid: 0, key: ['k'] } } });
+            throw new Error(`unexpected url ${url}`);
         };
         const r = await buildNovaStTools({ fetchImpl }).st_read_worldbook({ name: 'My World' });
         assert.equal(r.name, 'My World');
+        assert.equal(r.file_id, 'my-world');
+        assert.deepEqual(calls[1].body, { name: 'my-world' });
         assert.equal(r.book.entries[0].key[0], 'k');
+    });
+
+    it('returns not-found when list does not include the requested worldbook even if get would return a dummy book', async () => {
+        const calls = [];
+        const fetchImpl = async (url) => {
+            calls.push(url);
+            if (url === '/api/worldinfo/list') return mockResponse([{ file_id: 'other', name: 'Other' }]);
+            if (url === '/api/worldinfo/get') return mockResponse({ entries: {} });
+            throw new Error(`unexpected url ${url}`);
+        };
+        const r = await buildNovaStTools({ fetchImpl }).st_read_worldbook({ name: 'Missing' });
+        assert.deepEqual(r, { error: 'not-found', name: 'Missing' });
+        assert.deepEqual(calls, ['/api/worldinfo/list']);
+    });
+
+    it('resolves a unique display name to file_id before reading', async () => {
+        const calls = [];
+        const fetchImpl = async (url, init) => {
+            calls.push({ url, body: JSON.parse(init.body) });
+            if (url === '/api/worldinfo/list') return mockResponse([{ file_id: 'lore-file', name: 'Pretty Lore' }]);
+            if (url === '/api/worldinfo/get') return mockResponse({ entries: { 3: { uid: 3, key: ['lore'] } } });
+            throw new Error(`unexpected url ${url}`);
+        };
+        const r = await buildNovaStTools({ fetchImpl }).st_read_worldbook({ name: 'Pretty Lore' });
+        assert.equal(r.name, 'Pretty Lore');
+        assert.equal(r.file_id, 'lore-file');
+        assert.deepEqual(calls[1].body, { name: 'lore-file' });
     });
 
     it('returns parsed JSON when the slash returns JSON', async () => {
@@ -921,7 +1027,8 @@ describe('st_write_worldbook', () => {
         const book = { entries: { 0: { uid: 0, key: ['nova'], content: 'Nova lore' } } };
         const r = await buildNovaStTools({ fetchImpl }).st_write_worldbook({ name: 'Lore', book });
         assert.equal(r.ok, true);
-        assert.equal(r.action, 'saved');
+        assert.equal(r.action, 'created');
+        assert.equal(r.uiRefreshRequired, true);
         assert.equal(calls[1].url, '/api/worldinfo/edit');
         assert.equal(calls[1].body.name, 'Lore');
         assert.equal(calls[1].body.data.name, 'Lore');
@@ -970,6 +1077,57 @@ describe('st_write_worldbook', () => {
             book: { entries: {} },
         });
         assert.equal(r.error, 'exists');
+        assert.equal(r.file_id, 'lore-file');
+        assert.equal(r.name, 'Pretty Lore');
+    });
+
+    it('overwrites existing worldbooks by canonical file_id, not display name', async () => {
+        const calls = [];
+        const fetchImpl = async (url, init) => {
+            calls.push({ url, body: JSON.parse(init.body) });
+            if (url === '/api/worldinfo/list') return mockResponse([{ file_id: 'lore-file', name: 'Pretty Lore' }]);
+            if (url === '/api/worldinfo/edit') return mockResponse({ ok: true });
+            throw new Error(`unexpected url ${url}`);
+        };
+        const r = await buildNovaStTools({ fetchImpl }).st_write_worldbook({
+            name: 'Pretty Lore',
+            overwrite: true,
+            book: { entries: {} },
+        });
+        assert.equal(r.ok, true);
+        assert.equal(r.action, 'updated');
+        assert.equal(r.name, 'Pretty Lore');
+        assert.equal(r.file_id, 'lore-file');
+        assert.equal(calls[1].body.name, 'lore-file');
+        assert.equal(calls[1].body.data.name, 'Pretty Lore');
+    });
+
+    it('refreshes worldbook cache, update event, list, and editor hooks after a successful write', async () => {
+        const calls = [];
+        const cacheSets = [];
+        const emitted = [];
+        const fetchImpl = async (url, init) => {
+            calls.push({ url, body: JSON.parse(init.body) });
+            if (url === '/api/worldinfo/list') return mockResponse([]);
+            if (url === '/api/worldinfo/edit') return mockResponse({ ok: true });
+            throw new Error(`unexpected url ${url}`);
+        };
+        let listRefreshed = false;
+        let editorReloaded = '';
+        const r = await buildNovaStTools({
+            fetchImpl,
+            worldInfoCacheImpl: { set: (name, data) => cacheSets.push({ name, data }) },
+            eventSourceImpl: { emit: async (...args) => emitted.push(args) },
+            eventTypesImpl: { WORLDINFO_UPDATED: 'worldinfo_updated' },
+            updateWorldInfoListImpl: async () => { listRefreshed = true; },
+            reloadWorldInfoEditorImpl: async (name) => { editorReloaded = name; },
+        }).st_write_worldbook({ name: 'Lore', book: { entries: {} } });
+        assert.equal(r.ok, true);
+        assert.equal(r.uiRefreshRequired, undefined);
+        assert.equal(cacheSets[0].name, 'Lore');
+        assert.deepEqual(emitted[0].slice(0, 2), ['worldinfo_updated', 'Lore']);
+        assert.equal(listRefreshed, true);
+        assert.equal(editorReloaded, 'Lore');
     });
 
     it('rejects missing and invalid books', async () => {

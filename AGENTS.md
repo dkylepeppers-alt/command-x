@@ -6,7 +6,7 @@ full architecture reference.
 
 ## Project snapshot
 
-- SillyTavern third-party extension, currently v0.13.0.
+- SillyTavern third-party extension, currently v0.13.2.
 - Vanilla browser JavaScript, CSS, and HTML loaded directly by SillyTavern.
 - No bundler, no `package.json`, and no build step.
 - Main frontend files:
@@ -22,7 +22,8 @@ full architecture reference.
   - `test/*.mjs` — Node `--test` suites for helpers, Nova tools/state,
     approval flow, plugin helpers, diffs, and related behavior.
 
-Do not modify `st-docs/`; it is a read-only reference copy of SillyTavern docs.
+Use the installed SillyTavern source for implementation truth and
+`https://docs.sillytavern.app/` for canonical SillyTavern docs.
 
 ## Required workflow
 

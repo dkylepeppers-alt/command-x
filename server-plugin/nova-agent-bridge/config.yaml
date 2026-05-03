@@ -1,0 +1,10 @@
+# SillyTavern Server Plugin - nova-agent-bridge
+#
+# Defaults are intentionally conservative. Shell execution is disabled unless
+# you explicitly enable it and list the bare command names Nova may run.
+#
+# root: /absolute/path/to/allowed/root
+
+shell:
+  enabled: false
+  allow: []

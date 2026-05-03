@@ -11,12 +11,16 @@
 #
 # root: /absolute/path/to/allowed/root
 
-# Reserved for future sprints:
+# Shell execution is disabled by default. To enable `shell_run`, set
+# `shell.enabled: true` and list the bare command names Nova may run. Each
+# command is resolved to an absolute binary at plugin startup; path-like values
+# are ignored.
 #
-# shellAllowList:
-#   - node
-#   - npm
-#   - git
+# shell:
+#   enabled: false
+#   allow:
+#     - node
+#     - git
 #
 # maxFileBytes: 20971520   # 20 MB cap per §8c
 # auditLogPath: ./data/_nova-audit.jsonl

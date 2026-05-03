@@ -12,6 +12,8 @@
  * `CLAUDE.md` § "Version History".
  */
 import { getContext } from '../../../st-context.js';
+import { updateWorldInfoList, reloadEditor as reloadWorldInfoEditor, worldInfoCache } from '../../../world-info.js';
+import { eventSource, event_types } from '../../../events.js';
 import {
     setExtensionPrompt,
     extension_prompt_types,
@@ -19,7 +21,7 @@ import {
     getRequestHeaders,
 } from '../../../../script.js';
 
-const VERSION = '0.13.1';
+const VERSION = '0.13.2';
 const EXT = 'command-x';
 const INJECT_KEY = 'command-x-sms';
 const INJECT_KEY_CONTACTS = 'command-x-contacts';
@@ -2572,6 +2574,156 @@ function showToast(contactName, text) {
     document.addEventListener('keydown', onKey);
 }
 
+function enableCxModalDrag(overlay) {
+    const box = overlay?.querySelector?.('.cx-modal-box');
+    const handle = overlay?.querySelector?.('.cx-modal-title');
+    if (!box || !handle || typeof handle.addEventListener !== 'function') return;
+
+    const getViewportWidth = () => window.visualViewport?.width || window.innerWidth || document.documentElement.clientWidth || 0;
+    const getViewportHeight = () => window.visualViewport?.height || window.innerHeight || document.documentElement.clientHeight || 0;
+    const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+    const dragPad = 8;
+    const dragThreshold = 8;
+    const dragState = {
+        active: false,
+        moved: false,
+        startClientX: 0,
+        startClientY: 0,
+        startLeft: 0,
+        startTop: 0,
+        pendingLeft: null,
+        pendingTop: null,
+        rafId: null,
+    };
+
+    const applyPosition = (left, top) => {
+        box.style.left = `${left}px`;
+        box.style.top = `${top}px`;
+        box.dataset.cxDragLeft = String(left);
+        box.dataset.cxDragTop = String(top);
+    };
+    const constrain = (left, top) => {
+        const width = box.offsetWidth || box.getBoundingClientRect().width;
+        const height = box.offsetHeight || box.getBoundingClientRect().height;
+        return {
+            left: clamp(left, dragPad, Math.max(dragPad, getViewportWidth() - width - dragPad)),
+            top: clamp(top, dragPad, Math.max(dragPad, getViewportHeight() - height - dragPad)),
+        };
+    };
+    const flushPosition = () => {
+        if (dragState.pendingLeft != null && dragState.pendingTop != null) {
+            applyPosition(dragState.pendingLeft, dragState.pendingTop);
+            dragState.pendingLeft = null;
+            dragState.pendingTop = null;
+        }
+        dragState.rafId = null;
+    };
+    const queuePosition = (left, top) => {
+        const next = constrain(left, top);
+        dragState.pendingLeft = next.left;
+        dragState.pendingTop = next.top;
+        if (!dragState.rafId) dragState.rafId = requestAnimationFrame(flushPosition);
+    };
+    const beginDrag = (clientX, clientY) => {
+        const rect = box.getBoundingClientRect();
+        dragState.active = true;
+        dragState.moved = false;
+        dragState.startClientX = clientX;
+        dragState.startClientY = clientY;
+        dragState.startLeft = rect.left;
+        dragState.startTop = rect.top;
+        box.classList.add('cx-modal-dragging');
+    };
+    const moveDrag = (clientX, clientY, event) => {
+        if (!dragState.active) return;
+        const deltaX = clientX - dragState.startClientX;
+        const deltaY = clientY - dragState.startClientY;
+        if (!dragState.moved && Math.hypot(deltaX, deltaY) < dragThreshold) return;
+        dragState.moved = true;
+        queuePosition(dragState.startLeft + deltaX, dragState.startTop + deltaY);
+        event.preventDefault();
+        event.stopPropagation();
+    };
+    const endDrag = (event) => {
+        if (!dragState.active) return;
+        if (dragState.rafId) {
+            cancelAnimationFrame(dragState.rafId);
+            flushPosition();
+        }
+        dragState.active = false;
+        box.classList.remove('cx-modal-dragging');
+        if (dragState.moved) {
+            overlay.dataset.cxJustDragged = 'true';
+            setTimeout(() => { delete overlay.dataset.cxJustDragged; }, 300);
+            event?.preventDefault?.();
+            event?.stopPropagation?.();
+        }
+    };
+
+    const rect = box.getBoundingClientRect();
+    const initial = constrain(rect.left, rect.top);
+    box.style.position = 'fixed';
+    box.style.margin = '0';
+    box.style.right = 'auto';
+    box.style.bottom = 'auto';
+    box.style.transform = 'none';
+    applyPosition(initial.left, initial.top);
+
+    handle.title = 'Drag to move';
+    handle.addEventListener('touchstart', (event) => {
+        if (event.touches.length !== 1) return;
+        const touch = event.touches[0];
+        beginDrag(touch.clientX, touch.clientY);
+    }, { passive: false });
+    handle.addEventListener('touchmove', (event) => {
+        if (event.touches.length !== 1) return;
+        const touch = event.touches[0];
+        moveDrag(touch.clientX, touch.clientY, event);
+    }, { passive: false });
+    handle.addEventListener('touchend', endDrag, { passive: false });
+    handle.addEventListener('touchcancel', endDrag, { passive: false });
+    handle.addEventListener('mousedown', (event) => {
+        if (event.button !== 0) return;
+        beginDrag(event.clientX, event.clientY);
+        event.preventDefault();
+    });
+    const removeDocumentDragListeners = () => {
+        document.removeEventListener('mousemove', onDocumentMouseMove);
+        document.removeEventListener('mouseup', onDocumentMouseUp);
+    };
+    const onDocumentMouseMove = (event) => {
+        if (!overlay.isConnected) {
+            removeDocumentDragListeners();
+            return;
+        }
+        moveDrag(event.clientX, event.clientY, event);
+    };
+    const onDocumentMouseUp = (event) => {
+        if (!overlay.isConnected) {
+            removeDocumentDragListeners();
+            return;
+        }
+        endDrag(event);
+    };
+    document.addEventListener('mousemove', onDocumentMouseMove);
+    document.addEventListener('mouseup', onDocumentMouseUp);
+    if (typeof MutationObserver === 'function') {
+        const observer = new MutationObserver(() => {
+            if (!overlay.isConnected) {
+                removeDocumentDragListeners();
+                observer.disconnect();
+            }
+        });
+        observer.observe(document.body, { childList: true });
+    }
+    overlay.addEventListener('click', (event) => {
+        if (overlay.dataset.cxJustDragged) {
+            event.preventDefault();
+            event.stopPropagation();
+        }
+    }, true);
+}
+
 /**
  * Styled in-phone alert (replaces native alert()).
  * Returns a Promise that resolves when the user clicks OK.
@@ -2594,6 +2746,7 @@ function cxAlert(message, title = 'Command-X') {
         overlay.querySelector('#cx-modal-ok').addEventListener('click', close);
         document.addEventListener('keydown', onKey);
         document.body.appendChild(overlay);
+        enableCxModalDrag(overlay);
         overlay.querySelector('#cx-modal-ok').focus();
     });
 }
@@ -2624,6 +2777,7 @@ function cxConfirm(message, title = 'Are you sure?', { confirmLabel = 'Confirm',
         overlay.querySelector('#cx-modal-confirm').addEventListener('click', () => close(true));
         document.addEventListener('keydown', onKey);
         document.body.appendChild(overlay);
+        enableCxModalDrag(overlay);
         // Dangerous actions default to cancel focus; safe confirms default to confirm focus.
         overlay.querySelector(danger ? '#cx-modal-cancel' : '#cx-modal-confirm').focus();
     });
@@ -2658,6 +2812,7 @@ function cxPrompt(message, { title = 'Command-X', defaultValue = '', placeholder
         overlay.querySelector('#cx-modal-confirm').addEventListener('click', () => close(input.value));
         document.addEventListener('keydown', onKey);
         document.body.appendChild(overlay);
+        enableCxModalDrag(overlay);
         input.focus();
         input.select();
     });
@@ -5037,6 +5192,7 @@ function cxPickList(title, options, { initial = null, confirmLabel = 'Choose' } 
         overlay.querySelector('#cx-pick-confirm').addEventListener('click', () => close(selected));
         document.addEventListener('keydown', onKey);
         document.body.appendChild(overlay);
+        enableCxModalDrag(overlay);
         overlay.querySelector('#cx-pick-confirm').focus();
     });
 }
@@ -5101,6 +5257,7 @@ async function openNovaSoulMemoryEditor() {
     overlay.querySelector('#cx-nova-sm-close').addEventListener('click', close);
     document.addEventListener('keydown', onKey);
     document.body.appendChild(overlay);
+    enableCxModalDrag(overlay);
 
     const statusEl = overlay.querySelector('#cx-nova-sm-status');
     const soulTa = overlay.querySelector('#cx-nova-sm-soul');
@@ -5232,6 +5389,7 @@ function openNovaAuditLogViewer() {
     overlay.querySelector('#cx-nova-audit-close').addEventListener('click', close);
     document.addEventListener('keydown', onKey);
     document.body.appendChild(overlay);
+    enableCxModalDrag(overlay);
 
     const body = overlay.querySelector('#cx-nova-audit-body');
     const render = () => {
@@ -5629,6 +5787,10 @@ async function novaHandleSend() {
     renderNovaTranscript();
     if (result && result.swappedProfile) {
         appendNovaTranscriptLine(`🔌 Restored profile to ${result.swappedProfile.from || '(none)'}.`, 'system');
+    }
+    if (result?.ok && isNovaEmptyAssistantContent(result.assistantMessage?.content)
+        && !result.toolsExecuted && !result.toolsDenied && !result.toolsFailed) {
+        appendNovaTranscriptLine('⚠︎ Nova returned no actionable response or tool call. Try again with the Worldbook Creator skill selected and tier set to Write.', 'notice');
     }
     if (result && !result.ok) {
         const reason = result.reason || 'unknown';
@@ -6223,8 +6385,8 @@ function destroyPanel() {
    Registration was historically inline in the jQuery init block, with
    no symmetric `removeListener`. ST's documented best-practice for
    extensions is to clean up listeners when they're no longer needed
-   (st-docs/For_Contributors/Writing-Extensions.md §Performance), and
-   the in-handler `if (!settings.enabled) return` guards papered over
+   (https://docs.sillytavern.app/for-contributors/writing-extensions/),
+   and the in-handler `if (!settings.enabled) return` guards papered over
    the leak rather than fixing it. We now keep canonical handler refs
    in `_eventListenerHandlers` and call `removeListener` in
    `unwireEventListeners`. Both functions are idempotent so the
@@ -7737,6 +7899,22 @@ function _stringifyNovaToolResult(value) {
     try { return JSON.stringify(value); } catch (_) { return String(value); }
 }
 
+function isNovaEmptyAssistantContent(value) {
+    const text = String(value ?? '').trim().toLowerCase();
+    return !text || text === 'none' || text === '[none]';
+}
+
+function summarizeNovaToolDispatchCompletion({ events = [], toolsExecuted = 0, toolsDenied = 0, toolsFailed = 0 } = {}) {
+    const toolEvents = Array.isArray(events) ? events.filter(ev => ev && ev.role === 'tool') : [];
+    const names = Array.from(new Set(toolEvents.map(ev => String(ev.name || 'tool')).filter(Boolean)));
+    const parts = [];
+    if (toolsExecuted > 0) parts.push(`${toolsExecuted} tool${toolsExecuted === 1 ? '' : 's'} ran`);
+    if (toolsDenied > 0) parts.push(`${toolsDenied} denied`);
+    if (toolsFailed > 0) parts.push(`${toolsFailed} failed`);
+    const status = parts.length ? parts.join(', ') : 'Tool turn completed';
+    return names.length ? `${status}: ${names.join(', ')}` : `${status}.`;
+}
+
 async function runNovaToolDispatch({
     initialResponse,           // { content, tool_calls } from the first LLM call
     messages,                  // mutable array — dispatcher appends assistant + tool results
@@ -7792,8 +7970,21 @@ async function runNovaToolDispatch({
         events.push(assistantMsg);
         finalAssistant = assistantMsg;
 
-        // No tool_calls → LLM is done, we're done.
-        if (toolCalls.length === 0) break;
+        // No tool_calls → LLM is done, we're done. Some providers return
+        // literal `[none]` after a successful tool loop; replace that dead
+        // transcript line with a deterministic status so the user can tell
+        // the operation completed.
+        if (toolCalls.length === 0) {
+            if (isNovaEmptyAssistantContent(assistantMsg.content) && (toolsExecuted > 0 || toolsDenied > 0 || toolsFailed > 0)) {
+                assistantMsg.content = summarizeNovaToolDispatchCompletion({
+                    events,
+                    toolsExecuted,
+                    toolsDenied,
+                    toolsFailed,
+                });
+            }
+            break;
+        }
 
         // Dispatch this round's tool calls in order. Each appends a
         // `role:'tool'` message to `messages`.
@@ -8188,6 +8379,7 @@ function cxNovaApprovalModal({ tool, args, diffText = '', permission, title = 'A
         overlay.querySelector('#cx-modal-confirm').addEventListener('click', () => close(true));
         document.addEventListener('keydown', onKey);
         document.body.appendChild(overlay);
+        enableCxModalDrag(overlay);
         // Destructive actions default to Cancel focus to prevent accidental Enter.
         overlay.querySelector(danger ? '#cx-modal-cancel' : '#cx-modal-confirm').focus();
     });
@@ -8622,7 +8814,7 @@ async function sendNovaTurn({
    skill default-tool lists.
    ---------------------------------------------------------------------- */
 
-const SKILLS_VERSION = 7; // bump when any skill prompt, defaultTools, or defaultTier changes
+const SKILLS_VERSION = 8; // bump when any skill prompt, defaultTools, or defaultTier changes
 
 const NOVA_TOOLS = [
     // === 4a. Filesystem (plugin-backed) ===
@@ -8805,8 +8997,17 @@ const NOVA_TOOLS = [
         parameters: {
             type: 'object',
             properties: {
-                name: { type: 'string' },
-                book: { type: 'object' },
+                name: { type: 'string', description: 'Canonical worldbook file identifier to create or update, without .json. For a character worldbook, usually use the character name.' },
+                book: {
+                    type: 'object',
+                    description: 'Complete SillyTavern world-info JSON. Must include an entries object keyed by uid. For new books include a display name and 3-5 complete entries with key arrays, comment, content, position, order, depth, and activation flags.',
+                    properties: {
+                        name: { type: 'string' },
+                        entries: { type: 'object' },
+                    },
+                    required: ['entries'],
+                    additionalProperties: true,
+                },
                 overwrite: { type: 'boolean', default: false },
             },
             required: ['name', 'book'],
@@ -9063,6 +9264,9 @@ const NOVA_SKILLS = [
             '  matchWholeWords, useGroupScoring, automationId, role, vectorized.',
             'Use st_read_worldbook and st_write_worldbook for creation and updates.',
             'st_write_worldbook saves ST world-info JSON to the user worlds directory.',
+            'When the user asks to create a new worldbook, call',
+            'st_write_worldbook directly with name and a full book object;',
+            'do not answer with `[none]`, and do not wait for a read first.',
             'Never use fs_write to create or update worldbooks; raw filesystem',
             'writes can land in the wrong folder or bypass ST world-info formatting.',
             'st_write_worldbook is a full-worldbook save and must include a complete `book` object.',
@@ -10115,6 +10319,11 @@ function buildNovaStTools({
     executeSlashImpl,
     listProfilesImpl,
     fetchImpl,
+    worldInfoCacheImpl,
+    eventSourceImpl,
+    eventTypesImpl,
+    updateWorldInfoListImpl,
+    reloadWorldInfoEditorImpl,
 } = {}) {
     const isObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
     const safeArgs = (v) => (isObject(v) ? v : {});
@@ -10360,6 +10569,60 @@ function buildNovaStTools({
             entries,
         };
     };
+    const normalizeWorldbookRows = (rows) => {
+        const out = [];
+        if (!Array.isArray(rows)) return out;
+        for (const row of rows) {
+            if (isObject(row)) {
+                const fileId = String(row.file_id || '').trim();
+                const name = String(row.name || fileId || '').trim();
+                if (!fileId && !name) continue;
+                const clean = { file_id: fileId || name, name: name || fileId };
+                if (isObject(row.extensions)) clean.extensions = row.extensions;
+                out.push(clean);
+            } else {
+                const name = String(row || '').trim();
+                if (name) out.push({ file_id: name, name });
+            }
+        }
+        return out;
+    };
+    const resolveWorldbookIdentifier = (native, requested) => {
+        if (!native?.ok) return null;
+        const rows = Array.isArray(native.rows) ? native.rows : [];
+        const byFileId = rows.find(row => row.file_id === requested);
+        if (byFileId) return { status: 'found', row: byFileId };
+        const byName = rows.filter(row => row.name === requested);
+        if (byName.length === 1) return { status: 'found', row: byName[0] };
+        if (byName.length > 1) return { status: 'ambiguous', rows: byName };
+        return { status: 'not-found' };
+    };
+    const refreshWorldbooks = async (fileId, data) => {
+        let refreshed = false;
+        const ctx = getCtx() || {};
+        const cache = worldInfoCacheImpl || worldInfoCache;
+        if (cache && typeof cache.set === 'function') {
+            try { cache.set(fileId, data); refreshed = true; } catch (_) { /* non-fatal */ }
+        }
+        const events = eventSourceImpl || ctx.eventSource || eventSource;
+        const types = eventTypesImpl || ctx.eventTypes || ctx.event_types || event_types;
+        if (events && typeof events.emit === 'function' && types?.WORLDINFO_UPDATED) {
+            try { await events.emit(types.WORLDINFO_UPDATED, fileId, data); refreshed = true; } catch (_) { /* non-fatal */ }
+        }
+        const updateList = updateWorldInfoListImpl
+            || (typeof ctx.updateWorldInfoList === 'function' ? ctx.updateWorldInfoList : null)
+            || updateWorldInfoList;
+        if (typeof updateList === 'function') {
+            try { await updateList(); refreshed = true; } catch (_) { /* non-fatal */ }
+        }
+        const reloadEditor = reloadWorldInfoEditorImpl
+            || (typeof ctx.reloadWorldInfoEditor === 'function' ? ctx.reloadWorldInfoEditor : null)
+            || reloadWorldInfoEditor;
+        if (typeof reloadEditor === 'function') {
+            try { await reloadEditor(fileId); refreshed = true; } catch (_) { /* non-fatal */ }
+        }
+        return refreshed;
+    };
     const refreshCharacters = async () => {
         const ctx = getCtx();
         const refresh = ctx && typeof ctx.getCharacters === 'function' ? ctx.getCharacters : null;
@@ -10370,26 +10633,14 @@ function buildNovaStTools({
     const listWorldbooksNative = async () => {
         const result = await postJson('/api/worldinfo/list', {});
         if (!result.ok) return result;
-        const rows = Array.isArray(result.data) ? result.data : [];
-        const worldbooks = [];
-        const identifiers = new Set();
+        const rows = normalizeWorldbookRows(result.data);
+        const worldbooks = rows.map(row => row.name || row.file_id).filter(Boolean);
+        const canonicalIds = rows.map(row => row.file_id).filter(Boolean);
+        const identifiers = new Set(canonicalIds);
         for (const row of rows) {
-            if (isObject(row)) {
-                const name = String(row.name || '').trim();
-                const fileId = String(row.file_id || '').trim();
-                if (name) worldbooks.push(name);
-                else if (fileId) worldbooks.push(fileId);
-                if (name) identifiers.add(name);
-                if (fileId) identifiers.add(fileId);
-            } else {
-                const name = String(row || '').trim();
-                if (name) {
-                    worldbooks.push(name);
-                    identifiers.add(name);
-                }
-            }
+            if (row.name) identifiers.add(row.name);
         }
-        return { ok: true, worldbooks, identifiers, rows };
+        return { ok: true, worldbooks, canonicalIds, identifiers, rows };
     };
 
     return {
@@ -10470,7 +10721,12 @@ function buildNovaStTools({
         st_list_worldbooks: async () => {
             try {
                 const native = await listWorldbooksNative();
-                if (native.ok) return { worldbooks: native.worldbooks, count: native.worldbooks.length, rows: native.rows };
+                if (native.ok) return {
+                    worldbooks: native.worldbooks,
+                    count: native.worldbooks.length,
+                    rows: native.rows,
+                    canonicalIds: native.canonicalIds,
+                };
             } catch (_) { /* fall through to slash fallback */ }
             // Strategy: try the slash command first. ST's `/world list`
             // (when present) returns a pipe of JSON or newline-separated
@@ -10509,10 +10765,28 @@ function buildNovaStTools({
             const { name } = safeArgs(rawArgs);
             const cleanName = safeName(name);
             if (!cleanName) return { error: 'name must be a non-empty string' };
+            let resolvedName = cleanName;
+            let displayName = cleanName;
             try {
-                const result = await postJson('/api/worldinfo/get', { name: cleanName });
+                const native = await listWorldbooksNative();
+                if (native.ok) {
+                    const resolved = resolveWorldbookIdentifier(native, cleanName);
+                    if (resolved?.status === 'not-found') {
+                        return { error: 'not-found', name: cleanName };
+                    }
+                    if (resolved?.status === 'ambiguous') {
+                        return { error: 'ambiguous', name: cleanName, matches: resolved.rows };
+                    }
+                    if (resolved?.status === 'found') {
+                        resolvedName = resolved.row.file_id;
+                        displayName = resolved.row.name || resolved.row.file_id;
+                    }
+                }
+            } catch (_) { /* old ST build or fetch unavailable: fall through to direct get/slash */ }
+            try {
+                const result = await postJson('/api/worldinfo/get', { name: resolvedName });
                 if (result.ok && isObject(result.data) && isObject(result.data.entries)) {
-                    return { name: cleanName, book: result.data };
+                    return { name: displayName, file_id: resolvedName, book: result.data };
                 }
             } catch (_) { /* fall through to slash fallback */ }
             const exec = await getSlash();
@@ -10559,23 +10833,44 @@ function buildNovaStTools({
             if (!isObject(args.book.entries) && !Array.isArray(args.book.entries)) {
                 return { error: 'invalid-book', tool: 'st_write_worldbook', hint: 'Worldbook JSON must include an `entries` object.' };
             }
-            const book = normalizeWorldbookBook(cleanName, args.book);
+            let fileId = cleanName;
+            let displayName = cleanName;
+            let existed = false;
             try {
                 const native = await listWorldbooksNative();
-                if (native.ok && native.identifiers?.has(cleanName) && !args.overwrite) {
-                    return { error: 'exists', name: cleanName, hint: 'Set overwrite=true to replace this worldbook.' };
+                if (native.ok) {
+                    const resolved = resolveWorldbookIdentifier(native, cleanName);
+                    if (resolved?.status === 'ambiguous') {
+                        return { error: 'ambiguous', name: cleanName, matches: resolved.rows };
+                    }
+                    if (resolved?.status === 'found') {
+                        existed = true;
+                        fileId = resolved.row.file_id;
+                        displayName = resolved.row.name || resolved.row.file_id;
+                        if (!args.overwrite) {
+                            return { error: 'exists', name: displayName, file_id: fileId, hint: 'Set overwrite=true to replace this worldbook.' };
+                        }
+                    }
                 }
             } catch (_) { /* if listing fails, let edit endpoint be authoritative */ }
+            const book = normalizeWorldbookBook(displayName, args.book);
             let result;
             try {
-                result = await postJson('/api/worldinfo/edit', { name: cleanName, data: book });
+                result = await postJson('/api/worldinfo/edit', { name: fileId, data: book });
             } catch (err) {
                 return { error: 'write-failed', tool: 'st_write_worldbook', message: String(err?.message || err) };
             }
             if (!result.ok) {
                 return { error: 'write-failed', tool: 'st_write_worldbook', status: result.status, message: result.message };
             }
-            return { ok: true, action: 'saved', name: cleanName };
+            const refreshed = await refreshWorldbooks(fileId, book);
+            return {
+                ok: true,
+                action: existed ? 'updated' : 'created',
+                name: displayName,
+                file_id: fileId,
+                ...(refreshed ? {} : { uiRefreshRequired: true }),
+            };
         },
 
         st_run_slash: async (rawArgs) => {

@@ -4,7 +4,7 @@
 
 ## Summary
 
-SillyTavern third-party extension (v0.13.0, ~10.6k lines of JS) that adds a floating smartphone UI overlay with multiple apps: **Command-X** (neural command messaging + unified iMessage-style texting), **Profiles** (NPC intel cards), **Quests** (persistent story tracker), **Map** (contact locations), **Nova** (approval-gated agentic assistant with a companion server plugin), and **Settings**. Pure browser JavaScript + CSS — no build system, no bundler, no runtime dependencies beyond SillyTavern's frontend.
+SillyTavern third-party extension (v0.13.2, ~11.2k lines of JS) that adds a floating smartphone UI overlay with multiple apps: **Command-X** (neural command messaging + unified iMessage-style texting), **Profiles** (NPC intel cards), **Quests** (persistent story tracker), **Map** (contact locations), **Nova** (approval-gated agentic assistant with a companion server plugin), and **Settings**. Pure browser JavaScript + CSS — no build system, no bundler, no runtime dependencies beyond SillyTavern's frontend.
 
 **Languages/Runtime:** Vanilla ES module JavaScript, CSS3, HTML. Runs inside SillyTavern's browser frontend (Chromium-based). jQuery is available globally via ST.
 
@@ -13,7 +13,7 @@ SillyTavern third-party extension (v0.13.0, ~10.6k lines of JS) that adds a floa
 ```
 index.js          — All extension logic (~10.6k lines). Entry point loaded by ST.
 style.css         — All styles (~1.7k lines). Phone shell, iMessage bubbles, command drawer, app chrome.
-manifest.json     — ST extension manifest (v0.13.0). Declares js, css, loading_order.
+manifest.json     — ST extension manifest (v0.13.2). Declares js, css, loading_order.
 settings.html     — ST settings panel fragment. Toggles + number inputs (including Nova config).
 README.md         — User-facing docs.
 AGENT_MEMORY.md   — Append-only shared memory across agent sessions. Read first, update on each PR.
@@ -23,11 +23,10 @@ nova/             — Starter soul/memory markdown loaded by the Nova app on fre
 presets/          — OpenAI-shaped connection presets shipped for Nova.
 server-plugin/    — Companion SillyTavern server plugin (`nova-agent-bridge/`) exposing fs/shell routes that Nova dispatches to via approval-gated tool calls.
 test/             — Node `--test` suites. `helpers.test.mjs` covers pure phone helpers; the `nova-*.test.mjs` files cover the Nova agent (state, tools, dispatch, approval modal, plugin, diff, etc.).
-st-docs/          — Reference copy of SillyTavern documentation (read-only reference, do not modify).
 .github/          — This file.
 ```
 
-There is no `package.json`, no linting config, and no CI/CD pipeline. **This is intentional** — ST third-party extensions are raw browser modules loaded directly. There is no build step; the only automated validation is the Node `--test` suites under `test/`.
+There is no `package.json` and no CI/CD pipeline. **This is intentional** — ST third-party extensions are raw browser modules loaded directly. There is no build step; the primary automated validation is the Node `--test` suites under `test/`. Use the installed SillyTavern source for implementation truth and `https://docs.sillytavern.app/` for canonical SillyTavern docs.
 
 ## Architecture
 

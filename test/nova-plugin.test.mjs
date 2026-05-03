@@ -134,15 +134,9 @@ describe('nova-agent-bridge init()', () => {
         assert.equal(typeof body.version, 'string');
         assert.equal(typeof body.root, 'string');
         assert.ok(path.isAbsolute(body.root), 'root should be absolute');
-        // shellAllowList is now the resolved subset of binaries actually
-        // present on the host's PATH (plan §8c). On CI/dev hosts this
-        // includes most of the defaults; we don't assert on a specific
-        // entry because Windows / minimal containers may legitimately
-        // be missing some.
         assert.ok(Array.isArray(body.shellAllowList));
-        for (const name of body.shellAllowList) {
-            assert.equal(typeof name, 'string');
-        }
+        assert.deepEqual(body.shellAllowList, []);
+        assert.equal(body.shell.enabled, false);
         assert.equal(typeof body.capabilities, 'object');
         // Every declared capability key must be a boolean.
         for (const [k, v] of Object.entries(body.capabilities)) {
@@ -244,7 +238,7 @@ describe('nova-agent-bridge init()', () => {
         assert.equal(r3._state.body.error, 'invalid-path');
     });
 
-    it('/manifest capabilities report all fs routes true; shell_run depends on PATH', async () => {
+    it('/manifest capabilities report all fs routes true; shell_run disabled by default', async () => {
         const r = mockRouter();
         await plugin.init(r);
         const manifestRoute = r.routes.find(x => x.method === 'GET' && x.path === '/manifest');
@@ -258,13 +252,9 @@ describe('nova-agent-bridge init()', () => {
         assert.equal(caps.fs_write, true, 'fs_write capability should be true');
         assert.equal(caps.fs_delete, true, 'fs_delete capability should be true');
         assert.equal(caps.fs_move, true, 'fs_move capability should be true');
-        // shell_run is `true` iff at least one allow-listed binary was
-        // resolved on PATH at init time. We don't assert a specific
-        // value here because CI hosts vary; we just assert the type
-        // and the relationship to the allow-list length.
         assert.equal(typeof caps.shell_run, 'boolean');
-        assert.equal(caps.shell_run, res._state.body.shellAllowList.length > 0,
-            'shell_run capability must mirror "allow-list non-empty"');
+        assert.equal(caps.shell_run, false);
+        assert.deepEqual(res._state.body.shellAllowList, []);
         // /manifest now surfaces the resolved audit log path.
         assert.equal(typeof res._state.body.auditLogPath, 'string');
         assert.ok(path.isAbsolute(res._state.body.auditLogPath));
@@ -307,5 +297,48 @@ describe('nova-agent-bridge _internal.resolveRoot', () => {
         } finally {
             await fs.rm(dir, { recursive: true, force: true });
         }
+    });
+});
+
+describe('nova-agent-bridge _internal.resolveShellPolicy', () => {
+    const { resolveShellPolicy, resolveAllowList } = plugin._internal;
+
+    it('defaults shell to disabled with an empty allow-list', () => {
+        assert.deepEqual(resolveShellPolicy('/definitely/not/a/real/path.yaml'), {
+            enabled: false,
+            allow: [],
+        });
+    });
+
+    it('reads shell.enabled and shell.allow from config.yaml', async () => {
+        const fs = await import('node:fs/promises');
+        const os = await import('node:os');
+        const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'nova-shell-cfg-'));
+        const cfg = path.join(dir, 'config.yaml');
+        try {
+            await fs.writeFile(cfg, [
+                'shell:',
+                '  enabled: true',
+                '  allow:',
+                '    - node',
+                '    - /bin/sh',
+                '    - git',
+                '    - node',
+                '',
+            ].join('\n'), 'utf8');
+            assert.deepEqual(resolveShellPolicy(cfg), {
+                enabled: true,
+                allow: ['node', 'git'],
+            });
+        } finally {
+            await fs.rm(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('enables only configured commands that resolve on PATH', () => {
+        const resolved = resolveAllowList(['node']);
+        assert.deepEqual(Object.keys(resolved), ['node']);
+        assert.equal(resolveAllowList(['absolutely-not-a-real-binary-xyz']).constructor, Object);
+        assert.deepEqual(resolveAllowList(['absolutely-not-a-real-binary-xyz']), {});
     });
 });

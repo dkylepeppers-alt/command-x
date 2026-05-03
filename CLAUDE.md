@@ -4,7 +4,7 @@
 
 ## What This Is
 
-A SillyTavern third-party extension (v0.13.0) that adds a smartphone UI overlay to RP chats. Six apps: **Command-X** (neural commands + unified messaging), **Profiles** (NPC intel cards), **Quests** (persistent story tracker), **Map** (contact location tracking), **Nova** (approval-gated agentic assistant via a companion server plugin), and **Settings**. Messages flow through the RP — the extension injects system prompts so the LLM wraps phone replies in `[sms]` tags, which get extracted for the phone UI.
+A SillyTavern third-party extension (v0.13.2) that adds a smartphone UI overlay to RP chats. Six apps: **Command-X** (neural commands + unified messaging), **Profiles** (NPC intel cards), **Quests** (persistent story tracker), **Map** (contact location tracking), **Nova** (approval-gated agentic assistant via a companion server plugin), and **Settings**. Messages flow through the RP — the extension injects system prompts so the LLM wraps phone replies in `[sms]` tags, which get extracted for the phone UI.
 
 > The previous "OpenClaw" app was renamed to **Nova** in v0.13.0 along with the migration from `openclaw-bridge` → `nova-agent-bridge`. References to OpenClaw in any older notes or branches are stale; see the "Legacy note" under [Nova Agent](#nova-agent) for the migration path.
 
@@ -14,7 +14,7 @@ A SillyTavern third-party extension (v0.13.0) that adds a smartphone UI overlay 
 command-x/
 ├── index.js          # All extension logic (~10.6k lines; single frontend module)
 ├── style.css         # All styling (~1.7k lines)
-├── manifest.json     # ST extension manifest — single source of truth for VERSION (currently 0.13.0)
+├── manifest.json     # ST extension manifest — single source of truth for VERSION (currently 0.13.2)
 ├── settings.html     # ST settings panel (toggles, number inputs, Nova config)
 ├── README.md         # User-facing docs
 ├── AGENT_MEMORY.md   # Append-only shared memory across agent sessions
@@ -37,8 +37,7 @@ command-x/
 │   ├── helpers.test.mjs              # Pure phone helpers
 │   ├── nova-*.test.mjs               # Nova agent coverage (state, tools, dispatch, approval modal, plugin, diff, …)
 │   └── *.test.mjs                    # Additional non-Nova feature tests (for example swipe regeneration)
-├── .github/          # GitHub config + copilot-instructions.md
-└── st-docs/          # Local copy of SillyTavern docs (reference only)
+└── .github/          # GitHub config + copilot-instructions.md
 ```
 
 This is a **single-file JS architecture** on the frontend. All extension logic lives in `index.js`. The single-file constraint dates from when the file was ~1k lines; at ~10.6k lines (much of which is the Nova subsystem) extracting `nova/*.js` modules is being tracked as a deferred refactor in the code-review history. ST loads one JS entry point per extension. The Nova server plugin under `server-plugin/nova-agent-bridge/` is a separate Node module loaded by SillyTavern's plugin system.
@@ -131,7 +130,7 @@ typingTimeout       // setTimeout ID for the 30s awaitingReply cleanup
 ### Named Constants
 
 ```javascript
-VERSION              // single-sourced; mirror of manifest.json#version (currently '0.13.0')
+VERSION              // single-sourced; mirror of manifest.json#version (currently '0.13.2')
 CX_PROMPT_DEPTHS     // {sms:1, contacts:2, privatePhone:3, map:3, quests:4} (frozen)
 AWAIT_TIMEOUT_MS     // 30_000 — awaitingReply auto-clear timeout
 CLOCK_INTERVAL_MS    // 30_000 — clock display refresh interval
@@ -321,4 +320,5 @@ Manual integration testing (no automated browser tests):
 - **v0.11** — Map app (visual location tracker with schematic or uploaded background, pins, zoom/pan, movement trails), `[place]` tag, interactive quest tracker upgrade (richer states, urgency, focus, next-action, subtasks, manual overrides preserved across auto-updates), group-chat contact dedupe
 - **v0.12** — Nova agent scaffolding: home-screen tile + view, connection-profile swap, per-chat transcript, approval-gated tool calls, tool registry tiers, skill packs, soul/memory markdown self-edit tools, companion `nova-agent-bridge` server plugin (fs routes with `.nova-trash` safety + audit log), plugin capability probe; map upload + schematic mode, place editor, persistent map metadata, polling cadence
 - **v0.13.0** — OpenClaw app fully retired (legacy metadata migrated to `.legacy_openclaw`, `settings.openclawMode` stripped via `LEGACY_KEYS`); Nova phone-handler factory (`buildNovaPhoneHandlers`) wires `phone_*` tools to the real local stores; expanded Nova test suites; new `nova-agent-bridge` server plugin replaces `openclaw-bridge`; tier × tool registry × user-approval pipeline; fs read/write/move/delete + audit JSONL + soul/memory append/overwrite tools; symlink-escape hardening (parent-realpath walk for non-existent write targets), strict base64 validation, `.nova-trash/` deny-list, audit log content redaction
-- **v0.13.x review sweep** — Code-review-driven hygiene pass: unified `chatKey()` storage prefix helper (eliminates `'no-chat'`/`'default'` divergence), event-listener `wireEventListeners`/`unwireEventListeners` lifecycle (closes ST-docs leak), tightened `hideSmsTagsInDom` escaping, `CX_PROMPT_DEPTHS` constants, declarative `PHONE_SETTING_BINDINGS`/`NOVA_SETTING_BINDINGS` tables for `loadSettings`/`saveSettings`, `getTotalUnread` direct-key scan, `loadNpcs`/`loadQuests` boundary validation, `parseSmsAttrs` regex contract documented, `escHtml`/`escAttr`/`escapeHtml` JSDoc'd, `CONTACT_GRADIENTS` invariant comment, defense-in-depth `escHtml` on `last.time`, `nova/soul.md` + `nova/memory.md` runtime-mutation note. Server-plugin specifics deferred to a separate sweep.
+- **v0.13.x review sweep** — Code-review-driven hygiene pass: unified `chatKey()` storage prefix helper (eliminates `'no-chat'`/`'default'` divergence), event-listener `wireEventListeners`/`unwireEventListeners` lifecycle (closes listener leak), tightened `hideSmsTagsInDom` escaping, `CX_PROMPT_DEPTHS` constants, declarative `PHONE_SETTING_BINDINGS`/`NOVA_SETTING_BINDINGS` tables for `loadSettings`/`saveSettings`, `getTotalUnread` direct-key scan, `loadNpcs`/`loadQuests` boundary validation, `parseSmsAttrs` regex contract documented, `escHtml`/`escAttr`/`escapeHtml` JSDoc'd, `CONTACT_GRADIENTS` invariant comment, defense-in-depth `escHtml` on `last.time`, `nova/soul.md` + `nova/memory.md` runtime-mutation note. Server-plugin specifics deferred to a separate sweep.
+- **v0.13.2** — Nova worldbook tools now use canonical ST worldbook `file_id`s and refresh ST frontend world-info state after writes; bridge shell is disabled unless explicitly enabled with an allow-list; vendored SillyTavern docs was removed in favor of installed SillyTavern source plus official docs; Nova empty `[none]` tool turns produce an actionable completion summary; Command-X modals use iPad-compatible touch dragging by title/header.

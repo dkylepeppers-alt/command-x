@@ -46,6 +46,22 @@ function _stringifyNovaToolResult(value) {
     try { return JSON.stringify(value); } catch (_) { return String(value); }
 }
 
+function isNovaEmptyAssistantContent(value) {
+    const text = String(value ?? '').trim().toLowerCase();
+    return !text || text === 'none' || text === '[none]';
+}
+
+function summarizeNovaToolDispatchCompletion({ events = [], toolsExecuted = 0, toolsDenied = 0, toolsFailed = 0 } = {}) {
+    const toolEvents = Array.isArray(events) ? events.filter(ev => ev && ev.role === 'tool') : [];
+    const names = Array.from(new Set(toolEvents.map(ev => String(ev.name || 'tool')).filter(Boolean)));
+    const parts = [];
+    if (toolsExecuted > 0) parts.push(`${toolsExecuted} tool${toolsExecuted === 1 ? '' : 's'} ran`);
+    if (toolsDenied > 0) parts.push(`${toolsDenied} denied`);
+    if (toolsFailed > 0) parts.push(`${toolsFailed} failed`);
+    const status = parts.length ? parts.join(', ') : 'Tool turn completed';
+    return names.length ? `${status}: ${names.join(', ')}` : `${status}.`;
+}
+
 async function runNovaToolDispatch({
     initialResponse,
     messages,
@@ -90,7 +106,17 @@ async function runNovaToolDispatch({
         events.push(assistantMsg);
         finalAssistant = assistantMsg;
 
-        if (toolCalls.length === 0) break;
+        if (toolCalls.length === 0) {
+            if (isNovaEmptyAssistantContent(assistantMsg.content) && (toolsExecuted > 0 || toolsDenied > 0 || toolsFailed > 0)) {
+                assistantMsg.content = summarizeNovaToolDispatchCompletion({
+                    events,
+                    toolsExecuted,
+                    toolsDenied,
+                    toolsFailed,
+                });
+            }
+            break;
+        }
 
         for (const call of toolCalls) {
             if (signal && signal.aborted) return { ok: false, reason: 'aborted' };
@@ -206,6 +232,7 @@ async function runNovaToolDispatch({
 
 const TOOL_REGISTRY = [
     { name: 'st_get_context', permission: 'read' },
+    { name: 'st_write_worldbook', permission: 'write' },
     { name: 'fs_read',        permission: 'read' },
     { name: 'fs_write',       permission: 'write' },
     { name: 'shell_run',      permission: 'shell' },
@@ -296,6 +323,26 @@ describe('runNovaToolDispatch — happy path', () => {
         // fs_read result was a plain string — should be stored verbatim, not JSON-quoted.
         const fsResult = res.events.find(e => e.role === 'tool' && e.name === 'fs_read');
         assert.equal(fsResult.content, 'file contents');
+    });
+
+    it('replaces final [none] after tool execution with a deterministic completion summary', async () => {
+        const handlers = {
+            st_write_worldbook: async () => ({ ok: true, action: 'created', name: 'siren', file_id: 'siren' }),
+        };
+        const sendRequest = async () => ({ content: '[none]' });
+        const messages = [{ role: 'system', content: 's' }];
+        const res = await runNovaToolDispatch({
+            initialResponse: { content: '', tool_calls: [makeCall('c1', 'st_write_worldbook', { name: 'siren', book: { entries: {} } })] },
+            messages,
+            toolRegistry: TOOL_REGISTRY,
+            handlers,
+            tier: 'write',
+            rememberedApprovals: new Set(['st_write_worldbook']),
+            sendRequest,
+        });
+        assert.equal(res.ok, true);
+        assert.equal(res.finalAssistant.content, '1 tool ran: st_write_worldbook');
+        assert.equal(res.events.at(-1).content, '1 tool ran: st_write_worldbook');
     });
 });
 

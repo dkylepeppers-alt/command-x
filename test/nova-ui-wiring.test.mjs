@@ -11,7 +11,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
@@ -30,9 +30,35 @@ async function loadSources() {
 test('manifest.json and index.js VERSION agree', async () => {
     const { js, manifest } = await loadSources();
     assert.ok(manifest.version, 'manifest.json must have a version field');
+    assert.equal(manifest.author, 'dkylepeppers');
+    assert.equal(manifest.minimum_client_version, '1.17.0');
+    assert.equal('requires' in manifest, false, 'empty deprecated requires field should not be present');
+    assert.equal('optional' in manifest, false, 'empty deprecated optional field should not be present');
     const m = js.match(/const VERSION = '([^']+)';/);
     assert.ok(m, 'VERSION constant not found in index.js');
     assert.equal(m[1], manifest.version, 'index.js VERSION must match manifest.json version');
+});
+
+test('vendored SillyTavern docs snapshot is not present or referenced', async () => {
+    const docsDir = ['st', 'docs'].join('-');
+    const forbiddenRef = `${docsDir}/`;
+    await assert.rejects(() => stat(resolve(repoRoot, docsDir)), /ENOENT/);
+    const ignored = new Set(['node_modules', '.git']);
+    const hits = [];
+    async function walk(dir) {
+        for (const entry of await readdir(dir, { withFileTypes: true })) {
+            if (ignored.has(entry.name)) continue;
+            const full = resolve(dir, entry.name);
+            if (entry.isDirectory()) {
+                await walk(full);
+            } else {
+                const text = await readFile(full, 'utf8').catch(() => '');
+                if (text.includes(forbiddenRef)) hits.push(full);
+            }
+        }
+    }
+    await walk(repoRoot);
+    assert.deepEqual(hits, []);
 });
 
 test('Nova UI wiring functions are declared', async () => {
@@ -321,6 +347,38 @@ test('style.css includes Nova message bubble + picker-modal classes', async () =
     ]) {
         assert.ok(css.includes(cls), `style.css missing ${cls}`);
     }
+});
+
+test('generic modals are viewport-scrollable and top-safe', async () => {
+    const { js, css } = await loadSources();
+    const overlay = css.match(/\.cx-modal-overlay\s*\{([\s\S]*?)\n\}/);
+    const box = css.match(/\.cx-modal-box\s*\{([\s\S]*?)\n\}/);
+    const title = css.match(/\.cx-modal-title\s*\{([\s\S]*?)\n\}/);
+    assert.ok(overlay, 'style.css missing .cx-modal-overlay block');
+    assert.ok(box, 'style.css missing .cx-modal-box block');
+    assert.ok(title, 'style.css missing .cx-modal-title block');
+    assert.match(overlay[1], /align-items:\s*flex-start/,
+        'modal overlay should start at the safe top edge instead of centering tall modals offscreen');
+    assert.match(overlay[1], /overflow-y:\s*auto/,
+        'modal overlay must scroll when the viewport is short');
+    assert.match(box[1], /max-height:\s*calc\(100dvh\s*-\s*36px\)/,
+        'modal box must be constrained to the visual viewport');
+    assert.match(box[1], /overflow-y:\s*auto/,
+        'modal box must scroll its own long content');
+    assert.match(title[1], /touch-action:\s*none/,
+        'modal drag handle must disable browser touch panning while dragging on iPad');
+    assert.match(js, /function enableCxModalDrag\(/,
+        'shared modal drag helper must exist');
+    assert.match(js, /addEventListener\('touchstart'/,
+        'modal drag helper must use explicit Touch Events for iPad Safari support');
+    assert.match(js, /addEventListener\('touchmove'[\s\S]*?passive:\s*false/,
+        'modal drag helper must be able to prevent iPad viewport panning while dragging');
+    assert.match(js, /addEventListener\('mousedown'/,
+        'modal drag helper must keep mouse drag support for desktop browsers');
+    const appendCount = (js.match(/document\.body\.appendChild\(overlay\);/g) || []).length;
+    const dragCount = (js.match(/enableCxModalDrag\(overlay\);/g) || []).length;
+    assert.equal(dragCount, appendCount,
+        'every modal overlay appended to document.body must enable dragging');
 });
 
 test('style.css keeps Command-X and Nova transcript text selectable', async () => {

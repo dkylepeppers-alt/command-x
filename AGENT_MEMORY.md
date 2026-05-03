@@ -142,7 +142,9 @@ chat-metadata backing store alongside the existing localStorage message keys.
 **Notes for future agents:**
 - `presets/openai/Command-X.json` side-channel rules now explicitly state strict SMS tag syntax applies to every phone text update, including character-initiated messages.
 - This closes a prompt-coverage gap between runtime SMS injection guidance and preset side-channel guidance.
-- Full `node --test test/*.mjs` still has the unrelated pre-existing version-pin failure (`test/nova-ui-wiring.test.mjs` expects `manifest.json` version `0.13.0`, repo is `0.13.1`).
+- At the time, full `node --test test/*.mjs` still had an unrelated pre-existing
+  version-pin failure in `test/nova-ui-wiring.test.mjs`; later release work
+  removed the hardcoded manifest-version pin.
 
 ### 2026-04-30 — SMS prompt now enforces strict parser format (commit pending)
 
@@ -151,7 +153,9 @@ chat-metadata backing store alongside the existing localStorage message keys.
 **Notes for future agents:**
 - `injectSmsPrompt()` now includes an explicit **STRICT SMS FORMAT** clause requiring lowercase `[sms]` tags, both `from` + `to` attributes with double quotes, and a closing `[/sms]` tag.
 - The instruction also forbids narration/stage directions/markdown inside SMS tags so only phone-text content appears between the brackets.
-- This change is prompt-only (no parser changes); full `node --test test/*.mjs` still reports the pre-existing version-pin failure in `test/nova-ui-wiring.test.mjs` expecting `manifest.json` version `0.13.0` while repo currently has `0.13.1`.
+- This change is prompt-only (no parser changes). At the time, full
+  `node --test test/*.mjs` still reported a pre-existing manifest-version pin;
+  later release work removed that hardcoded version expectation.
 
 ### 2026-04-30 — Tolerate unclosed [status] tags before other side-channel tags (commit pending)
 
@@ -703,10 +707,10 @@ The dispatcher (`runNovaToolDispatch`) is a pure handler-loop and must not reach
 **What's deferred (closed-enum surface, NOT silently broken):**
 - `st_write_character` and `st_write_worldbook` — both return `{ error: 'not-implemented', tool, hint }` on valid args. The hint directs the LLM to the existing `fs_write` workaround at the character / worldbook JSON path. The skill-pack guidance ("Prefer st_write_character over fs_write…") will start applying automatically once these handlers land — no skill-pack code changes needed.
 
-**Why deferred (not "didn't get to it"):** ST's documented public surface for editing a character card or worldbook from a third-party extension is unstable. Cards have PNG metadata that has to be re-embedded after a JSON edit; worldbooks have uid normalisation. Neither is exposed via `getContext()` and neither is captured in the local `st-docs/` reference. I'd rather ship a closed-enum `not-implemented` surface than a `fetch` against speculative endpoints that might silently corrupt user data — the closed-enum surface keeps the LLM's tool contract honest (it can detect unavailability and use the workaround on the same turn) and makes it impossible for the dispatcher to misinterpret a partial write. **This is a deliberate scope cut, not a bug.** The tests assert the not-implemented shape so the next agent can replace it without grepping for the right place.
+**Why deferred (not "didn't get to it"):** ST's documented public surface for editing a character card or worldbook from a third-party extension is unstable. Cards have PNG metadata that has to be re-embedded after a JSON edit; worldbooks have uid normalisation. Use the installed SillyTavern source for implementation truth and `https://docs.sillytavern.app/` for canonical docs. I'd rather ship a closed-enum `not-implemented` surface than a `fetch` against speculative endpoints that might silently corrupt user data — the closed-enum surface keeps the LLM's tool contract honest (it can detect unavailability and use the workaround on the same turn) and makes it impossible for the dispatcher to misinterpret a partial write. **This is a deliberate scope cut, not a bug.** The tests assert the not-implemented shape so the next agent can replace it without grepping for the right place.
 
 **Suggested follow-up path for the deferred 2:**
-1. Confirm the correct ST internal HTTP routes — likely `/api/characters/edit` (or `/merge-attributes`) for cards and something like `/api/worldinfo/edit` for worldbooks — by reading the ST source against your installed version (different majors have moved these). Don't rely on the `st-docs/` snapshot.
+1. Confirm the correct ST internal HTTP routes — likely `/api/characters/edit` (or `/merge-attributes`) for cards and something like `/api/worldinfo/edit` for worldbooks — by reading the installed ST source for the running version. Use `https://docs.sillytavern.app/` for canonical docs.
 2. Check whether `getContext()` exposes `getRequestHeaders` (it does on recent builds via `ctx.getRequestHeaders?.()` — that's where the CSRF token comes from).
 3. Replace ONLY the `st_write_character` and `st_write_worldbook` handler bodies in `buildNovaStTools` (and the inline copy in `test/nova-st-tools.test.mjs`). The factory shape and DI surface don't need to change.
 4. Update the deferred-shape unit tests to cover the success path. Keep at least one `not-implemented`-shape test gated behind a "if ST API is unreachable" branch so the closed-enum fallback stays exercised.
@@ -988,7 +992,7 @@ The dispatcher (`runNovaToolDispatch`) is a pure handler-loop and must not reach
 - **`defaultTools` for this skill is deliberately broader than Character Creator.** It includes `st_run_slash` (so Nova can dry-run scripts and regex triggers end-to-end) **and** both the character-card and worldbook tool sets (because STscript scripts / regex patterns commonly read or write either surface). `shell_run` and `fs_delete` / `fs_move` are intentionally NOT defaults — user can escalate tier and add them manually if building a build pipeline.
 - **`st_run_slash` is approval-gated (`permission: 'write'`).** The system prompt explicitly tells Nova to dry-run with `/echo` first. Do not attempt to switch `st_run_slash` to `'read'` without a very hard look — a slash command can do anything in ST, including `/persona`, `/delchat`, `/api`.
 - **Regex scope contract**: the prompt says "prefer `st_write_character` over `fs_write` for scoped regex (character-card `data.extensions.regex_scripts[]`); global regex lives in `settings.json.extensions.regex` and needs `fs_write`". If a future PR adds a dedicated `st_write_settings` tool, remove the `fs_write`-on-settings.json guidance from this skill's prompt.
-- **Prompt was authored from `st-docs/extensions/Regex.md` + `st-docs/Usage/macros.md` + `st-docs/For_Contributors/st-script.md`.** Those three files are the canonical reference for this skill. If they change upstream, update the skill prompt and bump `SKILLS_VERSION` again.
+- **Prompt was authored from the official SillyTavern docs for Regex, macros, and STscript.** Use `https://docs.sillytavern.app/` as the canonical docs reference. If those docs change upstream, update the skill prompt and bump `SKILLS_VERSION` again.
 - **The existing structural test (`nova-tool-args.test.mjs`) covers the new skill automatically** — every tool name in `defaultTools` is validated against `NOVA_TOOLS`, `defaultTier` against `VALID_TIERS`, and shape/id uniqueness. 369/369 still green; no new test file needed for a pure prompt addition.
 
 **Validation:**
@@ -1640,8 +1644,8 @@ can distinguish "plugin present, handler pending" from "plugin missing
 entirely".
 
 **Notes for future agents:**
-- **Plugin loads as CommonJS.** ST's plugin loader (`st-docs/For_Contributors/
-  Server-Plugins.md`) prefers `package.json.main`, then `index.js`, then
+- **Plugin loads as CommonJS.** ST's plugin loader, documented at
+  `https://docs.sillytavern.app/for-contributors/server-plugins/`, prefers `package.json.main`, then `index.js`, then
   `index.mjs`. We ship `package.json` with `"main": "index.js"` so the
   CJS entry is always picked up. Don't convert this to ESM — ST's loader
   is tested primarily against CJS plugins.
@@ -2893,3 +2897,42 @@ unread count.
   same unrelated `test/nova-shell-route.test.mjs` ANSI-colored stdout mismatch
   (`'\x1B[33m4\x1B[39m'` vs `'4'`).
 - `parallel_validation` passed: code review clean and CodeQL reported 0 alerts.
+
+---
+
+## 2026-05-03 — v0.13.2 Nova/ST tooling and iPad modal release
+
+### Why
+
+Nova needed to stop treating missing SillyTavern worldbooks as empty dummy books,
+the bridge shell route needed an explicit opt-in policy, vendored SillyTavern
+docs needed to be removed from the extension repo, and Command-X modal dragging
+needed to work on iPad Safari.
+
+### Change
+
+- Bumped Command-X `manifest.json` and `index.js` `VERSION` to `0.13.2`; bumped
+  `server-plugin/nova-agent-bridge/package.json` to `0.1.1`.
+- `st_list_worldbooks`, `st_read_worldbook`, and `st_write_worldbook` now use
+  canonical worldbook `file_id` values from `/api/worldinfo/list`; reads reject
+  unknown identifiers instead of accepting ST's dummy empty get response.
+- Successful worldbook writes refresh available SillyTavern frontend world-info
+  cache/list/editor hooks when present and return `uiRefreshRequired` when a
+  UI refresh hint is still needed.
+- Bridge shell execution now defaults to disabled and only advertises
+  `shell_run` when `shell.enabled: true` plus at least one configured bare
+  command resolves.
+- Removed the vendored SillyTavern docs snapshot. Use the installed SillyTavern source
+  for implementation truth and `https://docs.sillytavern.app/` for canonical
+  SillyTavern docs.
+- Nova tool turns ending in empty text / `[none]` now surface a deterministic
+  completion summary after tool execution.
+- Command-X modals are draggable by the title/header using explicit
+  `touchstart` / `touchmove` / `touchend` handling modeled after the public RPG
+  Companions mobile drag pattern, with mouse fallback for desktop.
+
+### Validation
+
+- `node --check index.js`
+- `node --test test/nova-ui-wiring.test.mjs test/nova-tool-dispatch.test.mjs test/nova-tool-args.test.mjs test/nova-turn.test.mjs test/nova-st-tools.test.mjs`
+- `node --test test/*.mjs` passed 889/889.
