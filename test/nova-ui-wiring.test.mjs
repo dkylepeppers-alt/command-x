@@ -330,6 +330,30 @@ test('saveSettings reads both settings-panel and in-phone Nova IDs', async () =>
     assert.match(js, /cx_nova_profile[\s\S]{0,200}cx-set-nova-profile/);
     assert.match(js, /cx_nova_default_tier[\s\S]{0,200}cx-set-nova-tier/);
     assert.match(js, /cx_nova_max_tool_calls[\s\S]{0,200}cx-set-nova-max-tools/);
+    assert.match(js, /function syncNovaSettingInputs\(/,
+        'Nova duplicate settings surfaces must have a sync helper');
+    assert.match(js, /novaPickProfile[\s\S]*syncNovaSettingInputs\('profileName'/,
+        'profile picker must sync both profile inputs before later saves');
+    assert.match(js, /const novaBinding = NOVA_SETTING_BINDINGS\.find/,
+        'Nova settings change handlers must update the changed binding before saveSettings reads duplicate ids');
+    assert.match(js, /profileName:\s*''/,
+        'Nova must not default to a hardcoded profile that can overwrite the user selection');
+});
+
+test('creator skills have deterministic fallback when models return empty tool frames', async () => {
+    const { js } = await loadSources();
+    assert.match(js, /function getNovaCreatorWriteToolName\(/,
+        'creator write-tool mapping helper is missing');
+    assert.match(js, /worldbook-creator[\s\S]*st_write_worldbook/,
+        'worldbook creator must map to st_write_worldbook');
+    assert.match(js, /character-creator[\s\S]*st_write_character/,
+        'character creator must map to st_write_character');
+    assert.match(js, /empty-response-retry-forced-\$\{creatorWriteToolName\}/,
+        'empty creator responses must retry with the creator write tool forced');
+    assert.match(js, /empty-response-json-fallback-\$\{creatorWriteToolName\}/,
+        'empty creator responses must fall back to JSON arguments and a synthetic tool call');
+    assert.match(js, /makeNovaSyntheticToolCall\(creatorWriteToolName, fallbackArgs\)/,
+        'validated JSON fallback args must enter the normal approval-gated dispatcher');
 });
 
 test('style.css includes Nova message bubble + picker-modal classes', async () => {
@@ -349,7 +373,7 @@ test('style.css includes Nova message bubble + picker-modal classes', async () =
     }
 });
 
-test('generic modals are viewport-scrollable and top-safe', async () => {
+test('generic modals are floating, draggable, and topmost on iPad', async () => {
     const { js, css } = await loadSources();
     const overlay = css.match(/\.cx-modal-overlay\s*\{([\s\S]*?)\n\}/);
     const box = css.match(/\.cx-modal-box\s*\{([\s\S]*?)\n\}/);
@@ -357,11 +381,17 @@ test('generic modals are viewport-scrollable and top-safe', async () => {
     assert.ok(overlay, 'style.css missing .cx-modal-overlay block');
     assert.ok(box, 'style.css missing .cx-modal-box block');
     assert.ok(title, 'style.css missing .cx-modal-title block');
-    assert.match(overlay[1], /align-items:\s*flex-start/,
-        'modal overlay should start at the safe top edge instead of centering tall modals offscreen');
-    assert.match(overlay[1], /overflow-y:\s*auto/,
-        'modal overlay must scroll when the viewport is short');
-    assert.match(box[1], /max-height:\s*calc\(100dvh\s*-\s*36px\)/,
+    assert.match(overlay[1], /z-index:\s*2147483000/,
+        'modal layer must sit above the floating phone and ST panels');
+    assert.match(overlay[1], /pointer-events:\s*none/,
+        'modal layer must not behave like a fullscreen blocking sheet');
+    assert.match(overlay[1], /overflow:\s*visible/,
+        'modal layer must allow the floating box to be positioned freely');
+    assert.match(box[1], /position:\s*fixed/,
+        'modal box must be a floating viewport-positioned dialog');
+    assert.match(box[1], /pointer-events:\s*auto/,
+        'modal box must remain interactive when the layer ignores pointer events');
+    assert.match(box[1], /max-height:\s*calc\(100dvh\s*-\s*24px\)/,
         'modal box must be constrained to the visual viewport');
     assert.match(box[1], /overflow-y:\s*auto/,
         'modal box must scroll its own long content');
@@ -379,6 +409,34 @@ test('generic modals are viewport-scrollable and top-safe', async () => {
     const dragCount = (js.match(/enableCxModalDrag\(overlay\);/g) || []).length;
     assert.equal(dragCount, appendCount,
         'every modal overlay appended to document.body must enable dragging');
+});
+
+test('main phone shell is floating and draggable on touch devices', async () => {
+    const { js, css } = await loadSources();
+    const wrapper = css.match(/#cx-panel-wrapper\s*\{([\s\S]*?)\n\}/);
+    const statusbar = css.match(/\.cx-statusbar\s*\{([\s\S]*?)\n\}/);
+    assert.ok(wrapper, 'style.css missing #cx-panel-wrapper block');
+    assert.ok(statusbar, 'style.css missing .cx-statusbar block');
+    assert.doesNotMatch(wrapper[1], /width:\s*100vw/,
+        'phone wrapper must not consume the full viewport width');
+    assert.doesNotMatch(wrapper[1], /(?:^|\n)\s*height:\s*100d?vh/,
+        'phone wrapper must not consume the full viewport height');
+    assert.doesNotMatch(wrapper[1], /background:\s*rgba\(0,\s*0,\s*0,\s*\.85\)/,
+        'phone wrapper must not render a fullscreen dark backdrop');
+    assert.match(wrapper[1], /right:\s*max\(/,
+        'floating phone should default to a viewport edge instead of centered overlay layout');
+    assert.match(statusbar[1], /touch-action:\s*none/,
+        'phone drag handle must suppress iPad viewport panning while dragging');
+    assert.match(js, /phonePosition:\s*null/,
+        'phone drag position must be persisted in extension settings');
+    assert.match(js, /function enableCxPhoneDrag\(/,
+        'shared phone drag helper must exist');
+    assert.match(js, /addEventListener\('touchmove'[\s\S]*?passive:\s*false/,
+        'phone drag helper must use non-passive touchmove for iPad Safari');
+    assert.match(js, /addEventListener\('mousedown'/,
+        'phone drag helper must keep mouse drag support');
+    assert.match(js, /enableCxPhoneDrag\(wrapper\);/,
+        'panel creation and rebuild must wire phone dragging');
 });
 
 test('style.css keeps Command-X and Nova transcript text selectable', async () => {

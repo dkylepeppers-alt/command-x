@@ -239,6 +239,16 @@ describe('NOVA_SKILLS — structural invariants', () => {
         assert.ok(byId['worldbook-creator'].defaultTools.includes('st_write_worldbook'));
     });
 
+    it('creator skills can inspect personas, characters, and worldbooks before writing', () => {
+        const byId = Object.fromEntries(NOVA_SKILLS.map(s => [s.id, s]));
+        for (const id of ['character-creator', 'worldbook-creator']) {
+            const skill = byId[id];
+            for (const tool of ['st_get_context', 'st_read_persona', 'st_list_characters', 'st_read_character', 'st_list_worldbooks', 'st_read_worldbook']) {
+                assert.ok(skill.defaultTools.includes(tool), `${id} must expose ${tool}`);
+            }
+        }
+    });
+
     it('image prompter exposes read-only visual canon sources', () => {
         const byId = Object.fromEntries(NOVA_SKILLS.map(s => [s.id, s]));
         const skill = byId['image-prompter'];
@@ -254,8 +264,8 @@ describe('NOVA_SKILLS — structural invariants', () => {
         // design so a future semantic rewrite forces a conscious test update.
         const byId = Object.fromEntries(NOVA_SKILLS.map(s => [s.id, s.systemPrompt]));
         const requirements = {
-            'character-creator': ['st_list_characters', 'alternate greetings', 'mes_example', 'avatar_prompt', 'duplicate', 'Never use fs_write'],
-            'worldbook-creator': ['read → merge → validate → write', 'keysecondary', 'token budget', 'constant entries', 'selective', 'Never use fs_write'],
+            'character-creator': ['st_read_persona', 'worldbooks', 'st_list_characters', 'alternate greetings', 'mes_example', 'avatar_prompt', 'duplicate', 'Never use fs_write'],
+            'worldbook-creator': ['st_get_context', 'st_read_persona', 'st_read_character', 'read → merge → validate → write', 'keysecondary', 'token budget', 'constant entries', 'selective', 'Never use fs_write'],
             'stscript-regex': ['mandatory before any save', 'Quick Reply', 'lookarounds', 'catastrophically backtrack'],
             'image-prompter': ['scene_summary', 'SDXL', 'Flux', 'Illustrious', 'negative', 'story narration', 'visually descriptive', 'character cards', 'worldbook entries', 'current clothing'],
             'quest-designer': ['phone_list_quests', 'phone_write_quest', 'subtasks'],
@@ -280,6 +290,6 @@ describe('SKILLS_VERSION', () => {
         assert.ok(m, 'SKILLS_VERSION constant not found');
         const v = Number(m[1]);
         assert.ok(Number.isInteger(v) && v > 0);
-        assert.equal(v, 8, 'bump SKILLS_VERSION when skill prompts, defaultTools, or defaultTier change');
+        assert.equal(v, 10, 'bump SKILLS_VERSION when skill prompts, defaultTools, or defaultTier change');
     });
 });

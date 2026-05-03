@@ -1,4 +1,4 @@
-# Manual Validation — Command-X v0.13.2
+# Manual Validation — Command-X v0.13.3
 
 > **Standalone, self-contained release-gate checklist.** Run through every box
 > before tagging a release. This file is the **single source of truth** —
@@ -8,7 +8,7 @@
 > them top-to-bottom (`less docs/MANUAL_VALIDATION.md`, or
 > `glow docs/MANUAL_VALIDATION.md` if available) while you keep a live
 > SillyTavern browser open for the UI clicks. Every UI label, button id, file
-> path, and console string is quoted verbatim from the v0.13.2 source.
+> path, and console string is quoted verbatim from the v0.13.3 source.
 >
 > **Permanent `[ ]` checklist.** Never agent-ticked — these are *user*
 > acceptance steps, not unit tests. Re-run on every release.
@@ -70,7 +70,7 @@ Before the phone or Nova will work at all:
 - [ ] **Codex CLI:** This repo is checked out at
   `SillyTavern/public/scripts/extensions/third-party/command-x/`, or `CX_DIR`
   is set to the checkout path you are validating.
-- [ ] **Codex CLI:** `manifest.json` reports `"version": "0.13.2"`:
+- [ ] **Codex CLI:** `manifest.json` reports `"version": "0.13.3"`:
   `node -p "require('./manifest.json').version"`.
 
 Optional (only required for the bridge-plugin sections below):
@@ -87,7 +87,7 @@ Optional (only required for the bridge-plugin sections below):
 - [ ] **User/browser:** In SillyTavern, **Extensions → Command-X Phone** is enabled.
 - [ ] **User/browser:** Hard-refresh the ST page (Ctrl+Shift+R) and open the
   browser DevTools console. The console logs
-  **`[command-x] v0.13.2 Loaded OK`** with no red errors above or below it.
+  **`[command-x] v0.13.3 Loaded OK`** with no red errors above or below it.
 - [ ] **User/browser:** Click the **📱** button in the extensions menu. The phone
   opens to the lock screen (or home, depending on your "Lock Screen on Open"
   setting).
@@ -372,5 +372,5 @@ When all of the above are true, tag and push.
   UI or stops reflecting reality on disk. The file is canonical; do **not**
   duplicate the steps inline in the plan.
 - Permission tiers, tool names, button labels, and file paths quoted above
-  are pinned to v0.13.2 source. If you bump `manifest.json#version`, refresh
+  are pinned to v0.13.3 source. If you bump `manifest.json#version`, refresh
   the version string in §0 and §A.

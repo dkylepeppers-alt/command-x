@@ -21,7 +21,7 @@ import {
     getRequestHeaders,
 } from '../../../../script.js';
 
-const VERSION = '0.13.2';
+const VERSION = '0.13.3';
 const EXT = 'command-x';
 const INJECT_KEY = 'command-x-sms';
 const INJECT_KEY_CONTACTS = 'command-x-contacts';
@@ -31,7 +31,7 @@ const INJECT_KEY_MAP = 'command-x-map';
 // Nova agent defaults (plan §7c). Extracted as a named constant so the seven
 // nested keys stay readable without reformatting the pre-existing DEFAULTS line.
 const NOVA_DEFAULTS = {
-    profileName: 'Command-X',
+    profileName: '',
     defaultTier: 'read',
     maxToolCalls: 24,
     turnTimeoutMs: 300000,
@@ -39,7 +39,7 @@ const NOVA_DEFAULTS = {
     rememberApprovalsSession: false,
     activeSkill: 'freeform',
 };
-const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, batchMode: false, autoDetectNpcs: true, manualHybridPrivateTexts: true, contactsInjectEveryN: 1, questsInjectEveryN: 1, autoPrivatePollEveryN: 0, trackLocations: true, autoRegisterPlaces: true, mapInjectEveryN: 3, showLocationTrails: true, nova: { ...NOVA_DEFAULTS } };
+const DEFAULTS = { enabled: true, styleCommands: true, showLockscreen: false, panelOpen: false, phonePosition: null, batchMode: false, autoDetectNpcs: true, manualHybridPrivateTexts: true, contactsInjectEveryN: 1, questsInjectEveryN: 1, autoPrivatePollEveryN: 0, trackLocations: true, autoRegisterPlaces: true, mapInjectEveryN: 3, showLocationTrails: true, nova: { ...NOVA_DEFAULTS } };
 const MAX_AVATAR_FILE_BYTES = 8 * 1024 * 1024; // 8 MB hard cap on raw upload size
 const MAX_MAP_IMAGE_WIDTH = 1024;           // max downscaled width for uploaded map image
 const AWAIT_TIMEOUT_MS = 30_000;             // ms before awaitingReply auto-clears
@@ -1608,6 +1608,11 @@ function syncPhoneSettingInputs(key, value) {
     if (binding) _writeSettingToDom(binding, value);
 }
 
+function syncNovaSettingInputs(key, value) {
+    const binding = NOVA_SETTING_BINDINGS.find(b => b.key === key);
+    if (binding) _writeSettingToDom(binding, value);
+}
+
 function hideQuestTagsInDom(mesId) {
     const el = document.querySelector(`.mes[mesid="${mesId}"] .mes_text`);
     if (!el) return;
@@ -2722,6 +2727,162 @@ function enableCxModalDrag(overlay) {
             event.stopPropagation();
         }
     }, true);
+}
+
+function enableCxPhoneDrag(wrapper) {
+    const device = wrapper?.querySelector?.('.cx-device');
+    const handle = wrapper?.querySelector?.('.cx-statusbar');
+    if (!wrapper || !device || !handle || typeof handle.addEventListener !== 'function') return;
+
+    wrapper._cxPhoneDragCleanup?.();
+
+    const getViewportWidth = () => window.visualViewport?.width || window.innerWidth || document.documentElement.clientWidth || 0;
+    const getViewportHeight = () => window.visualViewport?.height || window.innerHeight || document.documentElement.clientHeight || 0;
+    const parseCssPx = (value, fallback = 0) => {
+        const n = parseFloat(String(value || ''));
+        return Number.isFinite(n) ? n : fallback;
+    };
+    const topChromePad = () => {
+        const rootStyles = getComputedStyle(document.documentElement);
+        return parseCssPx(rootStyles.getPropertyValue('--topBarBlockSize'), 48) + 8;
+    };
+    const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+    const dragPad = 8;
+    const dragThreshold = 8;
+    const dragState = {
+        active: false,
+        moved: false,
+        startClientX: 0,
+        startClientY: 0,
+        startLeft: 0,
+        startTop: 0,
+        pendingLeft: null,
+        pendingTop: null,
+        rafId: null,
+    };
+
+    const constrain = (left, top) => {
+        const rect = wrapper.getBoundingClientRect();
+        const width = rect.width || device.offsetWidth || 340;
+        const height = rect.height || device.offsetHeight || 640;
+        const minTop = Math.min(Math.max(dragPad, topChromePad()), Math.max(dragPad, getViewportHeight() - dragPad));
+        return {
+            left: clamp(left, dragPad, Math.max(dragPad, getViewportWidth() - width - dragPad)),
+            top: clamp(top, minTop, Math.max(minTop, getViewportHeight() - height - dragPad)),
+        };
+    };
+    const applyPosition = (left, top, persist = false) => {
+        const next = constrain(left, top);
+        wrapper.style.left = `${next.left}px`;
+        wrapper.style.top = `${next.top}px`;
+        wrapper.style.right = 'auto';
+        wrapper.style.bottom = 'auto';
+        wrapper.dataset.cxPhoneLeft = String(next.left);
+        wrapper.dataset.cxPhoneTop = String(next.top);
+        if (persist) {
+            settings.phonePosition = { left: next.left, top: next.top };
+            saveSettings();
+        }
+        return next;
+    };
+    const applySavedPosition = () => {
+        const pos = settings.phonePosition;
+        if (!pos || !Number.isFinite(Number(pos.left)) || !Number.isFinite(Number(pos.top))) return;
+        applyPosition(Number(pos.left), Number(pos.top), false);
+    };
+    const flushPosition = () => {
+        if (dragState.pendingLeft != null && dragState.pendingTop != null) {
+            applyPosition(dragState.pendingLeft, dragState.pendingTop, false);
+            dragState.pendingLeft = null;
+            dragState.pendingTop = null;
+        }
+        dragState.rafId = null;
+    };
+    const queuePosition = (left, top) => {
+        const next = constrain(left, top);
+        dragState.pendingLeft = next.left;
+        dragState.pendingTop = next.top;
+        if (!dragState.rafId) dragState.rafId = requestAnimationFrame(flushPosition);
+    };
+    const beginDrag = (clientX, clientY) => {
+        const rect = wrapper.getBoundingClientRect();
+        dragState.active = true;
+        dragState.moved = false;
+        dragState.startClientX = clientX;
+        dragState.startClientY = clientY;
+        dragState.startLeft = rect.left;
+        dragState.startTop = rect.top;
+        wrapper.classList.add('cx-phone-dragging');
+    };
+    const moveDrag = (clientX, clientY, event) => {
+        if (!dragState.active) return;
+        const deltaX = clientX - dragState.startClientX;
+        const deltaY = clientY - dragState.startClientY;
+        if (!dragState.moved && Math.hypot(deltaX, deltaY) < dragThreshold) return;
+        dragState.moved = true;
+        queuePosition(dragState.startLeft + deltaX, dragState.startTop + deltaY);
+        event.preventDefault();
+        event.stopPropagation();
+    };
+    const endDrag = (event) => {
+        if (!dragState.active) return;
+        if (dragState.rafId) {
+            cancelAnimationFrame(dragState.rafId);
+            flushPosition();
+        }
+        dragState.active = false;
+        wrapper.classList.remove('cx-phone-dragging');
+        if (dragState.moved) {
+            const rect = wrapper.getBoundingClientRect();
+            applyPosition(rect.left, rect.top, true);
+            wrapper.dataset.cxJustDragged = 'true';
+            setTimeout(() => { delete wrapper.dataset.cxJustDragged; }, 300);
+            event?.preventDefault?.();
+            event?.stopPropagation?.();
+        }
+    };
+
+    applySavedPosition();
+    handle.title = 'Drag to move phone';
+    handle.addEventListener('touchstart', (event) => {
+        if (event.touches.length !== 1) return;
+        const touch = event.touches[0];
+        beginDrag(touch.clientX, touch.clientY);
+    }, { passive: false });
+    handle.addEventListener('touchmove', (event) => {
+        if (event.touches.length !== 1) return;
+        const touch = event.touches[0];
+        moveDrag(touch.clientX, touch.clientY, event);
+    }, { passive: false });
+    handle.addEventListener('touchend', endDrag, { passive: false });
+    handle.addEventListener('touchcancel', endDrag, { passive: false });
+    const onDocumentMouseMove = (event) => {
+        if (!wrapper.isConnected) return;
+        moveDrag(event.clientX, event.clientY, event);
+    };
+    const onDocumentMouseUp = (event) => {
+        if (!wrapper.isConnected) return;
+        endDrag(event);
+    };
+    handle.addEventListener('mousedown', (event) => {
+        if (event.button !== 0) return;
+        beginDrag(event.clientX, event.clientY);
+        event.preventDefault();
+    });
+    document.addEventListener('mousemove', onDocumentMouseMove);
+    document.addEventListener('mouseup', onDocumentMouseUp);
+    const onResize = () => {
+        const rect = wrapper.getBoundingClientRect();
+        applyPosition(rect.left, rect.top, true);
+    };
+    window.visualViewport?.addEventListener?.('resize', onResize);
+    window.addEventListener('resize', onResize);
+    wrapper._cxPhoneDragCleanup = () => {
+        document.removeEventListener('mousemove', onDocumentMouseMove);
+        document.removeEventListener('mouseup', onDocumentMouseUp);
+        window.visualViewport?.removeEventListener?.('resize', onResize);
+        window.removeEventListener('resize', onResize);
+    };
 }
 
 /**
@@ -5428,6 +5589,7 @@ async function novaPickProfile() {
     });
     if (!chosen) return;
     settings.nova.profileName = String(chosen);
+    syncNovaSettingInputs('profileName', settings.nova.profileName);
     getContext().extensionSettings[EXT] = { ...settings };
     getContext().saveSettingsDebounced();
     refreshNovaPills();
@@ -5454,6 +5616,7 @@ async function novaPickSkill() {
     settings.nova.activeSkill = skill.id;
     // Snap tier to the skill's default (user can escalate after).
     if (skill.defaultTier) settings.nova.defaultTier = skill.defaultTier;
+    syncNovaSettingInputs('defaultTier', settings.nova.defaultTier);
     getContext().extensionSettings[EXT] = { ...settings };
     getContext().saveSettingsDebounced();
     refreshNovaPills();
@@ -5472,6 +5635,7 @@ async function novaPickTier() {
     });
     if (!chosen) return;
     settings.nova.defaultTier = String(chosen);
+    syncNovaSettingInputs('defaultTier', settings.nova.defaultTier);
     getContext().extensionSettings[EXT] = { ...settings };
     getContext().saveSettingsDebounced();
     refreshNovaPills();
@@ -5524,6 +5688,43 @@ function doesNovaProfileExist(ctx, profileName) {
     const norm = (s) => String(s || '').trim().toLowerCase();
     const resolvedNorm = norm(resolved);
     return profiles.some((p) => p && (norm(p.id) === resolvedNorm || norm(p.name) === resolvedNorm));
+}
+
+function getNovaConnectionProfile(ctx, profileName) {
+    const wanted = String(profileName || '').trim();
+    if (!wanted) return null;
+    const profiles = ctx?.extensionSettings?.connectionManager?.profiles;
+    if (!Array.isArray(profiles)) return null;
+    const resolved = resolveNovaConnectionProfileId(ctx, wanted);
+    const norm = (s) => String(s || '').trim().toLowerCase();
+    const resolvedNorm = norm(resolved);
+    const wantedNorm = norm(wanted);
+    return profiles.find((p) => p && (
+        norm(p.id) === resolvedNorm
+        || norm(p.name) === resolvedNorm
+        || norm(p.id) === wantedNorm
+        || norm(p.name) === wantedNorm
+    )) || null;
+}
+
+function describeNovaConnectionProfile(profile) {
+    if (!profile || typeof profile !== 'object') return '';
+    const api = String(profile.api || profile.source || '').trim() || 'unknown-api';
+    const model = String(profile.model || profile.modelId || '').trim() || 'no-model';
+    const preset = String(profile.preset || profile.presetName || '').trim();
+    const pp = String(profile.promptPostProcessing || profile.prompt_post_processing || profile.promptPostProcessor || '').trim() || 'none';
+    return `${api} / ${model}${preset ? ` / preset=${preset}` : ''} / promptPostProcessing=${pp}`;
+}
+
+function buildNovaProfileToolingNotice({ profile, skill }) {
+    const profileName = String(profile?.name || profile?.id || '').trim();
+    const pp = String(profile?.promptPostProcessing || profile?.prompt_post_processing || profile?.promptPostProcessor || '').trim().toLowerCase();
+    const creatorSkill = skill?.id === 'worldbook-creator' || skill?.id === 'character-creator';
+    if (!creatorSkill || !profile) return '';
+    if (!pp || pp === 'none' || pp === 'off' || pp === 'false') {
+        return `⚠︎ ${skill.label} needs reliable tool calls. Profile "${profileName || '(selected)'}" is using prompt post-processing "${pp || 'none'}"; switch that Connection Profile to semi_tools or merge_tools if creator turns keep returning empty responses.`;
+    }
+    return '';
 }
 
 function normaliseNovaToolSchema(tool) {
@@ -5710,6 +5911,13 @@ async function novaHandleSend() {
         }
     }
     const activeSkill = resolveNovaSkill(nova.activeSkill || 'freeform');
+    const selectedProfile = getNovaConnectionProfile(ctx, nova.profileName);
+    const toolingNotice = buildNovaProfileToolingNotice({ profile: selectedProfile, skill: activeSkill });
+    if (toolingNotice) {
+        appendNovaTranscriptLine(toolingNotice, 'notice');
+        const profileSummary = describeNovaConnectionProfile(selectedProfile);
+        if (profileSummary) appendNovaTranscriptLine(`Resolved Nova profile: ${profileSummary}`, 'system');
+    }
     effectiveTools = filterNovaToolsBySkill({ tools: effectiveTools, skill: activeSkill });
     if (!textOnlyFallback) {
         const unavailableSkillTools = listUnavailableNovaSkillTools({ tools: effectiveTools, skill: activeSkill });
@@ -5790,7 +5998,7 @@ async function novaHandleSend() {
     }
     if (result?.ok && isNovaEmptyAssistantContent(result.assistantMessage?.content)
         && !result.toolsExecuted && !result.toolsDenied && !result.toolsFailed) {
-        appendNovaTranscriptLine('⚠︎ Nova returned no actionable response or tool call. Try again with the Worldbook Creator skill selected and tier set to Write.', 'notice');
+        appendNovaTranscriptLine(`⚠︎ Nova returned no actionable response or tool call from ${activeSkill?.label || 'the selected skill'}. Open Nova Audit for the recorded failure details, then retry or switch profiles if the model keeps refusing tools.`, 'notice');
     }
     if (result && !result.ok) {
         const reason = result.reason || 'unknown';
@@ -5925,7 +6133,14 @@ function wirePhone() {
         saveSettings();
     });
     // --- Nova in-phone settings (v0.13.0) ---
-    const novaOnChange = () => {
+    const novaOnChange = (e) => {
+        const novaBinding = NOVA_SETTING_BINDINGS.find(b => b.ids.includes(e.target?.id));
+        if (novaBinding) {
+            settings.nova = settings.nova || { ...NOVA_DEFAULTS };
+            const raw = novaBinding.type === 'bool' ? e.target.checked : e.target.value;
+            settings.nova[novaBinding.key] = _coerceSettingValue(novaBinding, raw, settings.nova[novaBinding.key]);
+            syncNovaSettingInputs(novaBinding.key, settings.nova[novaBinding.key]);
+        }
         saveSettings();
         try { refreshNovaPills(); } catch (_) { /* noop */ }
     };
@@ -6313,6 +6528,7 @@ function createPanel() {
     renderPhoneInto(wrapper);
     document.body.appendChild(wrapper);
     phoneContainer = wrapper;
+    enableCxPhoneDrag(wrapper);
 
     const menuContainer = document.querySelector('#extensionsMenu');
     if (menuContainer && !document.querySelector('#cx-menu-button')) {
@@ -6324,6 +6540,7 @@ function createPanel() {
         menuBtn.addEventListener('click', () => {
             rebuildPhone();
             wrapper.classList.toggle('cx-hidden');
+            if (!wrapper.classList.contains('cx-hidden')) enableCxPhoneDrag(wrapper);
             settings.panelOpen = !wrapper.classList.contains('cx-hidden');
             saveSettings();
         });
@@ -6332,13 +6549,6 @@ function createPanel() {
         wrapper.classList.add('cx-hidden');
         settings.panelOpen = false;
         saveSettings();
-    });
-    wrapper.addEventListener('click', (e) => {
-        if (e.target === wrapper) {
-            wrapper.classList.add('cx-hidden');
-            settings.panelOpen = false;
-            saveSettings();
-        }
     });
     wirePhone();
     updateUnreadBadges();
@@ -6354,6 +6564,7 @@ function rebuildPhone() {
     const savedContact = currentContactName;
     const savedApp = currentApp;
     renderPhoneInto(wrapper);
+    enableCxPhoneDrag(wrapper);
     wrapper.querySelector('#cx-panel-close')?.addEventListener('click', () => {
         wrapper.classList.add('cx-hidden');
         settings.panelOpen = false;
@@ -7894,14 +8105,104 @@ function buildNovaRequestMessages({ systemPrompt, sessionMessages = [] }) {
    ---------------------------------------------------------------------- */
 
 function _stringifyNovaToolResult(value) {
-    if (value == null) return '';
-    if (typeof value === 'string') return value;
+    if (value == null) return JSON.stringify({ ok: true, result: null });
+    if (typeof value === 'string') {
+        const text = value.trim();
+        return text ? value : JSON.stringify({ ok: true, result: '' });
+    }
     try { return JSON.stringify(value); } catch (_) { return String(value); }
 }
 
 function isNovaEmptyAssistantContent(value) {
     const text = String(value ?? '').trim().toLowerCase();
     return !text || text === 'none' || text === '[none]';
+}
+
+function getNovaCreatorWriteToolName(skill, tools = []) {
+    const id = String(skill?.id || '');
+    const wanted = id === 'worldbook-creator'
+        ? 'st_write_worldbook'
+        : id === 'character-creator'
+            ? 'st_write_character'
+            : '';
+    if (!wanted) return '';
+    return Array.isArray(tools) && tools.some(tool => tool?.name === wanted) ? wanted : '';
+}
+
+function extractNovaJsonObject(text) {
+    const raw = String(text || '').trim();
+    if (!raw) return null;
+    const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    const candidates = [];
+    if (fenced) candidates.push(fenced[1]);
+    candidates.push(raw);
+    const firstBrace = raw.indexOf('{');
+    const lastBrace = raw.lastIndexOf('}');
+    if (firstBrace >= 0 && lastBrace > firstBrace) candidates.push(raw.slice(firstBrace, lastBrace + 1));
+    for (const candidate of candidates) {
+        try {
+            const parsed = JSON.parse(candidate);
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+        } catch (_) { /* try next candidate */ }
+    }
+    return null;
+}
+
+function validateNovaCreatorFallbackArgs(toolName, args) {
+    if (!args || typeof args !== 'object' || Array.isArray(args)) return null;
+    const clean = { ...args };
+    clean.name = String(clean.name || clean.file_id || clean.fileName || '').trim();
+    if (!clean.name) return null;
+    if (toolName === 'st_write_worldbook') {
+        if (!clean.book || typeof clean.book !== 'object' || Array.isArray(clean.book)) return null;
+        if (!clean.book.entries || typeof clean.book.entries !== 'object' || Array.isArray(clean.book.entries)) return null;
+        if (clean.overwrite === undefined) clean.overwrite = false;
+        return clean;
+    }
+    if (toolName === 'st_write_character') {
+        if (clean.card && typeof clean.card === 'object' && !Array.isArray(clean.card)) return clean;
+        const allowed = [
+            'description', 'personality', 'scenario', 'first_mes', 'mes_example',
+            'creator_notes', 'system_prompt', 'post_history_instructions',
+            'alternate_greetings', 'tags', 'creator', 'character_version',
+            'extensions',
+        ];
+        return allowed.some(key => clean[key] !== undefined) ? clean : null;
+    }
+    return null;
+}
+
+function buildNovaCreatorFallbackPrompt({ skill, toolName, userText }) {
+    if (toolName === 'st_write_worldbook') {
+        return [
+            'Your previous creator response was empty and no tool call was emitted.',
+            'Return only strict JSON arguments for st_write_worldbook. Do not use markdown.',
+            'Required shape:',
+            '{"name":"worldbook name","overwrite":false,"book":{"entries":{"0":{"key":["activation"],"keysecondary":[],"comment":"short label","content":"lore text","constant":false,"selective":false,"order":100,"position":0,"disable":false,"depth":4,"probability":100,"useProbability":false}}}}',
+            `User request: ${String(userText || '').trim()}`,
+        ].join('\n');
+    }
+    if (toolName === 'st_write_character') {
+        return [
+            'Your previous creator response was empty and no tool call was emitted.',
+            'Return only strict JSON arguments for st_write_character. Do not use markdown.',
+            'Required shape:',
+            '{"name":"character name","card":{"spec":"chara_card_v2","spec_version":"2.0","data":{"name":"character name","description":"...","personality":"...","scenario":"...","first_mes":"...","mes_example":"...","alternate_greetings":[],"tags":[],"extensions":{"command_x":{"avatar_prompt":"..."}}}}}',
+            `User request: ${String(userText || '').trim()}`,
+        ].join('\n');
+    }
+    return `Return only strict JSON arguments for ${toolName || String(skill?.id || 'the creator tool')}.`;
+}
+
+function makeNovaSyntheticToolCall(toolName, args) {
+    return {
+        id: `cx_fallback_${Date.now()}`,
+        type: 'function',
+        function: {
+            name: toolName,
+            arguments: JSON.stringify(args),
+        },
+    };
 }
 
 function summarizeNovaToolDispatchCompletion({ events = [], toolsExecuted = 0, toolsDenied = 0, toolsFailed = 0 } = {}) {
@@ -8668,8 +8969,105 @@ async function sendNovaTurn({
         }
 
         // --- Step 6: tool_calls dispatch (Phase 3c) ---
-        const assistantContent = String(response?.content ?? '');
-        const toolCalls = Array.isArray(response?.tool_calls) ? response.tool_calls : [];
+        let assistantContent = String(response?.content ?? '');
+        let toolCalls = Array.isArray(response?.tool_calls) ? response.tool_calls : [];
+
+        const creatorWriteToolName = getNovaCreatorWriteToolName(skill, tools);
+
+        // Some small/hosted models occasionally answer an imperative creator
+        // prompt with an empty assistant frame and no tool call. For creator
+        // skills this is always a failed turn, so retry once with the write
+        // tool forced instead of leaving the user with "(no content)".
+        if (creatorWriteToolName
+            && isNovaEmptyAssistantContent(assistantContent)
+            && toolCalls.length === 0
+            && Array.isArray(tools)) {
+            appendNovaAuditLog(state, {
+                tool: 'assistant',
+                argsSummary: `skill=${skill.id} profile=${targetProfile}`,
+                outcome: `empty-response-retry-forced-${creatorWriteToolName}`,
+            });
+            try {
+                response = await sendRequest({
+                    messages: [
+                        ...messages,
+                        {
+                            role: 'system',
+                            content: `Your previous response was empty. This is a ${skill.label} write request. Call ${creatorWriteToolName} now with complete arguments; do not return plain text.`,
+                        },
+                    ],
+                    tools: Array.isArray(tools) ? tools : [],
+                    tool_choice: { type: 'function', function: { name: creatorWriteToolName } },
+                    signal: controller.signal,
+                });
+                assistantContent = String(response?.content ?? '');
+                toolCalls = Array.isArray(response?.tool_calls) ? response.tool_calls : [];
+            } catch (err) {
+                const aborted = controller.signal?.aborted || err?.name === 'AbortError';
+                const reason = aborted ? 'aborted' : 'send-failed';
+                appendNovaAuditLog(state, {
+                    tool: 'send-request',
+                    argsSummary: `skill=${skill.id} profile=${targetProfile} retry=forced-${creatorWriteToolName}`,
+                    outcome: `${reason}:${String(err?.message || err)}`,
+                });
+                saveNovaState(ctx);
+                return { ok: false, reason, error: String(err?.message || err) };
+            }
+        }
+
+        // Last-resort creator recovery: if the model still refuses to emit a
+        // tool call, ask for strict JSON arguments and feed those through the
+        // normal approval-gated dispatcher as a synthetic tool call.
+        if (creatorWriteToolName
+            && isNovaEmptyAssistantContent(assistantContent)
+            && toolCalls.length === 0
+            && toolHandlers && typeof toolHandlers === 'object') {
+            try {
+                const fallbackResponse = await sendRequest({
+                    messages: [
+                        ...messages,
+                        {
+                            role: 'system',
+                            content: buildNovaCreatorFallbackPrompt({
+                                skill,
+                                toolName: creatorWriteToolName,
+                                userText: text,
+                            }),
+                        },
+                    ],
+                    tools: [],
+                    tool_choice: undefined,
+                    signal: controller.signal,
+                });
+                const parsed = extractNovaJsonObject(fallbackResponse?.content);
+                const fallbackArgs = validateNovaCreatorFallbackArgs(creatorWriteToolName, parsed);
+                if (fallbackArgs) {
+                    appendNovaAuditLog(state, {
+                        tool: 'assistant',
+                        argsSummary: `skill=${skill.id} profile=${targetProfile}`,
+                        outcome: `empty-response-json-fallback-${creatorWriteToolName}`,
+                    });
+                    assistantContent = '';
+                    toolCalls = [makeNovaSyntheticToolCall(creatorWriteToolName, fallbackArgs)];
+                } else {
+                    appendNovaAuditLog(state, {
+                        tool: 'assistant',
+                        argsSummary: `skill=${skill.id} profile=${targetProfile}`,
+                        outcome: `empty-response-json-fallback-invalid-${creatorWriteToolName}`,
+                    });
+                }
+            } catch (err) {
+                const aborted = controller.signal?.aborted || err?.name === 'AbortError';
+                const reason = aborted ? 'aborted' : 'send-failed';
+                appendNovaAuditLog(state, {
+                    tool: 'send-request',
+                    argsSummary: `skill=${skill.id} profile=${targetProfile} retry=json-fallback-${creatorWriteToolName}`,
+                    outcome: `${reason}:${String(err?.message || err)}`,
+                });
+                saveNovaState(ctx);
+                return { ok: false, reason, error: String(err?.message || err) };
+            }
+        }
 
         // Dispatcher activates when `toolHandlers` is provided. The dispatcher
         // handles the "approval required but no confirmer wired" case
@@ -8748,6 +9146,12 @@ async function sendNovaTurn({
                 argsSummary: `count=${toolCalls.length} cap=${maxToolCalls}`,
                 outcome: 'deferred-no-dispatcher',
             });
+        } else if (isNovaEmptyAssistantContent(assistantContent)) {
+            appendNovaAuditLog(state, {
+                tool: 'assistant',
+                argsSummary: `skill=${skill.id} profile=${targetProfile}`,
+                outcome: 'empty-response-no-tool-call',
+            });
         }
         session.messages.push(assistantMessage);
         session.updatedAt = assistantMessage.ts;
@@ -8814,7 +9218,7 @@ async function sendNovaTurn({
    skill default-tool lists.
    ---------------------------------------------------------------------- */
 
-const SKILLS_VERSION = 8; // bump when any skill prompt, defaultTools, or defaultTier changes
+const SKILLS_VERSION = 10; // bump when any skill prompt, defaultTools, or defaultTier changes
 
 const NOVA_TOOLS = [
     // === 4a. Filesystem (plugin-backed) ===
@@ -9034,6 +9438,11 @@ const NOVA_TOOLS = [
         },
     },
     {
+        name: 'st_read_persona', displayName: 'Read persona', permission: 'read', backend: 'st-api',
+        description: 'Read the active SillyTavern persona name, avatar id, prompt description, and saved persona metadata when exposed by the current frontend context.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+    },
+    {
         name: 'st_list_profiles', displayName: 'List connection profiles', permission: 'read', backend: 'st-api',
         description: 'List all saved connection profiles.',
         parameters: { type: 'object', properties: {}, additionalProperties: false },
@@ -9208,13 +9617,21 @@ const NOVA_SKILLS = [
         defaultTier: 'write',
         allowTierEscalation: true,
         defaultTools: [
+            'st_get_context', 'st_read_persona',
             'st_list_characters', 'st_read_character', 'st_write_character',
+            'st_list_worldbooks', 'st_read_worldbook',
         ],
         systemPrompt: [
             'You are the Character Creator skill inside Nova.',
+            'Before creating or updating, read the active context and persona',
+            'with st_get_context and st_read_persona so the card fits the',
+            'user-facing role, current scene, and tone.',
             'Before creating, call st_list_characters and check for duplicate',
             'or near-duplicate names. If updating an existing card, read it',
             'first and preserve useful fields unless the user says otherwise.',
+            'Also list/read relevant worldbooks before writing when the',
+            'request references existing lore, factions, places, species,',
+            'or canon that may already be defined outside the character card.',
             'You are an expert on the SillyTavern character-card v2 schema:',
             "  spec: 'chara_card_v2', spec_version: '2.0', data: { name, description,",
             '  personality, scenario, first_mes, mes_example, creator_notes,',
@@ -9251,6 +9668,8 @@ const NOVA_SKILLS = [
         defaultTier: 'write',
         allowTierEscalation: true,
         defaultTools: [
+            'st_get_context', 'st_read_persona',
+            'st_list_characters', 'st_read_character',
             'st_list_worldbooks', 'st_read_worldbook', 'st_write_worldbook',
         ],
         systemPrompt: [
@@ -9264,6 +9683,10 @@ const NOVA_SKILLS = [
             '  matchWholeWords, useGroupScoring, automationId, role, vectorized.',
             'Use st_read_worldbook and st_write_worldbook for creation and updates.',
             'st_write_worldbook saves ST world-info JSON to the user worlds directory.',
+            'For requests about a named character, first call st_get_context,',
+            'st_read_persona, then st_list_characters and st_read_character for the matching',
+            'card when present, so the worldbook can use the character',
+            'description, personality, scenario, user persona, and existing lore fields.',
             'When the user asks to create a new worldbook, call',
             'st_write_worldbook directly with name and a full book object;',
             'do not answer with `[none]`, and do not wait for a read first.',
@@ -10289,7 +10712,7 @@ function buildNovaShellHandler({ pluginBaseUrl, fetchImpl, headersProvider } = {
      - `st_write_character`                          — create/update via ST character endpoints
      - `st_list_worldbooks`, `st_read_worldbook`     — read via ST worldinfo endpoints
      - `st_write_worldbook`                          — save via ST worldinfo endpoint
-     - `st_get_context`                              — synthesise from ctx
+     - `st_get_context`, `st_read_persona`           — synthesise from ctx
      - `st_run_slash`                                — executeSlashCommands
      - `st_list_profiles`, `st_get_profile`          — `/profile-list` etc.
 
@@ -10927,6 +11350,37 @@ function buildNovaStTools({
             };
         },
 
+        st_read_persona: async () => {
+            const ctx = getCtx();
+            if (!ctx) return { error: 'no-context' };
+            const powerUser = isObject(ctx.powerUserSettings) ? ctx.powerUserSettings
+                : (isObject(ctx.power_user) ? ctx.power_user
+                    : (isObject(ctx.powerUser) ? ctx.powerUser : {}));
+            const personas = isObject(powerUser.personas) ? powerUser.personas : {};
+            const activeName = typeof ctx.name1 === 'string' ? ctx.name1 : '';
+            const matchedAvatar = Object.entries(personas)
+                .find(([, personaName]) => String(personaName || '') === activeName)?.[0] || '';
+            const avatarId = typeof ctx.user_avatar === 'string' ? ctx.user_avatar
+                : (typeof ctx.userAvatar === 'string' ? ctx.userAvatar
+                    : (typeof powerUser.user_avatar === 'string' ? powerUser.user_avatar
+                        : (matchedAvatar || (typeof powerUser.default_persona === 'string' ? powerUser.default_persona : ''))));
+            const personaDescriptions = isObject(powerUser.persona_descriptions) ? powerUser.persona_descriptions : {};
+            const savedMeta = avatarId && isObject(personaDescriptions[avatarId]) ? personaDescriptions[avatarId] : {};
+            return {
+                name: activeName,
+                avatar: avatarId || null,
+                savedName: avatarId && typeof personas[avatarId] === 'string' ? personas[avatarId] : '',
+                description: typeof powerUser.persona_description === 'string' ? powerUser.persona_description : '',
+                savedDescription: typeof savedMeta.description === 'string' ? savedMeta.description : '',
+                title: typeof savedMeta.title === 'string' ? savedMeta.title : '',
+                position: powerUser.persona_description_position ?? savedMeta.position ?? null,
+                role: powerUser.persona_description_role ?? savedMeta.role ?? null,
+                depth: powerUser.persona_description_depth ?? savedMeta.depth ?? null,
+                lorebook: typeof powerUser.persona_description_lorebook === 'string' ? powerUser.persona_description_lorebook : '',
+                defaultPersona: typeof powerUser.default_persona === 'string' ? powerUser.default_persona : null,
+            };
+        },
+
         st_list_profiles: async () => {
             const exec = await getSlash();
             const fn = getListProfiles();
@@ -11161,12 +11615,19 @@ jQuery(async () => {
 
         loadSettings();
         refreshPrivatePhonePrompt();
-        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_contacts_every_n, #cx_ext_quests_every_n, #cx_ext_auto_private_poll_n, #cx_ext_track_locations, #cx_ext_auto_register_places, #cx_ext_show_trails, #cx_ext_map_every_n, #cx_nova_profile, #cx_nova_default_tier, #cx_nova_max_tool_calls, #cx_nova_turn_timeout_ms, #cx_nova_plugin_base_url').on('change', (e) => {
+        $('#cx_enabled, #cx_style_commands, #cx_show_lockscreen, #cx_ext_batch_mode, #cx_ext_auto_detect_npcs, #cx_set_private_hybrid, #cx_ext_contacts_every_n, #cx_ext_quests_every_n, #cx_ext_auto_private_poll_n, #cx_ext_track_locations, #cx_ext_auto_register_places, #cx_ext_show_trails, #cx_ext_map_every_n, #cx_nova_profile, #cx_nova_default_tier, #cx_nova_max_tool_calls, #cx_nova_turn_timeout_ms, #cx_nova_plugin_base_url, #cx_nova_remember_approvals').on('change', (e) => {
             const phoneBinding = PHONE_SETTING_BINDINGS.find(b => b.ids.includes(e.target?.id));
             if (phoneBinding) {
                 const raw = phoneBinding.type === 'bool' ? e.target.checked : e.target.value;
                 settings[phoneBinding.key] = _coerceSettingValue(phoneBinding, raw, settings[phoneBinding.key]);
                 syncPhoneSettingInputs(phoneBinding.key, settings[phoneBinding.key]);
+            }
+            const novaBinding = NOVA_SETTING_BINDINGS.find(b => b.ids.includes(e.target?.id));
+            if (novaBinding) {
+                settings.nova = settings.nova || { ...NOVA_DEFAULTS };
+                const raw = novaBinding.type === 'bool' ? e.target.checked : e.target.value;
+                settings.nova[novaBinding.key] = _coerceSettingValue(novaBinding, raw, settings.nova[novaBinding.key]);
+                syncNovaSettingInputs(novaBinding.key, settings.nova[novaBinding.key]);
             }
             saveSettings();
             if (settings.enabled) {

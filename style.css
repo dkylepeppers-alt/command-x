@@ -2,33 +2,36 @@
    Command-X Phone — v0.12.0
    ============================================================ */
 
-/* ---- Panel wrapper — fullscreen overlay ---- */
+/* ---- Panel wrapper — floating phone shell ---- */
 #cx-panel-wrapper {
     position: fixed !important;
-    top: 0 !important;
-    left: 0 !important;
-    width: 100vw !important;
-    height: 100vh !important;
-    height: 100dvh !important;
+    top: calc(var(--topBarBlockSize, 48px) + 12px);
+    right: max(12px, env(safe-area-inset-right, 0px));
+    left: auto;
+    bottom: auto;
+    width: auto;
+    height: auto;
+    max-width: calc(100dvw - 24px);
+    max-height: calc(100dvh - var(--topBarBlockSize, 48px) - 24px);
     z-index: 999999 !important;
-    display: flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    background: rgba(0,0,0,.85) !important;
-    overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
-    padding: 20px 0;
+    display: block !important;
+    background: transparent;
+    overflow: visible;
+    padding: 0;
     box-sizing: border-box;
 }
 #cx-panel-wrapper.cx-hidden {
     display: none !important;
 }
+#cx-panel-wrapper.cx-phone-dragging .cx-device {
+    transition: none !important;
+}
 
-/* Close button inside overlay */
+/* Close button beside the floating phone */
 #cx-panel-close {
     position: absolute;
-    top: max(env(safe-area-inset-top, 8px), 8px);
-    right: 12px;
+    top: -10px;
+    right: -10px;
     width: 36px;
     height: 36px;
     border-radius: 50%;
@@ -70,11 +73,11 @@
     position: relative;
     user-select: none;
     -webkit-user-select: none;
-    max-height: min(640px, 82vh);
+    max-height: min(640px, calc(100dvh - var(--topBarBlockSize, 48px) - 24px));
     display: flex;
     flex-direction: column;
     flex-shrink: 0;
-    margin: auto;
+    margin: 0;
 }
 
 /* Notch */
@@ -127,6 +130,13 @@
     color: #999;
     flex-shrink: 0;
     z-index: 15;
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+}
+#cx-panel-wrapper.cx-phone-dragging .cx-statusbar {
+    cursor: grabbing;
 }
 
 /* ---- Views ---- */
@@ -406,27 +416,34 @@
 
 /* ---- In-phone alert / confirm modal ---- */
 .cx-modal-overlay {
-    position: fixed; inset: 0; z-index: 10000000;
-    background: rgba(0,0,0,.55); backdrop-filter: blur(4px);
-    -webkit-backdrop-filter: blur(4px);
-    display: flex; align-items: flex-start; justify-content: center;
-    padding: max(18px, env(safe-area-inset-top)) 18px max(18px, env(safe-area-inset-bottom));
-    overflow-y: auto;
+    position: fixed;
+    left: 0; top: 0;
+    width: 0; height: 0;
+    z-index: 2147483000;
+    background: transparent;
+    display: block;
+    padding: 0;
+    overflow: visible;
     overscroll-behavior: contain;
+    pointer-events: none;
 }
 .cx-modal-box {
     background: #1c1c2e; border: 1px solid rgba(255,255,255,.12);
     border-radius: 18px; padding: 24px 22px 18px;
-    max-width: 320px; width: 100%;
-    max-height: calc(100dvh - 36px);
+    width: min(calc(100dvw - 24px), 320px);
+    max-width: calc(100dvw - 24px);
+    max-height: calc(100dvh - 24px);
     overflow-y: auto;
-    margin: auto 0;
-    position: relative;
+    margin: 0;
+    position: fixed;
+    top: max(64px, calc(env(safe-area-inset-top) + 12px));
+    left: max(12px, calc(env(safe-area-inset-left) + 12px));
     box-shadow: 0 12px 40px rgba(0,0,0,.55);
     font-family: -apple-system, BlinkMacSystemFont, 'SF Pro', 'Segoe UI', Roboto, sans-serif;
     display: flex; flex-direction: column; gap: 14px;
     animation: cx-modal-in .18s ease;
     will-change: top, left;
+    pointer-events: auto;
 }
 .cx-modal-dragging { animation: none; transition: none !important; }
 @keyframes cx-modal-in {
@@ -454,7 +471,7 @@
 .cx-modal-btn-danger { background: rgba(239,68,68,.2); color: #fca5a5; border: 1px solid rgba(239,68,68,.3); }
 
 /* ---- Nova Soul & Memory editor (plan §6b). Reuses .cx-modal-overlay + .cx-modal-box. ---- */
-.cx-modal-box.cx-nova-sm-box { max-width: 560px; max-height: 88vh; overflow-y: auto; }
+.cx-modal-box.cx-nova-sm-box { width: min(calc(100dvw - 24px), 560px); max-width: calc(100dvw - 24px); max-height: calc(100dvh - 24px); overflow-y: auto; }
 .cx-nova-sm-status {
     font-size: 12px; color: #9ca3af;
     background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.06);
@@ -478,7 +495,7 @@
 .cx-nova-sm-pane-actions { display: flex; justify-content: flex-end; }
 
 /* ---- Nova Audit-log viewer (plan §2b/§7b). Reuses .cx-modal-overlay + .cx-modal-box. ---- */
-.cx-modal-box.cx-nova-audit-box { max-width: 560px; max-height: 88vh; display: flex; flex-direction: column; }
+.cx-modal-box.cx-nova-audit-box { width: min(calc(100dvw - 24px), 560px); max-width: calc(100dvw - 24px); max-height: calc(100dvh - 24px); display: flex; flex-direction: column; }
 .cx-modal-box.cx-nova-audit-box .cx-modal-body {
     overflow-y: auto;
     max-height: 60vh;
@@ -1539,7 +1556,7 @@
 /* Approval modal (Phase 3c). Reuses .cx-modal-overlay + .cx-modal-box.
  * The .cx-nova-approval modifier widens the box to fit diff + args
  * blocks without forcing horizontal scroll at phone widths. */
-.cx-modal-box.cx-nova-approval { max-width: 520px; }
+.cx-modal-box.cx-nova-approval { width: min(calc(100dvw - 24px), 520px); max-width: calc(100dvw - 24px); }
 .cx-nova-approval-intent { font-size: 13px; color: #e2e8f0; margin-bottom: 10px; }
 .cx-nova-approval-intent code { background: rgba(6, 182, 212, 0.12); color: #bae6fd; padding: 1px 6px; border-radius: 4px; font-size: 12px; }
 .cx-nova-approval-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: #94a3b8; margin: 10px 0 4px; }
@@ -1635,7 +1652,7 @@
 .cx-nova-muted { color: #64748b; }
 
 /* Generic list picker modal (used by Nova pill pickers) --------------- */
-.cx-modal-box.cx-pick-box { max-width: 420px; }
+.cx-modal-box.cx-pick-box { width: min(calc(100dvw - 24px), 420px); max-width: calc(100dvw - 24px); }
 .cx-pick-list {
     display: flex;
     flex-direction: column;

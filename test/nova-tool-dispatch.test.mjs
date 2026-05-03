@@ -41,8 +41,11 @@ function novaToolGate({ permission, tier, toolName, rememberedApprovals } = {}) 
 const NOVA_DEFAULT_MAX_TOOL_CALLS = 24;
 
 function _stringifyNovaToolResult(value) {
-    if (value == null) return '';
-    if (typeof value === 'string') return value;
+    if (value == null) return JSON.stringify({ ok: true, result: null });
+    if (typeof value === 'string') {
+        const text = value.trim();
+        return text ? value : JSON.stringify({ ok: true, result: '' });
+    }
     try { return JSON.stringify(value); } catch (_) { return String(value); }
 }
 
@@ -343,6 +346,39 @@ describe('runNovaToolDispatch — happy path', () => {
         assert.equal(res.ok, true);
         assert.equal(res.finalAssistant.content, '1 tool ran: st_write_worldbook');
         assert.equal(res.events.at(-1).content, '1 tool ran: st_write_worldbook');
+    });
+
+    it('normalizes nullish and blank tool results into non-empty tool message content', async () => {
+        const handlers = {
+            st_get_context: async () => null,
+            st_list_characters: async () => '   ',
+        };
+        let followupMessages;
+        const res = await runNovaToolDispatch({
+            initialResponse: {
+                content: '',
+                tool_calls: [
+                    makeCall('c1', 'st_get_context', {}),
+                    makeCall('c2', 'st_list_characters', {}),
+                ],
+            },
+            messages: [{ role: 'system', content: 'sys' }],
+            toolRegistry: [
+                { name: 'st_get_context', permission: 'read' },
+                { name: 'st_list_characters', permission: 'read' },
+            ],
+            handlers,
+            sendRequest: async ({ messages }) => {
+                followupMessages = messages;
+                return { content: 'done', tool_calls: [] };
+            },
+        });
+        assert.equal(res.ok, true);
+        const toolMessages = followupMessages.filter(m => m.role === 'tool');
+        assert.deepEqual(toolMessages.map(m => JSON.parse(m.content)), [
+            { ok: true, result: null },
+            { ok: true, result: '' },
+        ]);
     });
 });
 

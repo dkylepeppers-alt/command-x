@@ -2900,7 +2900,47 @@ unread count.
 
 ---
 
-## 2026-05-03 — v0.13.2 Nova/ST tooling and iPad modal release
+## 2026-05-03 — v0.13.3 Nova creator fallback, profile persistence, and popup layering
+
+### Why
+
+The audit log correctly recorded Nova's empty creator turn and forced retry, but
+the model still returned no tool call. The iPad modal fix made the main phone
+float, but Command-X popups still behaved like fullscreen sheets. The selected
+Nova Connection Profile could also be overwritten by stale duplicate settings
+inputs.
+
+### Change
+
+- Bumped Command-X `manifest.json`, `index.js` `VERSION`, and validation docs to
+  `0.13.3`.
+- Generalized empty creator retries for both `worldbook-creator` and
+  `character-creator`, mapping them to `st_write_worldbook` and
+  `st_write_character`.
+- Added a strict-JSON creator fallback: after an empty first response and an
+  empty forced-tool retry, Nova asks for write-tool arguments as JSON, validates
+  them, and feeds a synthetic tool call through the normal approval-gated
+  dispatcher.
+- Normalized null/blank tool results into non-empty JSON tool-message content so
+  follow-up provider calls never receive empty `role:"tool"` messages.
+- Removed the hardcoded Nova profile default and synced all duplicate Nova
+  settings inputs before saving so the in-phone profile picker cannot be
+  overwritten by stale settings-panel values.
+- Added a creator-skill warning when the selected Connection Profile uses
+  `promptPostProcessing=none`, since tools are more reliable with `semi_tools`
+  or `merge_tools`.
+- Changed Command-X popups from fullscreen overlays into topmost fixed floating
+  dialogs with touch/mouse title dragging on iPad.
+
+### Validation
+
+- `node --check index.js`
+- `node --test test/nova-ui-wiring.test.mjs test/nova-tool-dispatch.test.mjs test/nova-turn.test.mjs`
+- `node --test test/*.mjs` — 895/895 passing
+
+---
+
+## 2026-05-03 — v0.13.3 Nova/ST tooling and iPad modal release
 
 ### Why
 
@@ -2911,7 +2951,7 @@ needed to work on iPad Safari.
 
 ### Change
 
-- Bumped Command-X `manifest.json` and `index.js` `VERSION` to `0.13.2`; bumped
+- Bumped Command-X `manifest.json` and `index.js` `VERSION` to `0.13.3`; bumped
   `server-plugin/nova-agent-bridge/package.json` to `0.1.1`.
 - `st_list_worldbooks`, `st_read_worldbook`, and `st_write_worldbook` now use
   canonical worldbook `file_id` values from `/api/worldinfo/list`; reads reject

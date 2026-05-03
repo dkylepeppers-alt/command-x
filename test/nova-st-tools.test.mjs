@@ -546,6 +546,36 @@ function buildNovaStTools({
                 count: tail.length,
             };
         },
+        st_read_persona: async () => {
+            const ctx = getCtx();
+            if (!ctx) return { error: 'no-context' };
+            const powerUser = isObject(ctx.powerUserSettings) ? ctx.powerUserSettings
+                : (isObject(ctx.power_user) ? ctx.power_user
+                    : (isObject(ctx.powerUser) ? ctx.powerUser : {}));
+            const personas = isObject(powerUser.personas) ? powerUser.personas : {};
+            const activeName = typeof ctx.name1 === 'string' ? ctx.name1 : '';
+            const matchedAvatar = Object.entries(personas)
+                .find(([, personaName]) => String(personaName || '') === activeName)?.[0] || '';
+            const avatarId = typeof ctx.user_avatar === 'string' ? ctx.user_avatar
+                : (typeof ctx.userAvatar === 'string' ? ctx.userAvatar
+                    : (typeof powerUser.user_avatar === 'string' ? powerUser.user_avatar
+                        : (matchedAvatar || (typeof powerUser.default_persona === 'string' ? powerUser.default_persona : ''))));
+            const personaDescriptions = isObject(powerUser.persona_descriptions) ? powerUser.persona_descriptions : {};
+            const savedMeta = avatarId && isObject(personaDescriptions[avatarId]) ? personaDescriptions[avatarId] : {};
+            return {
+                name: activeName,
+                avatar: avatarId || null,
+                savedName: avatarId && typeof personas[avatarId] === 'string' ? personas[avatarId] : '',
+                description: typeof powerUser.persona_description === 'string' ? powerUser.persona_description : '',
+                savedDescription: typeof savedMeta.description === 'string' ? savedMeta.description : '',
+                title: typeof savedMeta.title === 'string' ? savedMeta.title : '',
+                position: powerUser.persona_description_position ?? savedMeta.position ?? null,
+                role: powerUser.persona_description_role ?? savedMeta.role ?? null,
+                depth: powerUser.persona_description_depth ?? savedMeta.depth ?? null,
+                lorebook: typeof powerUser.persona_description_lorebook === 'string' ? powerUser.persona_description_lorebook : '',
+                defaultPersona: typeof powerUser.default_persona === 'string' ? powerUser.default_persona : null,
+            };
+        },
         st_list_profiles: async () => {
             const exec = await getSlash();
             const fn = getListProfiles();
@@ -591,6 +621,17 @@ function buildNovaStTools({
 function makeCtx(over = {}) {
     return {
         name1: 'User',
+        user_avatar: 'user.png',
+        powerUserSettings: {
+            personas: { 'user.png': 'User' },
+            persona_descriptions: { 'user.png': { description: 'A careful adventurer.', title: 'The Player', position: 0, role: 0, depth: 2 } },
+            persona_description: 'Current prompt persona.',
+            persona_description_position: 0,
+            persona_description_role: 0,
+            persona_description_depth: 2,
+            persona_description_lorebook: 'User Lore',
+            default_persona: 'user.png',
+        },
         characterId: 0,
         groupId: null,
         chatId: 'chat-001',
@@ -618,12 +659,12 @@ function mockResponse(data, status = 200) {
 // -------- Tests --------
 
 describe('buildNovaStTools — handler shape', () => {
-    it('returns all 10 named handlers', () => {
+    it('returns all 11 named handlers', () => {
         const handlers = buildNovaStTools({});
         for (const n of [
             'st_list_characters', 'st_read_character', 'st_write_character',
             'st_list_worldbooks', 'st_read_worldbook', 'st_write_worldbook',
-            'st_run_slash', 'st_get_context',
+            'st_run_slash', 'st_get_context', 'st_read_persona',
             'st_list_profiles', 'st_get_profile',
         ]) {
             assert.equal(typeof handlers[n], 'function', `${n} should be a function`);
@@ -1241,6 +1282,25 @@ describe('st_get_context', () => {
     });
 });
 
+describe('st_read_persona', () => {
+    it('returns active persona metadata from ST context and power_user', async () => {
+        const handlers = buildNovaStTools({ ctxImpl: () => makeCtx() });
+        const r = await handlers.st_read_persona();
+        assert.equal(r.name, 'User');
+        assert.equal(r.avatar, 'user.png');
+        assert.equal(r.savedName, 'User');
+        assert.equal(r.description, 'Current prompt persona.');
+        assert.equal(r.savedDescription, 'A careful adventurer.');
+        assert.equal(r.title, 'The Player');
+        assert.equal(r.lorebook, 'User Lore');
+    });
+
+    it('returns no-context when ctx unavailable', async () => {
+        const r = await buildNovaStTools({}).st_read_persona();
+        assert.equal(r.error, 'no-context');
+    });
+});
+
 describe('st_list_profiles', () => {
     it('forwards to listProfilesImpl and unwraps the success shape', async () => {
         const fn = async ({ executeSlash }) => {
@@ -1318,7 +1378,8 @@ describe('DI / lazy resolution', () => {
         const handlers = buildNovaStTools({ ctxImpl: () => { count++; return makeCtx(); } });
         await handlers.st_list_characters();
         await handlers.st_get_context();
-        assert.equal(count, 2);
+        await handlers.st_read_persona();
+        assert.equal(count, 3);
     });
 
     it('ctxImpl as a static object is reused', async () => {
